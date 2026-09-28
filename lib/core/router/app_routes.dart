@@ -3,6 +3,9 @@ abstract final class AppRoutes {
   /// ライブラリ（ホーム）。
   static const library = '/';
 
+  /// 起動直後のトークン検証中に表示する画面。
+  static const splash = '/splash';
+
   /// ログイン。
   static const login = '/login';
 
@@ -21,6 +24,9 @@ abstract final class AppRoutes {
   /// パスパラメータ名。
   static const bookIdParam = 'bookId';
   static const volumeIdParam = 'volumeId';
+
+  /// ログイン後に戻る先を引き継ぐクエリパラメータ名。
+  static const fromQueryParam = 'from';
 
   /// タイトル詳細の URL。
   static String bookDetail(int bookId) => '/book/$bookId';

@@ -3,7 +3,10 @@ import 'package:flutter/widgets.dart';
 import 'package:go_router/go_router.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
+import '../../features/auth/application/auth_controller.dart';
+import '../../features/auth/domain/auth_state.dart';
 import '../../features/auth/presentation/login_screen.dart';
+import '../../features/auth/presentation/splash_screen.dart';
 import '../../features/history/presentation/history_screen.dart';
 import '../../features/library/presentation/library_screen.dart';
 import '../../features/mypage/presentation/my_page_screen.dart';
@@ -48,6 +51,10 @@ List<RouteBase> buildRoutes() => [
     ],
   ),
   GoRoute(
+    path: AppRoutes.splash,
+    builder: (context, state) => const SplashScreen(),
+  ),
+  GoRoute(
     path: AppRoutes.login,
     builder: (context, state) => const LoginScreen(),
   ),
@@ -84,6 +91,54 @@ Widget _withIntParam(
   return builder(value);
 }
 
+/// 認証状態に応じた遷移先。遷移が不要なら `null`。
+@visibleForTesting
+String? redirectForAuthState(AuthState authState, GoRouterState state) {
+  final location = state.matchedLocation;
+
+  return switch (authState) {
+    AuthRestoring() =>
+      location == AppRoutes.splash ? null : _withFrom(AppRoutes.splash, state),
+    AuthUnauthenticated() =>
+      location == AppRoutes.login ? null : _withFrom(AppRoutes.login, state),
+    AuthAuthenticated() =>
+      location == AppRoutes.login || location == AppRoutes.splash
+          ? _pendingTarget(state) ?? AppRoutes.library
+          : null,
+  };
+}
+
+/// 認証前に開こうとしていた URL を `from` として引き継ぐ。
+///
+/// 冷起動は必ず `/splash` を経由するので、`/splash?from=...` から
+/// `/login?from=...` へ **from を引き継ぐ**ことが重要（ディープリンクが失われる）。
+String _withFrom(String destination, GoRouterState state) {
+  final target = _pendingTarget(state) ?? _sanitizeTarget(state.uri.toString());
+  if (target == null) return destination;
+  return Uri(
+    path: destination,
+    queryParameters: {AppRoutes.fromQueryParam: target},
+  ).toString();
+}
+
+/// 現在の URL が持っている `from`（引き継ぎ中のディープリンク）。
+String? _pendingTarget(GoRouterState state) =>
+    _sanitizeTarget(state.uri.queryParameters[AppRoutes.fromQueryParam]);
+
+/// ログイン後に戻る先として妥当なら返す。妥当でなければ `null`。
+String? _sanitizeTarget(String? target) {
+  if (target == null || !target.startsWith('/')) return null;
+  // `//example.com` のようなスキーム省略の外部 URL を弾く。
+  if (target.startsWith('//')) return null;
+  // 戻っても意味が無い URL。
+  if (target == AppRoutes.library ||
+      target.startsWith(AppRoutes.login) ||
+      target.startsWith(AppRoutes.splash)) {
+    return null;
+  }
+  return target;
+}
+
 /// アプリの [GoRouter]。
 @Riverpod(keepAlive: true)
 GoRouter router(Ref ref) {
@@ -91,9 +146,13 @@ GoRouter router(Ref ref) {
     initialLocation: AppRoutes.library,
     debugLogDiagnostics: kDebugMode,
     routes: buildRoutes(),
+    redirect: (context, state) =>
+        redirectForAuthState(ref.read(authControllerProvider), state),
     errorBuilder: (context, state) =>
         NotFoundScreen(location: state.uri.toString()),
   );
+  // 認証状態が変わったら redirect を再評価させる。
+  ref.listen(authControllerProvider, (_, _) => router.refresh());
   ref.onDispose(router.dispose);
   return router;
 }

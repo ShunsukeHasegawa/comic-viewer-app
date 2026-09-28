@@ -45,14 +45,15 @@ flutter test
 
 ## アーキテクチャ
 
-| 領域             | 採用                                          |
-| ---------------- | --------------------------------------------- |
-| 状態管理 / DI    | `flutter_riverpod` + `riverpod_generator`     |
-| ルーティング     | `go_router`                                   |
-| HTTP             | `dio`                                         |
-| モデル           | `freezed` + `json_serializable`               |
-| ローカル DB      | `drift`（#9 以降のオフライン機能で導入）      |
-| セキュアストレージ | `flutter_secure_storage`（#3 で導入）       |
+| 領域               | 採用                                      |
+| ------------------ | ----------------------------------------- |
+| 状態管理 / DI      | `flutter_riverpod` + `riverpod_generator` |
+| ルーティング       | `go_router`                               |
+| HTTP               | `dio`                                     |
+| モデル             | `freezed` + `json_serializable`           |
+| ローカル DB        | `drift`（#9 以降のオフライン機能で導入）  |
+| セキュアストレージ | `flutter_secure_storage`                  |
+| 端末情報           | `device_info_plus`（`device_name` 用）    |
 
 ```
 lib/
@@ -87,6 +88,33 @@ Web 版の URL 体系に合わせる（`lib/core/router/app_routes.dart`）。
 
 `/`, `/history`, `/mypage` はボトムナビのタブ（`StatefulShellRoute` で各タブの状態を保持）。
 ID が数値でない場合や未知の URL は 404 画面にフォールバックする。
+
+### 認証
+
+Web 版は Sanctum の SPA Cookie 認証だが、アプリでは **Bearer トークン**を使う
+（画像・アーカイブ取得でも Cookie / CSRF を持ち回らずに済むため）。
+
+| 用途 | エンドポイント |
+| --- | --- |
+| トークン発行 | `POST /api/auth/token`（`email` / `password` / `device_name`） |
+| トークン検証（起動時） | `GET /api/user` |
+| トークン破棄 | `DELETE /api/auth/token` |
+
+サーバー側は comic-viewer#6。応答は `{"token": "...", "user": {...}}` を想定し、
+`user` を返さない実装でも `GET /api/user` で補う。
+
+- トークンは `flutter_secure_storage` に保存（iOS は `first_unlock_this_device` = iCloud キーチェーンへ同期しない）
+- `AuthInterceptor` が `Authorization: Bearer` を付ける（画像・アーカイブも同じ経路）。
+  付与と 401 の扱いは **API と同じオリジン**に限る（CDN / 署名付き URL へトークンを送らない）
+- **401 のみ**セッション失効として扱い、トークンを破棄して端末内データを消す。
+  403 は「認証済みだが権限が無い」（セーフモードなど）なのでログアウトはさせない
+- ログアウト / 失効時の端末内データ破棄は `SessionDataPurger` として登録する
+  （画像キャッシュ #8 / ダウンロード #9 / 進捗 #12 がそれぞれ実装を足す。詳細は #15）
+- 圏外起動で検証できないときはトークンを保持し、保存済みユーザーでオフライン継続する（#11）
+- `safe_mode` はサーバー側が正。クライアントは表示のヒントとしてしか使わない
+
+認証状態に応じてルータが遷移する: 検証中は `/splash`、未ログインは
+`/login?from=<開こうとした URL>`、ログイン後は `from` の画面へ戻る。
 
 ### ブランド
 

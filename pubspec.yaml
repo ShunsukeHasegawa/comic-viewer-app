@@ -11,12 +11,14 @@ environment:
 dependencies:
   cupertino_icons: ^1.0.8
   # HTTP クライアント（Bearer 付与・ETag・リトライのインターセプタを載せる）
+  device_info_plus: ^13.2.0
   dio: ^5.11.1
   flutter:
     sdk: flutter
   # 状態管理 / DI
   flutter_riverpod: ^3.4.3
   # モデル（イミュータブルなデータクラス）
+  flutter_secure_storage: ^11.2.0
   freezed_annotation: ^3.1.0
   # ルーティング（Web 版の URL 体系に合わせる）
   go_router: ^18.0.1
@@ -30,6 +32,7 @@ dev_dependencies:
     sdk: flutter
   freezed: ^4.0.2
   json_serializable: ^6.14.1
+  mocktail: ^1.0.5
   riverpod_generator: ^4.0.9
 
 flutter:

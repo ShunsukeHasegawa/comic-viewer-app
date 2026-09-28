@@ -1,23 +1,33 @@
 import 'package:comic_laz/app.dart';
-import 'package:comic_laz/core/config/app_config.dart';
+import 'package:comic_laz/features/auth/presentation/login_screen.dart';
 import 'package:comic_laz/features/library/presentation/library_screen.dart';
 import 'package:comic_laz/main.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'support/auth_fakes.dart';
+import 'support/test_scope.dart';
+
 void main() {
-  testWidgets('起動するとライブラリ画面が表示される', (tester) async {
+  testWidgets('未ログインで起動するとログイン画面が表示される', (tester) async {
     await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          appConfigProvider.overrideWithValue(
-            AppConfig.from(
-              apiBaseUrl: 'http://localhost:8000',
-              flavor: 'development',
-            ),
-          ),
-        ],
-        child: const ComicLazApp(),
+      wrapWithScope(
+        const ComicLazApp(),
+        overrides: testOverrides(authApi: MockAuthApi()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(LoginScreen), findsOneWidget);
+  });
+
+  testWidgets('保存済みトークンがあればライブラリ画面が表示される', (tester) async {
+    await tester.pumpWidget(
+      wrapWithScope(
+        const ComicLazApp(),
+        overrides: testOverrides(
+          authStore: FakeAuthStore(token: 'valid'),
+          authApi: MockAuthApi()..stubCurrentUser(),
+        ),
       ),
     );
     await tester.pumpAndSettle();

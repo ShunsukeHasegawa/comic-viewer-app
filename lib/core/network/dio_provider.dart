@@ -1,7 +1,10 @@
 import 'package:dio/dio.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
+import '../../features/auth/application/auth_controller.dart';
+import '../../features/auth/data/auth_store.dart';
 import '../config/app_config.dart';
+import 'auth_interceptor.dart';
 
 part 'dio_provider.g.dart';
 
@@ -10,7 +13,7 @@ const apiTimeout = Duration(seconds: 8);
 
 /// JSON API を叩くリクエストに付けるヘッダ。
 ///
-/// 画像 / アーカイブ取得も同じ [Dio] を通す（#3 の Bearer 付与を共有するため）ので、
+/// 画像 / アーカイブ取得も同じ [Dio] を通す（Bearer 付与を共有するため）ので、
 /// `Accept: application/json` は [BaseOptions] ではなくリクエスト単位で付ける。
 /// 画像リクエストに JSON だけを advertise すると、コンテントネゴシエーションする
 /// サーバーから 406 が返りうる。
@@ -20,8 +23,7 @@ const jsonAcceptHeaders = <String, String>{
 
 /// アプリ共通の [Dio]。
 ///
-/// 認証ヘッダの付与（#3）・ETag 条件付き GET やリトライ（#4）は
-/// それぞれの Issue でインターセプタとして足す。
+/// ETag 条件付き GET やリトライ（#4）は追加のインターセプタで足す。
 @Riverpod(keepAlive: true)
 Dio dio(Ref ref) {
   final config = ref.watch(appConfigProvider);
@@ -33,6 +35,15 @@ Dio dio(Ref ref) {
       connectTimeout: apiTimeout,
       receiveTimeout: apiTimeout,
       sendTimeout: apiTimeout,
+    ),
+  );
+  dio.interceptors.add(
+    AuthInterceptor(
+      authStore: ref.read(authStoreProvider),
+      apiBaseUrl: config.apiBaseUrl,
+      // 401 の時点で解決する（ここで読むと循環依存になる）。
+      onUnauthorized: () =>
+          ref.read(authControllerProvider.notifier).handleSessionExpired(),
     ),
   );
   ref.onDispose(() => dio.close());

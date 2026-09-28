@@ -14,6 +14,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../support/auth_fakes.dart';
+import '../../support/test_scope.dart';
+
 /// 指定 URL でルータを起動する。
 Future<GoRouter> pumpRouterAt(WidgetTester tester, String location) async {
   final router = GoRouter(
@@ -24,7 +27,12 @@ Future<GoRouter> pumpRouterAt(WidgetTester tester, String location) async {
   );
   addTearDown(router.dispose);
 
-  await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+  await tester.pumpWidget(
+    wrapWithScope(
+      MaterialApp.router(routerConfig: router),
+      overrides: testOverrides(authApi: MockAuthApi()),
+    ),
+  );
   await tester.pumpAndSettle();
   return router;
 }
@@ -90,19 +98,20 @@ void main() {
   });
 
   testWidgets('全画面ページを直接開いても行き止まりにならない', (tester) async {
-    for (final location in [
-      AppRoutes.viewer(34),
-      AppRoutes.bookDetail(12),
-      AppRoutes.login,
-    ]) {
+    // ログイン画面は認証状態による redirect で管理するため対象外。
+    for (final location in [AppRoutes.viewer(34), AppRoutes.bookDetail(12)]) {
       await pumpRouterAt(tester, location);
 
       final backButton = find.byType(AppBackButton);
-      expect(backButton, findsOneWidget, reason: ' に脱出口が無い');
+      expect(backButton, findsOneWidget, reason: '$location に脱出口が無い');
 
       await tester.tap(backButton);
       await tester.pumpAndSettle();
-      expect(find.byType(LibraryScreen), findsOneWidget, reason: ' から戻れない');
+      expect(
+        find.byType(LibraryScreen),
+        findsOneWidget,
+        reason: '$location から戻れない',
+      );
     }
   });
 
@@ -134,13 +143,21 @@ void main() {
   });
 
   testWidgets('routerProvider はライブラリを初期表示にする', (tester) async {
-    final container = ProviderContainer();
+    final container = createContainer(
+      authStore: FakeAuthStore(token: 'valid', user: testUser),
+      authApi: MockAuthApi()..stubCurrentUser(),
+    );
     addTearDown(container.dispose);
 
     final router = container.read(routerProvider);
 
     expect(router.configuration.routes, isNotEmpty);
-    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp.router(routerConfig: router),
+      ),
+    );
     await tester.pumpAndSettle();
     expect(find.byType(LibraryScreen), findsOneWidget);
   });

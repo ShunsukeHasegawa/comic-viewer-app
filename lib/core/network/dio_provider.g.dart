@@ -10,23 +10,20 @@ part of 'dio_provider.dart';
 // ignore_for_file: type=lint, type=warning
 /// アプリ共通の [Dio]。
 ///
-/// 認証ヘッダの付与（#3）・ETag 条件付き GET やリトライ（#4）は
-/// それぞれの Issue でインターセプタとして足す。
+/// ETag 条件付き GET やリトライ（#4）は追加のインターセプタで足す。
 
 @ProviderFor(dio)
 final dioProvider = DioProvider._();
 
 /// アプリ共通の [Dio]。
 ///
-/// 認証ヘッダの付与（#3）・ETag 条件付き GET やリトライ（#4）は
-/// それぞれの Issue でインターセプタとして足す。
+/// ETag 条件付き GET やリトライ（#4）は追加のインターセプタで足す。
 
 final class DioProvider extends $FunctionalProvider<Dio, Dio, Dio>
     with $Provider<Dio> {
   /// アプリ共通の [Dio]。
   ///
-  /// 認証ヘッダの付与（#3）・ETag 条件付き GET やリトライ（#4）は
-  /// それぞれの Issue でインターセプタとして足す。
+  /// ETag 条件付き GET やリトライ（#4）は追加のインターセプタで足す。
   DioProvider._()
     : super(
         from: null,
@@ -60,4 +57,4 @@ final class DioProvider extends $FunctionalProvider<Dio, Dio, Dio>
   }
 }
 
-String _$dioHash() => r'c6cb622abf571a30d3d2c47a3820fef01e112d38';
+String _$dioHash() => r'9498c97c78bc9d5732338ec61758fb9d6572c2ed';
