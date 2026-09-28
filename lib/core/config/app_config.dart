@@ -84,6 +84,31 @@ class AppConfig {
     );
   }
 
+  /// API が返した**相対 URL**（サムネイルなど。`?m=updated_at` 付き）を絶対 URL にする。
+  ///
+  /// 既に絶対 URL の場合はそのまま返す。ベース URL がサブパスを持つ場合は保つ。
+  Uri resolveRelative(String url) {
+    final parsed = Uri.parse(url);
+    if (parsed.hasScheme) return parsed;
+    // `//cdn.example.com/x.jpg`（スキーム省略）はホストを持つ別の配信元。
+    // パスとして連結すると API ホストへ向けてしまう。
+    if (parsed.hasAuthority) return parsed.replace(scheme: apiBaseUrl.scheme);
+
+    // パーセントエンコードを壊さないよう、デコード済みの `Uri.path` ではなく
+    // 元の文字列から組み立てる（`%2F` が `/` になると別のパスになる）。
+    final withoutFragment = url.split('#').first;
+    final queryIndex = withoutFragment.indexOf('?');
+    final rawPath = queryIndex < 0
+        ? withoutFragment
+        : withoutFragment.substring(0, queryIndex);
+    final rawQuery = queryIndex < 0
+        ? ''
+        : withoutFragment.substring(queryIndex);
+    final path = rawPath.startsWith('/') ? rawPath : '/$rawPath';
+
+    return Uri.parse('$apiBaseUrlString$path$rawQuery');
+  }
+
   static Uri _normalizeBaseUrl(String raw) {
     final trimmed = raw.trim();
     if (trimmed.isEmpty) {

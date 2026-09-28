@@ -1,5 +1,6 @@
 import 'package:comic_laz/core/network/api_exception.dart';
 import 'package:comic_laz/core/network/auth_interceptor.dart';
+import 'package:comic_laz/data/api/api_client.dart';
 import 'package:comic_laz/features/auth/data/auth_api.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -12,7 +13,7 @@ import '../../support/fake_http_adapter.dart';
   final dio = Dio(BaseOptions(baseUrl: 'https://comic.lazgram.com/'));
   final adapter = FakeHttpAdapter(handler);
   dio.httpClientAdapter = adapter;
-  return (api: AuthApi(dio), adapter: adapter);
+  return (api: AuthApi(ApiClient(dio)), adapter: adapter);
 }
 
 void main() {

@@ -5,6 +5,7 @@ import '../../features/auth/application/auth_controller.dart';
 import '../../features/auth/data/auth_store.dart';
 import '../config/app_config.dart';
 import 'auth_interceptor.dart';
+import 'retry_interceptor.dart';
 
 part 'dio_provider.g.dart';
 
@@ -46,6 +47,8 @@ Dio dio(Ref ref) {
           ref.read(authControllerProvider.notifier).handleSessionExpired(),
     ),
   );
+  // 一時的な通信エラーの 1 回だけの再送（GET / HEAD のみ）。
+  dio.interceptors.add(RetryInterceptor(dio));
   ref.onDispose(() => dio.close());
   return dio;
 }

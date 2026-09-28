@@ -1,6 +1,6 @@
 // GENERATED CODE - DO NOT MODIFY BY HAND
 
-part of 'auth_api.dart';
+part of 'taxonomy_api.dart';
 
 // **************************************************************************
 // RiverpodGenerator
@@ -9,43 +9,43 @@ part of 'auth_api.dart';
 // GENERATED CODE - DO NOT MODIFY BY HAND
 // ignore_for_file: type=lint, type=warning
 
-@ProviderFor(authApi)
-final authApiProvider = AuthApiProvider._();
+@ProviderFor(taxonomyApi)
+final taxonomyApiProvider = TaxonomyApiProvider._();
 
-final class AuthApiProvider
-    extends $FunctionalProvider<AuthApi, AuthApi, AuthApi>
-    with $Provider<AuthApi> {
-  AuthApiProvider._()
+final class TaxonomyApiProvider
+    extends $FunctionalProvider<TaxonomyApi, TaxonomyApi, TaxonomyApi>
+    with $Provider<TaxonomyApi> {
+  TaxonomyApiProvider._()
     : super(
         from: null,
         argument: null,
         retry: null,
-        name: r'authApiProvider',
+        name: r'taxonomyApiProvider',
         isAutoDispose: false,
         dependencies: null,
         $allTransitiveDependencies: null,
       );
 
   @override
-  String debugGetCreateSourceHash() => _$authApiHash();
+  String debugGetCreateSourceHash() => _$taxonomyApiHash();
 
   @$internal
   @override
-  $ProviderElement<AuthApi> $createElement($ProviderPointer pointer) =>
+  $ProviderElement<TaxonomyApi> $createElement($ProviderPointer pointer) =>
       $ProviderElement(pointer);
 
   @override
-  AuthApi create(Ref ref) {
-    return authApi(ref);
+  TaxonomyApi create(Ref ref) {
+    return taxonomyApi(ref);
   }
 
   /// {@macro riverpod.override_with_value}
-  Override overrideWithValue(AuthApi value) {
+  Override overrideWithValue(TaxonomyApi value) {
     return $ProviderOverride(
       origin: this,
-      providerOverride: $SyncValueProvider<AuthApi>(value),
+      providerOverride: $SyncValueProvider<TaxonomyApi>(value),
     );
   }
 }
 
-String _$authApiHash() => r'6728b4dea83518c83a38007056106c5d040a7568';
+String _$taxonomyApiHash() => r'87de0b6a0da4e67bbd4dee3ba7d58df56ba9fbe2';

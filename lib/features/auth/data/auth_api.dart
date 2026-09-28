@@ -1,9 +1,7 @@
-import 'package:dio/dio.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../../../core/network/api_exception.dart';
-import '../../../core/network/auth_interceptor.dart';
-import '../../../core/network/dio_provider.dart';
+import '../../../data/api/api_client.dart';
 import '../../../domain/models/user.dart';
 
 part 'auth_api.g.dart';
@@ -20,42 +18,47 @@ class AuthTokenResult {
 
 /// 認証エンドポイント（サーバー側: comic-viewer#6）。
 class AuthApi {
-  AuthApi(this._dio);
+  const AuthApi(this._client);
 
-  final Dio _dio;
+  static const tokenPath = 'api/auth/token';
+  static const userPath = 'api/user';
+
+  final ApiClient _client;
 
   /// `POST /api/auth/token`。
+  ///
+  /// 応答は `{token, user, expires_at}`（201）。`expires_at` は現状使わない
+  /// （失効は 401 を受けてから扱う）。
   Future<AuthTokenResult> createToken({
     required String email,
     required String password,
     required String deviceName,
   }) async {
-    final Response<Map<String, dynamic>> response;
+    final Map<String, dynamic> json;
     try {
-      response = await _dio.post<Map<String, dynamic>>(
-        'api/auth/token',
+      final response = await _client.send(
+        tokenPath,
+        method: 'POST',
         data: {'email': email, 'password': password, 'device_name': deviceName},
-        options: Options(
-          headers: jsonAcceptHeaders,
-          // 失効したトークンを付けたまま再ログインできるようにする。
-          extra: const {skipAuthExtraKey: true},
-        ),
+        // 失効したトークンを付けたまま再ログインできるようにする。
+        skipAuth: true,
       );
-    } on DioException catch (error) {
-      final mapped = ApiException.from(error);
-      // ログイン時の 401 / 422 は「セッション失効」ではなく「認証情報が違う」。
-      if (mapped is UnauthorizedException || mapped is ValidationException) {
-        throw const InvalidCredentialsException();
-      }
-      throw mapped;
+      json = ApiClient.asObject(response.data, tokenPath);
+    } on UnauthorizedException {
+      // ログイン時の 401 は「セッション失効」ではなく「認証情報が違う」。
+      throw const InvalidCredentialsException();
+    } on ValidationException {
+      throw const InvalidCredentialsException();
     }
 
-    final data = response.data;
-    final token = data?['token'];
+    final token = json['token'];
     if (token is! String || token.isEmpty) {
-      throw const UnexpectedResponseException('サーバーからトークンを取得できませんでした。');
+      throw const UnexpectedResponseException(
+        message: 'ログインに失敗しました。もう一度お試しください。',
+        detail: 'api/auth/token: token が無い応答',
+      );
     }
-    final userJson = data?['user'];
+    final userJson = json['user'];
     return AuthTokenResult(
       token: token,
       user: userJson is Map<String, dynamic> ? _parseUser(userJson) : null,
@@ -64,43 +67,18 @@ class AuthApi {
 
   /// `GET /api/user`。保存済みトークンの検証にも使う。
   Future<User> fetchCurrentUser() async {
-    final Response<Map<String, dynamic>> response;
-    try {
-      response = await _dio.get<Map<String, dynamic>>(
-        'api/user',
-        options: Options(headers: jsonAcceptHeaders),
-      );
-    } on DioException catch (error) {
-      throw ApiException.from(error);
-    }
-
-    final data = response.data;
-    if (data == null) {
-      throw const UnexpectedResponseException('ユーザー情報を取得できませんでした。');
-    }
-    return _parseUser(data);
+    final json = await _client.getObject(userPath);
+    return _parseUser(json);
   }
 
   /// `DELETE /api/auth/token`。
   Future<void> deleteToken() async {
-    try {
-      await _dio.delete<void>(
-        'api/auth/token',
-        options: Options(headers: jsonAcceptHeaders),
-      );
-    } on DioException catch (error) {
-      throw ApiException.from(error);
-    }
+    await _client.send(tokenPath, method: 'DELETE');
   }
 
-  static User _parseUser(Map<String, dynamic> json) {
-    try {
-      return User.fromJson(json);
-    } on Object catch (error) {
-      throw UnexpectedResponseException('ユーザー情報を解釈できませんでした: $error');
-    }
-  }
+  static User _parseUser(Map<String, dynamic> json) =>
+      ApiClient.parse(json, User.fromJson, path: userPath);
 }
 
 @Riverpod(keepAlive: true)
-AuthApi authApi(Ref ref) => AuthApi(ref.watch(dioProvider));
+AuthApi authApi(Ref ref) => AuthApi(ref.watch(apiClientProvider));

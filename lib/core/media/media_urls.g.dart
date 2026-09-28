@@ -1,6 +1,6 @@
 // GENERATED CODE - DO NOT MODIFY BY HAND
 
-part of 'auth_api.dart';
+part of 'media_urls.dart';
 
 // **************************************************************************
 // RiverpodGenerator
@@ -9,43 +9,43 @@ part of 'auth_api.dart';
 // GENERATED CODE - DO NOT MODIFY BY HAND
 // ignore_for_file: type=lint, type=warning
 
-@ProviderFor(authApi)
-final authApiProvider = AuthApiProvider._();
+@ProviderFor(mediaUrls)
+final mediaUrlsProvider = MediaUrlsProvider._();
 
-final class AuthApiProvider
-    extends $FunctionalProvider<AuthApi, AuthApi, AuthApi>
-    with $Provider<AuthApi> {
-  AuthApiProvider._()
+final class MediaUrlsProvider
+    extends $FunctionalProvider<MediaUrls, MediaUrls, MediaUrls>
+    with $Provider<MediaUrls> {
+  MediaUrlsProvider._()
     : super(
         from: null,
         argument: null,
         retry: null,
-        name: r'authApiProvider',
+        name: r'mediaUrlsProvider',
         isAutoDispose: false,
         dependencies: null,
         $allTransitiveDependencies: null,
       );
 
   @override
-  String debugGetCreateSourceHash() => _$authApiHash();
+  String debugGetCreateSourceHash() => _$mediaUrlsHash();
 
   @$internal
   @override
-  $ProviderElement<AuthApi> $createElement($ProviderPointer pointer) =>
+  $ProviderElement<MediaUrls> $createElement($ProviderPointer pointer) =>
       $ProviderElement(pointer);
 
   @override
-  AuthApi create(Ref ref) {
-    return authApi(ref);
+  MediaUrls create(Ref ref) {
+    return mediaUrls(ref);
   }
 
   /// {@macro riverpod.override_with_value}
-  Override overrideWithValue(AuthApi value) {
+  Override overrideWithValue(MediaUrls value) {
     return $ProviderOverride(
       origin: this,
-      providerOverride: $SyncValueProvider<AuthApi>(value),
+      providerOverride: $SyncValueProvider<MediaUrls>(value),
     );
   }
 }
 
-String _$authApiHash() => r'6728b4dea83518c83a38007056106c5d040a7568';
+String _$mediaUrlsHash() => r'b958cdddb39c83c277eb8cd52c346dcfa7cdff41';

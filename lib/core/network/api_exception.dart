@@ -14,7 +14,7 @@ sealed class ApiException implements Exception {
   factory ApiException.from(Object error) {
     if (error is ApiException) return error;
     if (error is! DioException) {
-      return UnexpectedResponseException('予期しないエラーが発生しました: $error');
+      return UnexpectedResponseException(detail: '$error');
     }
 
     switch (error.type) {
@@ -33,9 +33,7 @@ sealed class ApiException implements Exception {
         return _fromStatusCode(error.response?.statusCode, error.response);
       case DioExceptionType.unknown:
         if (error.error is SocketException) return const NetworkException();
-        return UnexpectedResponseException(
-          '予期しないエラーが発生しました: ${error.message ?? error}',
-        );
+        return UnexpectedResponseException(detail: '${error.message ?? error}');
     }
   }
 
@@ -51,10 +49,10 @@ sealed class ApiException implements Exception {
       429 => TooManyRequestsException(retryAfter: _retryAfter(response)),
       final int code when code >= 500 => ServerException(statusCode: code),
       final int code => UnexpectedResponseException(
-        'サーバーが予期しない応答を返しました（HTTP $code）。',
+        detail: 'HTTP $code',
         statusCode: code,
       ),
-      null => const UnexpectedResponseException('サーバーが予期しない応答を返しました。'),
+      null => const UnexpectedResponseException(),
     };
   }
 
@@ -141,10 +139,24 @@ final class RequestCancelledException extends ApiException {
 }
 
 /// 想定外の応答 / パース失敗。
+///
+/// [message] はそのまま画面に出せる文言にとどめ、原因（エンドポイントやパーサの
+/// 詳細）は [detail] に入れる。ユーザーに内部事情を見せないため。
 final class UnexpectedResponseException extends ApiException {
-  const UnexpectedResponseException(super.message, {this.statusCode});
+  const UnexpectedResponseException({
+    String message = 'サーバーから予期しない応答が返りました。',
+    this.detail,
+    this.statusCode,
+  }) : super(message);
+
+  /// ログ / デバッグ用の詳細（エンドポイントやパースエラーの内容）。
+  final String? detail;
 
   final int? statusCode;
+
+  @override
+  String toString() =>
+      'UnexpectedResponseException: $message${detail == null ? '' : ' ($detail)'}';
 }
 
 /// 422。入力値の検証エラー（Laravel の `errors`）。
