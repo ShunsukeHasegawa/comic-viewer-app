@@ -12,17 +12,23 @@ class AppBackButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final router = GoRouter.of(context);
-    final canPop = router.canPop();
+    // go_router の外（単体テストやダイアログ内）でも動くようにする。
+    final router = GoRouter.maybeOf(context);
+    final canPop = router?.canPop() ?? Navigator.of(context).canPop();
+
     return IconButton(
       icon: Icon(canPop ? Icons.arrow_back : Icons.home_outlined),
       tooltip: canPop ? '戻る' : 'ライブラリへ',
       onPressed: () {
         if (canPop) {
-          router.pop();
-        } else {
-          router.go(AppRoutes.library);
+          if (router != null) {
+            router.pop();
+          } else {
+            Navigator.of(context).pop();
+          }
+          return;
         }
+        router?.go(AppRoutes.library);
       },
     );
   }

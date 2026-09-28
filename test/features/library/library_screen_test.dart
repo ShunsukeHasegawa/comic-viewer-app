@@ -247,11 +247,15 @@ void main() {
 
   testWidgets('更新に失敗したら（エラー表示に切り替わらない場合）知らせる', (tester) async {
     final api = FakeBooksApi(books: sampleBooks, etag: '"v1"');
-    final container = await pumpLibrary(tester, booksApi: api);
+    await pumpLibrary(tester, booksApi: api);
 
     // キャッシュで代替できない種類のエラー（黙って古い一覧を見せない）
     api.error = const UnexpectedResponseException();
-    await container.read(libraryControllerProvider.notifier).refresh();
+    await tester.fling(
+      find.byType(CustomScrollView),
+      const Offset(0, 400),
+      1000,
+    );
     await tester.pumpAndSettle();
 
     expect(find.byType(SnackBar), findsOneWidget);
@@ -290,6 +294,29 @@ void main() {
       reason: 'チップが消えると絞り込みを解除できなくなる',
     );
     expect(find.text('続きを読む'), findsOneWidget);
+  });
+
+  testWidgets('お気に入りの変更はオフライン用キャッシュにも反映する', (tester) async {
+    final api = FakeBooksApi(
+      books: sampleBooks,
+      userStatus: const UserStatus(favorites: []),
+      etag: '"v1"',
+    );
+    final container = await pumpLibrary(tester, booksApi: api);
+
+    container
+        .read(libraryControllerProvider.notifier)
+        .setFavorite(bookId: 1, isFavorite: true);
+
+    // 圏外で開き直してもお気に入りが残る
+    api.error = const NetworkException();
+    await container.read(libraryControllerProvider.notifier).refresh();
+    await tester.pumpAndSettle();
+
+    expect(
+      container.read(libraryControllerProvider).value?.favoriteIds,
+      contains(1),
+    );
   });
 
   testWidgets('完結していない作品は「全 N 巻」と表示しない', (tester) async {

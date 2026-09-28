@@ -86,6 +86,28 @@ class LibraryRepository {
   final BooksApi api;
   final LibraryCacheStore cache;
 
+  /// お気に入りの変更をキャッシュにも反映する。
+  ///
+  /// オフライン起動時はこのキャッシュの `userStatus` を使うので、ここを
+  /// 更新しないと「お気に入りにしたはずなのに消えている」ことになる。
+  void updateCachedFavorite({required int bookId, required bool isFavorite}) {
+    final snapshot = cache.read();
+    final status = snapshot?.userStatus;
+    if (snapshot == null || status == null) return;
+
+    final favorites = status.favorites.toSet();
+    if (isFavorite) {
+      favorites.add(bookId);
+    } else {
+      favorites.remove(bookId);
+    }
+    cache.write(
+      snapshot.copyWith(
+        userStatus: status.copyWith(favorites: favorites.toList()),
+      ),
+    );
+  }
+
   /// 一覧とユーザー状態を取得する。
   ///
   /// [forceRefresh] が `true` のときは `If-None-Match` を送らず必ず取り直す

@@ -100,3 +100,17 @@ class EmptyView extends StatelessWidget {
     );
   }
 }
+
+/// 表示中の内容を残したまま再取得が失敗したことを知らせる。
+///
+/// エラー表示に切り替わらない（＝古い内容が見えたまま）ケースで、
+/// 「更新できた」と誤解させないために使う。
+void showRefreshFailure(
+  BuildContext context,
+  Object error, {
+  required String what,
+}) {
+  ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+    SnackBar(content: Text('$what を更新できませんでした: ${apiErrorMessage(error)}')),
+  );
+}

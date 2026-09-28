@@ -38,12 +38,8 @@ class AuthController extends _$AuthController {
   /// 古い処理が新しい状態を上書きしないようにする。
   int _generation = 0;
 
-  /// dispose 後に [state] や `ref` を触らないためのフラグ。
-  bool _disposed = false;
-
   @override
   AuthState build() {
-    ref.onDispose(() => _disposed = true);
     // 保存済みトークンの検証は非同期で進める。
     unawaited(restoreSession());
     return const AuthState.restoring();
@@ -131,7 +127,7 @@ class AuthController extends _$AuthController {
       // 圏外でもログアウトはできるようにする（トークンはサーバー側に残る）。
       // 401（サーバー側で既に失効）でもインターセプタ経由の破棄に合流するだけ。
     }
-    if (_disposed) return;
+    if (!ref.mounted) return;
     await _endSessionOnce(SessionEndReason.signedOut);
   }
 
@@ -141,7 +137,7 @@ class AuthController extends _$AuthController {
 
   /// 破棄処理を 1 回だけ走らせる。
   Future<void> _endSessionOnce(SessionEndReason reason) {
-    if (_disposed) return Future.value();
+    if (!ref.mounted) return Future.value();
 
     if (_endSessionTask case final pending?) {
       // 進行中の破棄に相乗りする。明示ログアウトなら理由を上書きする。
@@ -175,9 +171,9 @@ class AuthController extends _$AuthController {
     } on Object {
       // ストレージが壊れていても、メモリ上のトークンは破棄済みなので続行する。
     }
-    if (_disposed) return;
+    if (!ref.mounted) return;
     await _purgeLocalData();
-    if (_disposed) return;
+    if (!ref.mounted) return;
     _sessionCleared = true;
     state = AuthState.unauthenticated(reason: _endReason);
   }
@@ -189,10 +185,10 @@ class AuthController extends _$AuthController {
       } on Object {
         // 1 つ失敗しても残りは消す（消せないデータがあってもログアウト自体は完了させる）。
       }
-      if (_disposed) return;
+      if (!ref.mounted) return;
     }
   }
 
   /// この処理の結果を捨てるべきか（dispose 済み / 後続のログイン・ログアウトが発生）。
-  bool _isStale(int generation) => _disposed || generation != _generation;
+  bool _isStale(int generation) => !ref.mounted || generation != _generation;
 }

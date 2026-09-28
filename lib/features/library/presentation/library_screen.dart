@@ -18,17 +18,6 @@ class LibraryScreen extends ConsumerWidget {
     final async = ref.watch(libraryControllerProvider);
     final data = async.value;
 
-    // 一覧を表示したままの再取得が失敗した場合（エラー表示に切り替わらない）は
-    // 黙って古い内容を見せ続けないよう、その場で知らせる。
-    ref.listen(libraryControllerProvider, (previous, next) {
-      if (!next.hasError || !next.hasValue || next.isLoading) return;
-      if (previous?.error == next.error) return;
-      final messenger = ScaffoldMessenger.maybeOf(context);
-      messenger?.showSnackBar(
-        SnackBar(content: Text('更新できませんでした: ${apiErrorMessage(next.error!)}')),
-      );
-    });
-
     return Scaffold(
       appBar: AppBar(
         title: const _SearchField(),
@@ -36,7 +25,7 @@ class LibraryScreen extends ConsumerWidget {
         actions: const [_SortMenuButton(), _ViewModeButton()],
       ),
       body: RefreshIndicator(
-        onRefresh: ref.read(libraryControllerProvider.notifier).refresh,
+        onRefresh: () => _refresh(context, ref),
         child: switch ((data, async.error)) {
           // 手元に何も無い状態での失敗だけエラー表示にする。
           (null, final error?) => ErrorView(
@@ -49,6 +38,14 @@ class LibraryScreen extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// 再取得し、失敗したら（一覧は残るので）その場で知らせる。
+Future<void> _refresh(BuildContext context, WidgetRef ref) async {
+  await ref.read(libraryControllerProvider.notifier).refresh();
+  final error = ref.read(libraryControllerProvider).error;
+  if (error == null || !context.mounted) return;
+  showRefreshFailure(context, error, what: 'ライブラリ');
 }
 
 class _LibraryBody extends ConsumerWidget {

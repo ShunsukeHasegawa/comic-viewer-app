@@ -41,11 +41,8 @@ Duration? noAutoRetry(int retryCount, Object error) => null;
 /// ライブラリ一覧の読み込み。
 @Riverpod(retry: noAutoRetry)
 class LibraryController extends _$LibraryController {
-  bool _disposed = false;
-
   @override
   Future<LibraryData> build() {
-    ref.onDispose(() => _disposed = true);
     return _load();
   }
 
@@ -55,7 +52,7 @@ class LibraryController extends _$LibraryController {
     // （表示中の一覧を消さない）。
     final next = await AsyncValue.guard(() => _load(forceRefresh: true));
     // 401 → ログイン画面へ戻る途中で破棄されていることがある。
-    if (_disposed) return;
+    if (!ref.mounted) return;
     state = next;
   }
 
@@ -96,6 +93,23 @@ class LibraryController extends _$LibraryController {
       fetchedAt: result.fetchedAt,
       isStale: result.isStale,
     );
+  }
+
+  /// お気に入りの切り替えを一覧側へ反映する（再取得しない）。
+  void setFavorite({required int bookId, required bool isFavorite}) {
+    final current = state.value;
+    if (current == null) return;
+    final favorites = current.favoriteIds.toSet();
+    if (isFavorite) {
+      favorites.add(bookId);
+    } else {
+      favorites.remove(bookId);
+    }
+    state = AsyncValue.data(current.copyWith(favoriteIds: favorites));
+    // オフライン用のキャッシュにも反映する（次に開いたときに消えないように）。
+    ref
+        .read(libraryRepositoryProvider)
+        .updateCachedFavorite(bookId: bookId, isFavorite: isFavorite);
   }
 
   /// 補助的な取得。通信・サーバー起因の失敗は既定値で代替する。

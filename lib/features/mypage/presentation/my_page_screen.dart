@@ -1,11 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/utils/format.dart';
+import '../../../core/widgets/error_view.dart';
 import '../../../core/widgets/feature_placeholder.dart';
+import '../../../domain/models/reading_book.dart';
 import '../../auth/application/auth_controller.dart';
 import '../../auth/domain/auth_state.dart';
+import '../application/stats_controller.dart';
 
-/// マイページ（統計・設定入口）。
+/// マイページ（ユーザー情報・読書統計・設定入口）。
 class MyPageScreen extends ConsumerWidget {
   const MyPageScreen({super.key});
 
@@ -13,36 +17,43 @@ class MyPageScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final authState = ref.watch(authControllerProvider);
     final user = authState is AuthAuthenticated ? authState.user : null;
+    final stats = ref.watch(statsControllerProvider);
 
     return Scaffold(
       appBar: AppBar(title: const Text('マイページ')),
-      body: ListView(
-        children: [
-          if (user != null)
-            ListTile(
-              leading: const Icon(Icons.person_outline),
-              title: Text(user.name.isEmpty ? 'ユーザー' : user.name),
-              subtitle: user.email == null ? null : Text(user.email!),
-              trailing: Wrap(
-                spacing: 8,
-                children: [
-                  if (user.isAdmin) const Chip(label: Text('管理者')),
-                  if (user.safeMode) const Chip(label: Text('セーフモード')),
-                ],
+      body: RefreshIndicator(
+        onRefresh: () => _refreshStats(context, ref),
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: [
+            if (user != null)
+              ListTile(
+                leading: const Icon(Icons.person_outline),
+                title: Text(user.name.isEmpty ? 'ユーザー' : user.name),
+                subtitle: user.email == null ? null : Text(user.email!),
+                trailing: Wrap(
+                  spacing: 8,
+                  children: [
+                    if (user.isAdmin) const Chip(label: Text('管理者')),
+                    if (user.safeMode) const Chip(label: Text('セーフモード')),
+                  ],
+                ),
               ),
+            const Divider(),
+            _StatsSection(stats: stats),
+            const Divider(),
+            const SizedBox(
+              height: 160,
+              child: FeaturePlaceholder(title: 'ストレージ / ダウンロード設定', issue: 13),
             ),
-          const Divider(),
-          const SizedBox(
-            height: 220,
-            child: FeaturePlaceholder(title: '読書統計 / ストレージ設定', issue: 13),
-          ),
-          const Divider(),
-          ListTile(
-            leading: const Icon(Icons.logout),
-            title: const Text('ログアウト'),
-            onTap: () => _confirmLogout(context, ref),
-          ),
-        ],
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.logout),
+              title: const Text('ログアウト'),
+              onTap: () => _confirmLogout(context, ref),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -78,5 +89,140 @@ class MyPageScreen extends ConsumerWidget {
         const SnackBar(content: Text('ログアウトに失敗しました。もう一度お試しください。')),
       );
     }
+  }
+}
+
+/// 統計を取り直し、失敗したらその場で知らせる。
+Future<void> _refreshStats(BuildContext context, WidgetRef ref) async {
+  await ref.read(statsControllerProvider.notifier).refresh();
+  final error = ref.read(statsControllerProvider).error;
+  if (error == null || !context.mounted) return;
+  showRefreshFailure(context, error, what: '読書統計');
+}
+
+class _StatsSection extends ConsumerWidget {
+  const _StatsSection({required this.stats});
+
+  final AsyncValue<UserStats> stats;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('読書統計', style: theme.textTheme.titleMedium),
+          const SizedBox(height: 12),
+          switch ((stats.value, stats.error)) {
+            (null, final error?) => ErrorView(
+              error: error,
+              onRetry: ref.read(statsControllerProvider.notifier).refresh,
+            ),
+            (null, null) => const Center(child: CircularProgressIndicator()),
+            (final stats?, _) => _StatsContent(stats: stats),
+          },
+        ],
+      ),
+    );
+  }
+}
+
+class _StatsContent extends StatelessWidget {
+  const _StatsContent({required this.stats});
+
+  final UserStats stats;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final maxCount = stats.monthly.fold<int>(
+      0,
+      (max, month) => month.count > max ? month.count : max,
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            _StatCard(label: '読了タイトル', value: '${stats.titlesCompleted}'),
+            const SizedBox(width: 12),
+            _StatCard(label: '読了巻数', value: '${stats.volumesCompleted}'),
+          ],
+        ),
+        if (stats.monthly.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          Text('月別の読了数', style: theme.textTheme.titleSmall),
+          const SizedBox(height: 8),
+          for (final month in stats.monthly)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 80,
+                    child: Text(
+                      formatYearMonth(month.month),
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ),
+                  Expanded(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(2),
+                      child: LinearProgressIndicator(
+                        value: maxCount == 0 ? 0 : month.count / maxCount,
+                        minHeight: 8,
+                      ),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 40,
+                    child: Text(
+                      '${month.count}',
+                      textAlign: TextAlign.right,
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ],
+    );
+  }
+}
+
+class _StatCard extends StatelessWidget {
+  const _StatCard({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Expanded(
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(value, style: theme.textTheme.headlineSmall),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
