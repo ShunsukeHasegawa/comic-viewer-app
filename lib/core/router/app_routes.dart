@@ -15,6 +15,9 @@ abstract final class AppRoutes {
   /// マイページ。
   static const myPage = '/mypage';
 
+  /// ストレージ設定（キャッシュの可視化・上限・削除）。
+  static const storageSettings = '/mypage/storage';
+
   /// タイトル詳細のパスパターン。
   static const bookDetailPattern = '/book/:bookId';
 

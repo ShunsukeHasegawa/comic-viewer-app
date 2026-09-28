@@ -102,4 +102,32 @@ void main() {
       expect(config.flavor, AppFlavor.production);
     });
   });
+
+  group('isApiOrigin', () {
+    // Bearer トークンを送ってよい相手かどうかの判定に使うので、
+    // スキーム / ホスト / ポートのどれかが違えば「別の配信元」でなければならない。
+    final config = AppConfig.from(
+      apiBaseUrl: 'https://comic.lazgram.com',
+      flavor: 'production',
+    );
+
+    test('スキーム / ホスト / ポートが一致するときだけ true', () {
+      expect(
+        config.isApiOrigin(Uri.parse('https://comic.lazgram.com/books/1')),
+        isTrue,
+      );
+      expect(
+        config.isApiOrigin(Uri.parse('http://comic.lazgram.com/books/1')),
+        isFalse,
+      );
+      expect(
+        config.isApiOrigin(Uri.parse('https://cdn.example.com/1.jpg')),
+        isFalse,
+      );
+      expect(
+        config.isApiOrigin(Uri.parse('https://comic.lazgram.com:8443/1')),
+        isFalse,
+      );
+    });
+  });
 }

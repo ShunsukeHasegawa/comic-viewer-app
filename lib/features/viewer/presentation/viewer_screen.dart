@@ -2,12 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../core/cache/comic_image_loader.dart';
 import '../../../core/device/reading_screen_mode.dart';
 import '../../../core/media/media_urls.dart';
 import '../../../core/router/app_routes.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/widgets/error_view.dart';
-import '../../../core/widgets/thumbnail_image.dart';
 import '../application/page_prefetcher.dart';
 import '../application/viewer_controller.dart';
 import 'widgets/viewer_chrome.dart';
@@ -33,9 +33,9 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
 
   PagePrefetcher? _prefetcher;
 
-  /// 先読みの前提条件。変わったら作り直す
-  /// （古いトークンや古い ZIP 世代の URL を温め続けないため）。
-  ({int filesVersion, String authorization})? _prefetchKey;
+  /// 先読みの前提条件（ZIP の世代）。変わったら作り直す
+  /// （古い世代の URL を温め続けないため）。
+  int? _prefetchFilesVersion;
 
   /// 次巻への遷移中（連打での二重遷移を防ぐ）。
   bool _movingToNextVolume = false;
@@ -91,31 +91,27 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     }
   }
 
-  void _prefetch(ViewerState state, Map<String, String> headers) {
+  void _prefetch(ViewerState state) {
     final filesVersion = state.volume.filesVersion;
     if (filesVersion == null || state.pageCount == 0) return;
 
-    final key = (
-      filesVersion: filesVersion,
-      authorization: headers['Authorization'] ?? '',
-    );
-    // トークン更新や ZIP 差し替えの後は URL / ヘッダを作り直す。
-    if (_prefetchKey != key) {
-      _prefetchKey = key;
+    // ZIP 差し替えの後は URL / キャッシュキーを作り直す。
+    if (_prefetchFilesVersion != filesVersion) {
+      _prefetchFilesVersion = filesVersion;
       final urls = ref.read(mediaUrlsProvider);
       final precache = ref.read(pagePrecacherProvider);
       final files = state.volume.files;
       _prefetcher = PagePrefetcher(
         // 位置（1 始まり）を API のページ識別子に変換する
-        // （表示側と同じ URL を温める）。
+        // （表示側と同じキャッシュキーを温める）。
         precache: (position) => precache(
           context,
-          urls.page(
+          ComicImageRequest.page(
+            urls,
             volumeId: state.volume.id,
             page: files[position - 1],
             filesVersion: filesVersion,
           ),
-          headers,
         ),
       );
     }
@@ -170,15 +166,14 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     final provider = viewerControllerProvider(widget.volumeId);
     final async = ref.watch(provider);
     final state = async.value;
-    // 認証ヘッダが後から解決されても先読みが始まるよう watch する。
-    final headers = ref.watch(imageAuthHeadersProvider).value;
 
     if (state != null) {
       // ビルド中に PageView を触らない。
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         _syncPageController(state.currentPage);
-        if (headers != null) _prefetch(state, headers);
+        // キャッシュの準備待ちは `pagePrecacher` の内側で行う。
+        _prefetch(state);
       });
     }
 

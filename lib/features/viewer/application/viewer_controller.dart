@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/misc.dart' show ProviderBase;
 import 'package:freezed_annotation/freezed_annotation.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
+import '../../../core/cache/image_cache_store.dart';
 import '../../../data/api/books_api.dart';
 import '../../../domain/models/read_volume.dart';
 import '../../history/application/history_controller.dart';
@@ -74,9 +77,28 @@ class ViewerController extends _$ViewerController {
     final startPage = volume.isEmpty ? 1 : volume.clampPage(volume.currentPage);
     _lastRecordedPage = volume.isEmpty ? null : startPage;
 
+    _evictStaleImageCache(volume);
+
     final next = ViewerState(volume: volume, currentPage: startPage);
     _updatePending(next);
     return next;
+  }
+
+  /// ZIP が差し替わっていたら、この巻の古い世代の画像キャッシュを捨てる（#8）。
+  ///
+  /// キーに `files_version` を含めているので古い画像を表示することは無いが、
+  /// 消さないと二度と使われないファイルが容量を食い続ける。
+  void _evictStaleImageCache(ReadVolume volume) {
+    final filesVersion = volume.filesVersion;
+    if (filesVersion == null) return;
+    final evict = ref.read(staleCacheEvictorProvider);
+    // 表示を待たせない。失敗しても読書は止めない（次に開いたときに再試行される）。
+    unawaited(
+      evict(
+        volumeId: volume.id,
+        keepFilesVersion: filesVersion,
+      ).catchError((Object _) {}),
+    );
   }
 
   /// ページ / 巻末オーバーレイへ移動する。
@@ -123,6 +145,7 @@ class ViewerController extends _$ViewerController {
       final state = ViewerState(volume: volume, currentPage: startPage);
       _updatePending(state);
       _lastRecordedPage = volume.isEmpty ? null : startPage;
+      _evictStaleImageCache(volume);
       return state;
     });
     if (!ref.mounted) return;

@@ -1,7 +1,7 @@
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../../features/library/data/library_repository.dart';
-import '../widgets/thumbnail_image.dart';
+import '../cache/image_cache_purger.dart';
 
 part 'session_data_purger.g.dart';
 
@@ -19,9 +19,9 @@ abstract interface class SessionDataPurger {
 /// 登録済みの破棄処理。
 ///
 /// 端末内にユーザー固有のデータを持つ機能は、ここに実装を足す
-/// （画像キャッシュ #8 / ダウンロード #9 / 進捗 #12）。
+/// （ダウンロード #9 / 進捗 #12）。
 @Riverpod(keepAlive: true)
 List<SessionDataPurger> sessionDataPurgers(Ref ref) => [
   ref.watch(libraryCachePurgerProvider),
-  ref.watch(thumbnailCachePurgerProvider),
+  ref.watch(imageCachePurgerProvider),
 ];

@@ -1,3 +1,4 @@
+import 'package:comic_laz/core/cache/comic_image_loader.dart';
 import 'package:comic_laz/core/device/reading_screen_mode.dart';
 import 'package:comic_laz/core/device/screen_wake_lock.dart';
 import 'package:comic_laz/features/viewer/application/viewer_controller.dart';
@@ -16,8 +17,8 @@ import '../../support/viewer_fakes.dart';
 import 'viewer_controller_test.dart' show volumeFixture;
 
 /// 描画されたページ URL（先読みと区別して記録する）。
-final rendered = <Uri>[];
-final prefetched = <Uri>[];
+final rendered = <ComicImageRequest>[];
+final prefetched = <ComicImageRequest>[];
 
 Future<
   ({
@@ -53,12 +54,12 @@ pumpViewer(
             ),
         viewerImageBuilder:
             imageBuilder ??
-            (context, url, headers, onRetry) {
-              rendered.add(url);
+            (context, request, onRetry) {
+              rendered.add(request);
               return const ColoredBox(color: Colors.grey);
             },
-        pagePrecacher: (context, url, headers) async {
-          prefetched.add(url);
+        pagePrecacher: (context, request) async {
+          prefetched.add(request);
         },
       ),
       progressRecorderProvider.overrideWithValue(recorder),
@@ -167,7 +168,7 @@ void main() {
 
     expect(prefetched, hasLength(4), reason: '現在 + 後 3');
     expect(
-      prefetched.map((url) => url.path),
+      prefetched.map((request) => request.url.path),
       containsAll([
         '/books/view/340/1',
         '/books/view/340/2',
@@ -176,15 +177,15 @@ void main() {
       ]),
     );
     // ページ URL には必ず files_version が付く
-    expect(prefetched.first.queryParameters['v'], '1758763245');
+    expect(prefetched.first.url.queryParameters['v'], '1758763245');
   });
 
   testWidgets('ページ画像の失敗は再読み込みできる（タップ領域に邪魔されない）', (tester) async {
     // 実際のエラー表示と同じく中央にボタンを置いたスタブ
     await pumpViewer(
       tester,
-      imageBuilder: (context, url, headers, onRetry) {
-        rendered.add(url);
+      imageBuilder: (context, request, onRetry) {
+        rendered.add(request);
         return ColoredBox(
           color: Colors.grey,
           child: Center(
@@ -236,7 +237,7 @@ void main() {
     );
 
     expect(
-      prefetched.map((url) => url.path),
+      prefetched.map((request) => request.url.path),
       containsAll([
         '/books/view/340/11',
         '/books/view/340/12',

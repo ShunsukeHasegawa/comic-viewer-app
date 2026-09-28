@@ -8,20 +8,20 @@ part of 'viewer_page_image.dart';
 
 // GENERATED CODE - DO NOT MODIFY BY HAND
 // ignore_for_file: type=lint, type=warning
-/// 既定はディスクキャッシュつきのネットワーク画像。
+/// 既定は自前の一時キャッシュ（#8）経由の画像。
 ///
 /// **読み込み完了まで画像を出さない**（途中まで描かれた JPEG を見せない）。
 /// 取得元の解決順（ダウンロード済みローカル → キャッシュ → ネットワーク）は
-/// #11 でここに差し込む。
+/// `ComicImageLoader` に集約してあり、#11 はそこへ差し込む。
 
 @ProviderFor(viewerImageBuilder)
 final viewerImageBuilderProvider = ViewerImageBuilderProvider._();
 
-/// 既定はディスクキャッシュつきのネットワーク画像。
+/// 既定は自前の一時キャッシュ（#8）経由の画像。
 ///
 /// **読み込み完了まで画像を出さない**（途中まで描かれた JPEG を見せない）。
 /// 取得元の解決順（ダウンロード済みローカル → キャッシュ → ネットワーク）は
-/// #11 でここに差し込む。
+/// `ComicImageLoader` に集約してあり、#11 はそこへ差し込む。
 
 final class ViewerImageBuilderProvider
     extends
@@ -31,11 +31,11 @@ final class ViewerImageBuilderProvider
           ViewerImageBuilder
         >
     with $Provider<ViewerImageBuilder> {
-  /// 既定はディスクキャッシュつきのネットワーク画像。
+  /// 既定は自前の一時キャッシュ（#8）経由の画像。
   ///
   /// **読み込み完了まで画像を出さない**（途中まで描かれた JPEG を見せない）。
   /// 取得元の解決順（ダウンロード済みローカル → キャッシュ → ネットワーク）は
-  /// #11 でここに差し込む。
+  /// `ComicImageLoader` に集約してあり、#11 はそこへ差し込む。
   ViewerImageBuilderProvider._()
     : super(
         from: null,
@@ -71,19 +71,28 @@ final class ViewerImageBuilderProvider
 }
 
 String _$viewerImageBuilderHash() =>
-    r'830f2468c3e927044acb1e2bfcfc83cce7279542';
+    r'56188852847f8f74a8ec63f19fffdad05ed063bf';
 
 /// 既定はデコードまで済ませる `precacheImage`。
+///
+/// 表示と同じ [ComicImageProvider] を使う（同じキャッシュを温める。
+/// 先読みだけ別経路にすると二重ダウンロードになる）。
 
 @ProviderFor(pagePrecacher)
 final pagePrecacherProvider = PagePrecacherProvider._();
 
 /// 既定はデコードまで済ませる `precacheImage`。
+///
+/// 表示と同じ [ComicImageProvider] を使う（同じキャッシュを温める。
+/// 先読みだけ別経路にすると二重ダウンロードになる）。
 
 final class PagePrecacherProvider
     extends $FunctionalProvider<PagePrecacher, PagePrecacher, PagePrecacher>
     with $Provider<PagePrecacher> {
   /// 既定はデコードまで済ませる `precacheImage`。
+  ///
+  /// 表示と同じ [ComicImageProvider] を使う（同じキャッシュを温める。
+  /// 先読みだけ別経路にすると二重ダウンロードになる）。
   PagePrecacherProvider._()
     : super(
         from: null,
@@ -117,4 +126,4 @@ final class PagePrecacherProvider
   }
 }
 
-String _$pagePrecacherHash() => r'b06a7acbdfc3097cc8a99691c0e80964ed58ab1c';
+String _$pagePrecacherHash() => r'6fcde774b0706e7a735001ea09306ec458b2c987';

@@ -1,3 +1,5 @@
+import 'package:comic_laz/core/cache/comic_image_loader.dart';
+import 'package:comic_laz/core/cache/image_cache_store.dart';
 import 'package:comic_laz/core/config/app_config.dart';
 import 'package:comic_laz/core/device/device_name_resolver.dart';
 import 'package:comic_laz/core/session/session_data_purger.dart';
@@ -30,6 +32,7 @@ List<Override> testOverrides({
   ThumbnailBuilder? thumbnailBuilder,
   ViewerImageBuilder? viewerImageBuilder,
   PagePrecacher? pagePrecacher,
+  StaleCacheEvictor? staleCacheEvictor,
   String apiBaseUrl = 'http://localhost:8000',
 }) {
   return [
@@ -45,29 +48,32 @@ List<Override> testOverrides({
     booksApiProvider.overrideWithValue(booksApi ?? FakeBooksApi()),
     userApiProvider.overrideWithValue(userApi ?? FakeUserApi()),
     taxonomyApiProvider.overrideWithValue(taxonomyApi ?? FakeTaxonomyApi()),
-    // 画像はネットワークを触らせない（URL とヘッダだけ検証できるようにする）。
+    // 画像はネットワークを触らせない（URL とキャッシュキーだけ検証できるようにする）。
     viewerImageBuilderProvider.overrideWithValue(
       viewerImageBuilder ??
-          (context, url, headers, onRetry) =>
+          (context, request, onRetry) =>
               const ColoredBox(color: Color(0xFF444444)),
     ),
     pagePrecacherProvider.overrideWithValue(
-      pagePrecacher ?? (context, url, headers) async {},
+      pagePrecacher ?? (context, request) async {},
     ),
     thumbnailBuilderProvider.overrideWithValue(
       thumbnailBuilder ??
-          (context, url, headers, fit) =>
-              StubThumbnail(url: url, headers: headers),
+          (context, request, fit) => StubThumbnail(request: request),
+    ),
+    // 古い世代のキャッシュ掃除は、キャッシュ本体を作らずに済むよう既定で無効。
+    staleCacheEvictorProvider.overrideWithValue(
+      staleCacheEvictor ??
+          ({required int volumeId, required int keepFilesVersion}) async {},
     ),
   ];
 }
 
 /// テスト用のサムネイル代替ウィジェット。
 class StubThumbnail extends StatelessWidget {
-  const StubThumbnail({required this.url, required this.headers, super.key});
+  const StubThumbnail({required this.request, super.key});
 
-  final Uri url;
-  final Map<String, String> headers;
+  final ComicImageRequest request;
 
   @override
   Widget build(BuildContext context) => const SizedBox.expand();

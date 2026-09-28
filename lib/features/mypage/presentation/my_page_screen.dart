@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
+import '../../../core/router/app_routes.dart';
 import '../../../core/utils/format.dart';
 import '../../../core/widgets/error_view.dart';
 import '../../../core/widgets/feature_placeholder.dart';
@@ -42,9 +44,17 @@ class MyPageScreen extends ConsumerWidget {
             const Divider(),
             _StatsSection(stats: stats),
             const Divider(),
+            ListTile(
+              leading: const Icon(Icons.sd_storage_outlined),
+              title: const Text('ストレージ'),
+              subtitle: const Text('キャッシュの使用量・上限・削除'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => context.push(AppRoutes.storageSettings),
+            ),
+            // ダウンロード管理（一覧・削除・自動更新）は #13。
             const SizedBox(
               height: 160,
-              child: FeaturePlaceholder(title: 'ストレージ / ダウンロード設定', issue: 13),
+              child: FeaturePlaceholder(title: 'ダウンロード管理', issue: 13),
             ),
             const Divider(),
             ListTile(

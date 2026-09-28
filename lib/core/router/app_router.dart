@@ -10,6 +10,7 @@ import '../../features/auth/presentation/splash_screen.dart';
 import '../../features/history/presentation/history_screen.dart';
 import '../../features/library/presentation/library_screen.dart';
 import '../../features/mypage/presentation/my_page_screen.dart';
+import '../../features/settings/presentation/storage_settings_screen.dart';
 import '../../features/title/presentation/title_detail_screen.dart';
 import '../../features/viewer/presentation/viewer_screen.dart';
 import 'app_routes.dart';
@@ -45,6 +46,13 @@ List<RouteBase> buildRoutes() => [
           GoRoute(
             path: AppRoutes.myPage,
             builder: (context, state) => const MyPageScreen(),
+            routes: [
+              // マイページ配下に置く（ボトムナビを残したまま開く）。
+              GoRoute(
+                path: 'storage',
+                builder: (context, state) => const StorageSettingsScreen(),
+              ),
+            ],
           ),
         ],
       ),

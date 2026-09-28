@@ -1,11 +1,11 @@
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
+import '../../../../core/cache/comic_image_loader.dart';
 import '../../../../core/media/media_urls.dart';
 import '../../../../core/theme/app_colors.dart';
-import '../../../../core/widgets/thumbnail_image.dart';
+import '../../../../core/widgets/comic_image.dart';
 import 'viewer_chrome.dart';
 
 part 'viewer_page_image.g.dart';
@@ -13,27 +13,22 @@ part 'viewer_page_image.g.dart';
 /// ページ画像の描画方法。テストでは差し替える。
 typedef ViewerImageBuilder = Widget Function(
   BuildContext context,
-  Uri url,
-  Map<String, String> headers,
+  ComicImageRequest request,
   VoidCallback onRetry,
 );
 
-/// 既定はディスクキャッシュつきのネットワーク画像。
+/// 既定は自前の一時キャッシュ（#8）経由の画像。
 ///
 /// **読み込み完了まで画像を出さない**（途中まで描かれた JPEG を見せない）。
 /// 取得元の解決順（ダウンロード済みローカル → キャッシュ → ネットワーク）は
-/// #11 でここに差し込む。
+/// `ComicImageLoader` に集約してあり、#11 はそこへ差し込む。
 @Riverpod(keepAlive: true)
 ViewerImageBuilder viewerImageBuilder(Ref ref) {
-  return (context, url, headers, onRetry) => CachedNetworkImage(
-    imageUrl: url.toString(),
-    cacheKey: url.toString(),
-    httpHeaders: headers,
+  return (context, request, onRetry) => ComicImage(
+    request: request,
     fit: BoxFit.contain,
-    // 途中経過を見せないよう、フェードは使わず完成後に一度で出す。
-    fadeInDuration: Duration.zero,
-    placeholder: (context, _) => const ViewerPageLoading(),
-    errorWidget: (context, _, _) => ViewerPageError(onRetry: onRetry),
+    loadingBuilder: (context) => const ViewerPageLoading(),
+    errorBuilder: (context, _) => ViewerPageError(onRetry: onRetry),
   );
 }
 
@@ -54,7 +49,7 @@ class ViewerPageImage extends ConsumerStatefulWidget {
   final int volumeId;
   final int page;
 
-  /// ZIP の世代。差し替え後に古い画像を表示しないため URL に必ず付ける。
+  /// ZIP の世代。差し替え後に古い画像を表示しないため URL / キーに必ず付ける。
   final int filesVersion;
 
   /// 表示中のページか（離れたら拡大を解除する）。
@@ -96,16 +91,12 @@ class _ViewerPageImageState extends ConsumerState<ViewerPageImage> {
 
   @override
   Widget build(BuildContext context) {
-    final url = ref
-        .watch(mediaUrlsProvider)
-        .page(
-          volumeId: widget.volumeId,
-          page: widget.page,
-          filesVersion: widget.filesVersion,
-        );
-    final headers = ref.watch(imageAuthHeadersProvider).value;
-
-    if (headers == null) return const ViewerPageLoading();
+    final request = ComicImageRequest.page(
+      ref.watch(mediaUrlsProvider),
+      volumeId: widget.volumeId,
+      page: widget.page,
+      filesVersion: widget.filesVersion,
+    );
 
     return InteractiveViewer(
       transformationController: _zoomController,
@@ -120,11 +111,10 @@ class _ViewerPageImageState extends ConsumerState<ViewerPageImage> {
         onPrevious: widget.onPrevious,
         onToggleMenu: widget.onToggleMenu,
         child: KeyedSubtree(
-          key: ValueKey('${url}_$_reloadToken'),
+          key: ValueKey('${request.cacheKey}_$_reloadToken'),
           child: ref.watch(viewerImageBuilderProvider)(
             context,
-            url,
-            headers,
+            request,
             () => setState(() => _reloadToken++),
           ),
         ),
@@ -185,19 +175,22 @@ class ViewerPageError extends StatelessWidget {
 /// ページ画像の先読み処理。テストでは差し替える。
 typedef PagePrecacher = Future<void> Function(
   BuildContext context,
-  Uri url,
-  Map<String, String> headers,
+  ComicImageRequest request,
 );
 
 /// 既定はデコードまで済ませる `precacheImage`。
+///
+/// 表示と同じ [ComicImageProvider] を使う（同じキャッシュを温める。
+/// 先読みだけ別経路にすると二重ダウンロードになる）。
 @Riverpod(keepAlive: true)
 PagePrecacher pagePrecacher(Ref ref) {
-  return (context, url, headers) => precacheImage(
-    CachedNetworkImageProvider(
-      url.toString(),
-      cacheKey: url.toString(),
-      headers: headers,
-    ),
-    context,
-  );
+  return (context, request) async {
+    final loader = await ref.read(comicImageLoaderProvider.future);
+    // キャッシュの準備を待つ間に画面を離れていることがある。
+    if (!context.mounted) return;
+    await precacheImage(
+      ComicImageProvider(loader: loader, request: request),
+      context,
+    );
+  };
 }

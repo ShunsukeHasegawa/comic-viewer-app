@@ -53,7 +53,7 @@ final class ViewerControllerProvider
   }
 }
 
-String _$viewerControllerHash() => r'a38a579b1417c7fd14d06c9df6afdf2e9cfb214a';
+String _$viewerControllerHash() => r'18adb6f940c7d373ac1c539639749d9504cee6d2';
 
 /// ビューアの読み込みとページ送り・進捗記録。
 
