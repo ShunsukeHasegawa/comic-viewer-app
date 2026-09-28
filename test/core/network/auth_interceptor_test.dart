@@ -1,3 +1,4 @@
+import 'package:comic_laz/core/config/app_config.dart';
 import 'package:comic_laz/core/network/auth_interceptor.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -21,7 +22,10 @@ void main() {
       ..interceptors.add(
         AuthInterceptor(
           authStore: store,
-          apiBaseUrl: Uri.parse('https://comic.lazgram.com'),
+          config: AppConfig.from(
+            apiBaseUrl: 'https://comic.lazgram.com',
+            flavor: 'production',
+          ),
           onUnauthorized: () async => unauthorizedCalls++,
         ),
       );

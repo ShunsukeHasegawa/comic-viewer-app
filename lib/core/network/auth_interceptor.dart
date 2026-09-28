@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 
 import '../../features/auth/data/auth_store.dart';
+import '../config/app_config.dart';
 
 /// このキーが `true` のリクエストには `Authorization` を付けず、
 /// 401 もセッション失効として扱わない（ログイン自体など）。
@@ -15,14 +16,14 @@ const skipAuthExtraKey = 'comic_laz.skip_auth';
 class AuthInterceptor extends Interceptor {
   AuthInterceptor({
     required this.authStore,
-    required this.apiBaseUrl,
+    required this.config,
     required this.onUnauthorized,
   });
 
   final AuthStore authStore;
 
-  /// トークンを送ってよい配信元。
-  final Uri apiBaseUrl;
+  /// トークンを送ってよい配信元の判定に使う。
+  final AppConfig config;
 
   /// 401 を受けたときに呼ぶ（セッション失効の片付け）。
   final Future<void> Function() onUnauthorized;
@@ -62,12 +63,7 @@ class AuthInterceptor extends Interceptor {
   }
 
   /// API と同じ配信元へのリクエストか。
-  bool _isApiRequest(RequestOptions options) {
-    final uri = options.uri;
-    return uri.scheme == apiBaseUrl.scheme &&
-        uri.host == apiBaseUrl.host &&
-        uri.port == apiBaseUrl.port;
-  }
+  bool _isApiRequest(RequestOptions options) => config.isApiOrigin(options.uri);
 
   static bool _skipAuth(RequestOptions options) =>
       options.extra[skipAuthExtraKey] == true;

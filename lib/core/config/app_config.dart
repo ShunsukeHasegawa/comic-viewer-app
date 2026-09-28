@@ -84,6 +84,14 @@ class AppConfig {
     );
   }
 
+  /// [uri] が API と同じ配信元か（スキーム / ホスト / ポートが一致）。
+  ///
+  /// Bearer トークンを送ってよい相手かどうかの判定に使う。
+  bool isApiOrigin(Uri uri) =>
+      uri.scheme == apiBaseUrl.scheme &&
+      uri.host == apiBaseUrl.host &&
+      uri.port == apiBaseUrl.port;
+
   /// API が返した**相対 URL**（サムネイルなど。`?m=updated_at` 付き）を絶対 URL にする。
   ///
   /// 既に絶対 URL の場合はそのまま返す。ベース URL がサブパスを持つ場合は保つ。

@@ -41,7 +41,7 @@ Dio dio(Ref ref) {
   dio.interceptors.add(
     AuthInterceptor(
       authStore: ref.read(authStoreProvider),
-      apiBaseUrl: config.apiBaseUrl,
+      config: config,
       // 401 の時点で解決する（ここで読むと循環依存になる）。
       onUnauthorized: () =>
           ref.read(authControllerProvider.notifier).handleSessionExpired(),
