@@ -8,6 +8,15 @@ String apiErrorMessage(Object error) => switch (error) {
   _ => '読み込みに失敗しました。',
 };
 
+/// 端末内の操作（保存 / 削除）のエラー文言。
+///
+/// DB やファイルの失敗は [ApiException] ではないので、[apiErrorMessage] に渡すと
+/// 一律「読み込みに失敗しました。」になり、何をしようとして失敗したのか分からない。
+String localErrorMessage(Object error) => switch (error) {
+  final ApiException error => error.message,
+  _ => '端末内のデータを処理できませんでした。',
+};
+
 /// 読み込み失敗の表示（再試行つき）。
 class ErrorView extends StatelessWidget {
   const ErrorView({required this.error, this.onRetry, super.key});
@@ -112,5 +121,20 @@ void showRefreshFailure(
 }) {
   ScaffoldMessenger.maybeOf(context)?.showSnackBar(
     SnackBar(content: Text('$what を更新できませんでした: ${apiErrorMessage(error)}')),
+  );
+}
+
+/// 保存 / 削除ができなかったことを知らせる。
+///
+/// [showRefreshFailure] は「表示中の内容を残したまま**再取得**が失敗した」用。
+/// 削除や保存に流用すると「更新できませんでした」となり、消えたのか消えていないのかが
+/// 読み取れない（ユーザーは削除できたと誤解しうる）。
+void showActionFailure(
+  BuildContext context,
+  Object error, {
+  required String what,
+}) {
+  ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+    SnackBar(content: Text('$whatに失敗しました: ${localErrorMessage(error)}')),
   );
 }

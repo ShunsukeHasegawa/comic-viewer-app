@@ -168,7 +168,7 @@ class _Body extends ConsumerWidget {
     final error = await controller.updateSettings(settings);
     if (!context.mounted) return;
     if (error != null) {
-      showRefreshFailure(context, error, what: 'キャッシュの設定');
+      showActionFailure(context, error, what: 'キャッシュの設定の保存');
       return;
     }
     ScaffoldMessenger.of(context)
@@ -211,7 +211,7 @@ class _Body extends ConsumerWidget {
     final error = await controller.clearCache(kind: kind);
     if (!context.mounted) return;
     if (error != null) {
-      showRefreshFailure(context, error, what: 'キャッシュ');
+      showActionFailure(context, error, what: 'キャッシュの削除');
       return;
     }
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(done)));

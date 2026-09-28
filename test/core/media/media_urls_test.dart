@@ -93,33 +93,68 @@ void main() {
 
   group('キャッシュキー', () {
     test('ページは巻 / バージョン / ページで一意', () {
+      final urls = buildMediaUrls();
+
       expect(
-        MediaUrls.pageCacheKey(volumeId: 340, page: 12, filesVersion: 1),
-        isNot(MediaUrls.pageCacheKey(volumeId: 340, page: 12, filesVersion: 2)),
+        urls.pageCacheKey(volumeId: 340, page: 12, filesVersion: 1),
+        isNot(urls.pageCacheKey(volumeId: 340, page: 12, filesVersion: 2)),
       );
       expect(
-        MediaUrls.pageCacheKey(volumeId: 340, page: 12, filesVersion: 1),
-        MediaUrls.pageCacheKey(volumeId: 340, page: 12, filesVersion: 1),
+        urls.pageCacheKey(volumeId: 340, page: 12, filesVersion: 1),
+        urls.pageCacheKey(volumeId: 340, page: 12, filesVersion: 1),
       );
     });
 
     test('サムネイルキーは thumbnail() と同じ正規化をする', () {
-      expect(MediaUrls.thumbnailCacheKey(null), isNull);
-      expect(MediaUrls.thumbnailCacheKey('   '), isNull);
+      final urls = buildMediaUrls();
+
+      expect(urls.thumbnailCacheKey(null), isNull);
+      expect(urls.thumbnailCacheKey('   '), isNull);
       expect(
-        MediaUrls.thumbnailCacheKey(' /books/thumbnail/340?m=1 '),
-        MediaUrls.thumbnailCacheKey('/books/thumbnail/340?m=1'),
+        urls.thumbnailCacheKey(' /books/thumbnail/340?m=1 '),
+        urls.thumbnailCacheKey('/books/thumbnail/340?m=1'),
       );
     });
 
     test('サムネイルは ?m= の世代まで含める', () {
+      final urls = buildMediaUrls();
+
       expect(
-        MediaUrls.thumbnailCacheKey('/books/thumbnail/340?m=1'),
-        isNot(MediaUrls.thumbnailCacheKey('/books/thumbnail/340?m=2')),
+        urls.thumbnailCacheKey('/books/thumbnail/340?m=1'),
+        isNot(urls.thumbnailCacheKey('/books/thumbnail/340?m=2')),
       );
       expect(
-        MediaUrls.thumbnailCacheKey('/books/thumbnail/340?m=1'),
-        isNot(MediaUrls.thumbnailCacheKey('/books/thumbnail/341?m=1')),
+        urls.thumbnailCacheKey('/books/thumbnail/340?m=1'),
+        isNot(urls.thumbnailCacheKey('/books/thumbnail/341?m=1')),
+      );
+    });
+
+    // 保存先（キャッシュディレクトリ / DB）は配信元で分かれていないため、
+    // キーが同じだと開発ビルドで本番サーバーの画像が出てしまう。
+    test('配信元が違えばキーも違う（開発ビルドと本番ビルドで混ざらない）', () {
+      final production = buildMediaUrls();
+      final development = buildMediaUrls('http://192.168.0.2:8000');
+
+      expect(
+        production.pageCacheKey(volumeId: 340, page: 12, filesVersion: 1),
+        isNot(
+          development.pageCacheKey(volumeId: 340, page: 12, filesVersion: 1),
+        ),
+      );
+      expect(
+        production.thumbnailCacheKey('/books/thumbnail/340?m=1'),
+        isNot(development.thumbnailCacheKey('/books/thumbnail/340?m=1')),
+      );
+    });
+
+    // 巻の古い世代の掃除は `v{巻 ID}/` の接頭辞で行の候補を絞るので、
+    // 配信元は末尾に付いていなければならない。
+    test('ページキーは巻 ID / バージョンの接頭辞で始まる（古い世代の掃除が効く）', () {
+      final urls = buildMediaUrls();
+
+      expect(
+        urls.pageCacheKey(volumeId: 340, page: 12, filesVersion: 7),
+        startsWith('v340/7/12'),
       );
     });
   });

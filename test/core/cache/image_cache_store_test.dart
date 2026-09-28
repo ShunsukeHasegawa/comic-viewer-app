@@ -1,7 +1,11 @@
+import 'dart:io';
+
 import 'package:comic_laz/core/cache/cache_settings.dart';
 import 'package:comic_laz/core/cache/image_cache_store.dart';
 import 'package:comic_laz/core/storage/app_database.dart';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 
 import '../../support/cache_fakes.dart';
 
@@ -252,5 +256,121 @@ void main() {
       expect(await harness.store.usage(), CacheUsage.empty);
       expect(harness.fileCount, 0);
     });
+
+    // 1 文で消すと SQLite の変数上限（32766）に当たり、削除が丸ごと失敗して
+    // 「消したのに使用量が減らない」状態になる（ログアウト時の破棄も同じ経路）。
+    test('変数上限を超える件数でもメタ情報を消し切る', () async {
+      final harness = CacheHarness.create();
+      await harness.recordMany(33000, bytes: 10);
+
+      await harness.store.clear();
+
+      expect(await harness.store.usage(), CacheUsage.empty);
+    });
+
+    // 書き込みは「実体 → 行」の順なので、途中で落ちると実体だけが残る。
+    // 孤児は使用量にも出ないため、ここで回収しないと永久に容量を食う。
+    test('行を持たない実体（孤児）も回収する', () async {
+      final harness = CacheHarness.create();
+      File(p.join(harness.directories.imageCache.path, 'orphan'))
+          .writeAsBytesSync(imageBytes(64));
+
+      await harness.store.clear();
+
+      expect(harness.fileCount, 0);
+    });
+
+    test('行がある実体は孤児として消さない（種別を指定した削除）', () async {
+      final harness = CacheHarness.create();
+      await harness.write('v1/100/1', bytes: 100);
+      await harness.write('t/a/1', bytes: 100, kind: CachedImageKind.thumbnail);
+
+      await harness.store.clear(kind: CachedImageKind.thumbnail);
+
+      expect(harness.hasFile('v1/100/1'), isTrue);
+    });
   });
+
+  group('ログアウト時の破棄（世代）', () {
+    // ログアウト前に始まったダウンロードが破棄の後に完了すると、前のユーザーの
+    // 画像がディスクに戻り、別のユーザーがそれを見てしまう（#8 / #15）。
+    test('破棄より前に始まった取得の書き戻しは捨てる', () async {
+      final harness = CacheHarness.create();
+      final generation = harness.store.generation;
+
+      await harness.store.clear();
+      await harness.store.write(
+        key: 'v1/100/1',
+        kind: CachedImageKind.page,
+        bytes: imageBytes(16),
+        generation: generation,
+      );
+
+      expect(await harness.store.usage(), CacheUsage.empty);
+      expect(harness.fileCount, 0, reason: '実体を残すと次のユーザーがキャッシュヒットする');
+    });
+
+    test('破棄の後に始まった取得は普通に保存する', () async {
+      final harness = CacheHarness.create();
+      await harness.store.clear();
+
+      await harness.store.write(
+        key: 'v1/100/1',
+        kind: CachedImageKind.page,
+        bytes: imageBytes(16),
+        generation: harness.store.generation,
+      );
+
+      expect((await harness.store.usage()).pageCount, 1);
+    });
+  });
+
+  group('読み出しの失敗', () {
+    // 掃除 / 手動削除が `existsSync` の直後に実体を消すことがある。ここで投げると
+    // ネットワークから取り直せる画像まで「読み込めませんでした」になる。
+    test('実体が読めない場合はキャッシュミスにする（メタ情報も捨てる）', () async {
+      final harness = CacheHarness.create();
+      await harness.write('v1/100/1', bytes: 100);
+      final broken = harness.storeLike(BrokenFileCacheStore.new);
+
+      expect(await broken.read('v1/100/1'), isNull);
+      expect(
+        (await harness.store.usage()).pageCount,
+        0,
+        reason: '読めない実体のメタ情報を残すと使用量が実際より多く見える',
+      );
+    });
+  });
+
+  group('掃除の直列化', () {
+    // 掃除は全件走査なので、呼ばれた回数だけ積むと画像の読み出しが後ろで待たされる。
+    // かといって 1 本にまとめきると、上限を下げた直後の掃除が古い設定で終わる。
+    test('待っている掃除は 1 本にまとめる（設定は毎回読み直す）', () async {
+      final harness = CacheHarness.create();
+      final settings = _CountingSettingsStore(harness.database);
+      final store = ImageCacheStore(
+        database: harness.database,
+        directories: harness.directories,
+        settingsStore: settings,
+        now: harness.clock.now,
+      );
+
+      await Future.wait([for (var i = 0; i < 5; i++) store.evictIfNeeded()]);
+
+      expect(settings.reads, 2, reason: '走っている 1 本 + 後ろに並べた 1 本だけ走る');
+    });
+  });
+}
+
+/// 掃除が何回走ったかを数える設定ストア（掃除 1 回につき 1 回読む）。
+class _CountingSettingsStore extends CacheSettingsStore {
+  _CountingSettingsStore(super.database);
+
+  int reads = 0;
+
+  @override
+  Future<CacheSettings> read() {
+    reads++;
+    return super.read();
+  }
 }

@@ -47,7 +47,7 @@ final class StorageSettingsControllerProvider
 }
 
 String _$storageSettingsControllerHash() =>
-    r'48d97ecd40218088229d3a7bafe6120906eabb83';
+    r'6340b825537774b4a7b6b3e123302f19f1e99ced';
 
 /// キャッシュの設定と使用量。
 ///

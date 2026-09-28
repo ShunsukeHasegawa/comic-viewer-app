@@ -40,7 +40,7 @@ class ComicImageRequest {
         page: page,
         filesVersion: filesVersion,
       ),
-      cacheKey: MediaUrls.pageCacheKey(
+      cacheKey: urls.pageCacheKey(
         volumeId: volumeId,
         page: page,
         filesVersion: filesVersion,
@@ -52,7 +52,7 @@ class ComicImageRequest {
   /// サムネイル。[apiUrl] が「サムネイル無し」なら `null`。
   static ComicImageRequest? thumbnail(MediaUrls urls, String? apiUrl) {
     final url = urls.thumbnail(apiUrl);
-    final cacheKey = MediaUrls.thumbnailCacheKey(apiUrl);
+    final cacheKey = urls.thumbnailCacheKey(apiUrl);
     if (url == null || cacheKey == null) return null;
     return ComicImageRequest(
       url: url,
@@ -113,9 +113,18 @@ class ComicImageLoader {
 
   Future<Uint8List> _load(ComicImageRequest request) async {
     // #11 でここにダウンロード済みローカルファイルの参照を挿す。
-    final cached = await store.read(request.cacheKey);
-    if (cached != null) return cached.bytes;
+    try {
+      final cached = await store.read(request.cacheKey);
+      if (cached != null) return cached.bytes;
+    } on Object {
+      // キャッシュが読めないだけならネットワークから取り直す。
+      // ここで投げると、取り直せば表示できる画像まで失敗扱いになる
+      // （しかも `ApiException` ですらない例外が UI へ漏れる）。
+    }
 
+    // ダウンロードの最中にログアウト（全削除）が入ったら書き戻さないための世代。
+    // 前のユーザーの画像がディスクに残ると、別のユーザーがそれを見てしまう。
+    final generation = store.generation;
     final downloaded = await _download(request.url);
     try {
       await store.write(
@@ -123,6 +132,7 @@ class ComicImageLoader {
         kind: request.kind,
         bytes: downloaded.bytes,
         contentType: downloaded.contentType,
+        generation: generation,
       );
     } on Object {
       // 保存に失敗しても表示は続ける（容量不足・OS のキャッシュ削除など）。
@@ -135,7 +145,12 @@ class ComicImageLoader {
     try {
       response = await dio.getUri<List<int>>(
         url,
-        options: Options(responseType: ResponseType.bytes),
+        options: Options(
+          responseType: ResponseType.bytes,
+          // 画像は JSON API より待つ（自宅サーバーは ZIP のシークに時間がかかる）。
+          receiveTimeout: imageTimeout,
+          sendTimeout: imageTimeout,
+        ),
       );
     } on Object catch (error) {
       // 通信エラーと 404 を呼び出し側が型で区別できるようにする。
@@ -201,8 +216,16 @@ class ComicImageProvider extends ImageProvider<ComicImageProvider> {
   }
 
   Future<ui.Codec> _decode(ImageDecoderCallback decode) async {
-    final bytes = await loader.load(request);
-    return decode(await ui.ImmutableBuffer.fromUint8List(bytes));
+    try {
+      final bytes = await loader.load(request);
+      return await decode(await ui.ImmutableBuffer.fromUint8List(bytes));
+    } on Object {
+      // 失敗した completer は `ImageCache` に残り続ける（`putIfAbsent` は
+      // pending のものをそのまま返す）。追い出さないと、ビューアの「再読み込み」も
+      // 画面を開き直しても二度とここへ来ず、同じエラーが再生され続ける。
+      PaintingBinding.instance.imageCache.evict(this);
+      rethrow;
+    }
   }
 
   /// `ImageCache` のキーは**キャッシュキー（世代つき）**で決める。

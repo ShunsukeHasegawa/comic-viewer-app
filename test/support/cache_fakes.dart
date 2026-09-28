@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -140,13 +141,118 @@ class CacheHarness {
     await store.write(key: key, kind: kind, bytes: imageBytes(bytes));
   }
 
+  /// 大量の行をまとめて積む（SQLite の変数上限を超える削除の検証用）。
+  ///
+  /// 1 件ずつ insert すると数万件で時間がかかるため、まとめて入れる。
+  Future<void> recordMany(
+    int count, {
+    required int bytes,
+    CachedImageKind kind = CachedImageKind.page,
+    String prefix = 'v1/1/',
+  }) async {
+    final now = clock.now();
+    await database.batch((batch) {
+      batch.insertAll(database.cachedImages, [
+        for (var i = 0; i < count; i++)
+          CachedImageRow(
+            key: '$prefix$i',
+            kind: kind,
+            fileName: ImageCacheStore.fileNameFor('$prefix$i'),
+            bytes: bytes,
+            createdAt: now,
+            lastUsedAt: now,
+          ),
+      ]);
+    });
+  }
+
+  /// 同じ DB / ディレクトリを使う別実装のキャッシュを作る（失敗の再現用）。
+  T storeLike<T extends ImageCacheStore>(
+    T Function({
+      required AppDatabase database,
+      required AppDirectories directories,
+      required CacheSettingsStore settingsStore,
+      DateTime Function() now,
+    })
+    build,
+  ) => build(
+    database: database,
+    directories: directories,
+    settingsStore: settingsStore,
+    now: clock.now,
+  );
+
   /// キャッシュ関連のプロバイダを差し替える override 群。
-  List<Override> overrides() => [
+  ///
+  /// [store] を渡すと本体だけ差し替える（削除が失敗する / 完了を待たせる等）。
+  List<Override> overrides({ImageCacheStore? store}) => [
     appDatabaseProvider.overrideWithValue(database),
     appDirectoriesProvider.overrideWith((ref) async => directories),
     cacheSettingsStoreProvider.overrideWithValue(settingsStore),
-    imageCacheStoreProvider.overrideWith((ref) async => store),
+    imageCacheStoreProvider.overrideWith((ref) async => store ?? this.store),
   ];
+}
+
+/// ファイルの読み出しだけが必ず失敗するキャッシュ。
+///
+/// 掃除や OS のキャッシュ削除が `existsSync` の直後に実体を消した状況を作る。
+class BrokenFileCacheStore extends ImageCacheStore {
+  BrokenFileCacheStore({
+    required super.database,
+    required super.directories,
+    required super.settingsStore,
+    super.now,
+  });
+
+  @override
+  Future<Uint8List> readFileBytes(File file) async =>
+      throw const FileSystemException('読み出しに失敗');
+}
+
+/// 読み出しが必ず失敗するキャッシュ（DB ごと壊れた状況）。
+class UnreadableCacheStore extends ImageCacheStore {
+  UnreadableCacheStore({
+    required super.database,
+    required super.directories,
+    required super.settingsStore,
+    super.now,
+  });
+
+  @override
+  Future<CachedImage?> read(String key) async =>
+      throw const FileSystemException('キャッシュを読めません');
+}
+
+/// 削除が必ず失敗するキャッシュ（SQLite / ファイルの失敗をテストから作る）。
+class FailingClearCacheStore extends ImageCacheStore {
+  FailingClearCacheStore({
+    required super.database,
+    required super.directories,
+    required super.settingsStore,
+    super.now,
+  });
+
+  @override
+  Future<void> clear({CachedImageKind? kind}) async =>
+      throw const FileSystemException('キャッシュを削除できません');
+}
+
+/// 削除の完了を外から決められるキャッシュ（画面を離れる操作と競わせる）。
+class GatedClearCacheStore extends ImageCacheStore {
+  GatedClearCacheStore({
+    required super.database,
+    required super.directories,
+    required super.settingsStore,
+    super.now,
+  });
+
+  final gate = Completer<void>();
+
+  @override
+  Future<void> clear({CachedImageKind? kind}) async {
+    await gate.future;
+    return super.clear(kind: kind);
+  }
 }
 
 /// 進む時刻を自分で決められる時計。

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:drift/drift.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
@@ -94,8 +95,24 @@ class ImageCacheStore {
   /// 現在時刻。保持期間 / LRU の順序をテストから決められるようにする。
   final DateTime Function() now;
 
-  /// 掃除は同時に走らせない（直列化のための鎖）。
-  Future<void>? _eviction;
+  /// 実行中の掃除。
+  Future<void>? _running;
+
+  /// 実行中の掃除の後ろに並べた 1 本（何本も積まないための待ち合わせ）。
+  Future<void>? _queued;
+
+  /// 削除の世代。[clear] のたびに進む。
+  ///
+  /// ログアウト（`ImageCachePurger`）の破棄より前に始まった取得が、破棄の後に
+  /// 完了して前のユーザーの画像を書き戻さないようにするための仕切り。
+  int get generation => _generation;
+  int _generation = 0;
+
+  /// 1 文で消すキーの数。
+  ///
+  /// SQLite の変数上限（32766）を超えると `IN (?, ?, …)` の削除が丸ごと失敗し、
+  /// 「実体だけ消えて行が残る」不整合になるため、必ず区切って消す。
+  static const _deleteChunkSize = 500;
 
   /// キーからファイル名を作る（キーには `/` が含まれるため符号化する）。
   static String fileNameFor(String key) =>
@@ -104,7 +121,17 @@ class ImageCacheStore {
   File _fileFor(String fileName) =>
       File(p.join(directories.imageCache.path, fileName));
 
+  /// ファイルの読み出し。
+  ///
+  /// テストから I/O の失敗（掃除や OS のキャッシュ削除との競合）を再現するための
+  /// 差し替え口。本番では [File.readAsBytes] そのもの。
+  @visibleForTesting
+  Future<Uint8List> readFileBytes(File file) => file.readAsBytes();
+
   /// キャッシュから読む。無ければ `null`。
+  ///
+  /// **読み出しの失敗は投げずにキャッシュミスとして返す**。ここで投げると
+  /// ネットワークから取り直せるはずの画像が「読み込めませんでした」になる。
   Future<CachedImage?> read(String key) async {
     final row = await (database.select(
       database.cachedImages,
@@ -112,14 +139,22 @@ class ImageCacheStore {
     if (row == null) return null;
 
     final file = _fileFor(row.fileName);
-    if (!file.existsSync()) {
-      // 実体だけ消えている（OS によるキャッシュ削除など）。メタ情報も捨てる。
+    final Uint8List bytes;
+    try {
+      if (!file.existsSync()) {
+        // 実体だけ消えている（OS によるキャッシュ削除など）。メタ情報も捨てる。
+        await _deleteRows([row]);
+        return null;
+      }
+      // LRU の基準を更新する（読めなかった場合に備え、読み出しは先に行う）。
+      bytes = await readFileBytes(file);
+    } on FileSystemException {
+      // `existsSync` の直後に掃除 / 手動削除が実体を消すことがある。
+      // 読めない実体はメタ情報ごと捨て、呼び出し側にはミスとして返す。
       await _deleteRows([row]);
       return null;
     }
 
-    // LRU の基準を更新する（読めなかった場合に備え、読み出しは先に行う）。
-    final bytes = await file.readAsBytes();
     await (database.update(database.cachedImages)
           ..where((table) => table.key.equals(key)))
         .write(CachedImagesCompanion(lastUsedAt: Value(now())));
@@ -128,18 +163,30 @@ class ImageCacheStore {
   }
 
   /// キャッシュへ書く。書いたあと必要なら古いものを削除する。
+  ///
+  /// [generation] を渡すと、取得を始めた時点より後に [clear] が走っていた場合に
+  /// 書き込みを捨てる（ログアウト後に前のユーザーの画像を書き戻さない）。
   Future<void> write({
     required String key,
     required CachedImageKind kind,
     required Uint8List bytes,
     String? contentType,
+    int? generation,
   }) async {
+    if (generation != null && generation != _generation) return;
+
     final fileName = fileNameFor(key);
     final file = _fileFor(fileName);
     if (!file.parent.existsSync()) {
       await file.parent.create(recursive: true);
     }
     await file.writeAsBytes(bytes, flush: false);
+
+    if (generation != null && generation != _generation) {
+      // 書いている最中に全削除が入った。実体も残さない。
+      await _deleteFile(file);
+      return;
+    }
 
     final writtenAt = now();
     await database
@@ -198,14 +245,30 @@ class ImageCacheStore {
 
   /// 上限超過分と期限切れを削除する。
   ///
-  /// 走っている掃除がある場合は**その後ろに並べる**（同じ future を返してしまうと、
-  /// 上限を下げた直後の呼び出しが古い設定の掃除で終わったことになる）。
+  /// 走っている掃除がある場合は**その後ろに 1 本だけ並べる**。
+  /// - 同じ future を返すと、上限を下げた直後の呼び出しが古い設定の掃除で
+  ///   終わったことになる（並べた 1 本は設定を読み直してから走る）。
+  /// - 呼ばれた回数だけ積むと、グリッドを一気にスクロールしたときに全件走査の
+  ///   掃除が何十本も直列に走り、その後ろで画像の読み出しが待たされる。
   Future<void> evictIfNeeded() {
-    final previous = _eviction ?? Future<void>.value();
-    final next = previous.then((_) => _evict());
+    final running = _running;
+    if (running == null) return _startEviction();
+    return _queued ??= running.then((_) => _startEviction());
+  }
+
+  Future<void> _startEviction() {
+    // これから走るので「並んでいる 1 本」の席を空ける。
+    _queued = null;
+    final task = _evict();
     // 直列化のための鎖なので、失敗しても次の掃除は続けられるようにする。
-    _eviction = next.catchError((Object _) {});
-    return next;
+    final chained = task.catchError((Object _) {});
+    _running = chained;
+    unawaited(
+      chained.whenComplete(() {
+        if (identical(_running, chained)) _running = null;
+      }),
+    );
+    return task;
   }
 
   Future<void> _evict() async {
@@ -260,15 +323,44 @@ class ImageCacheStore {
   ///
   /// **ダウンロード済みデータは消さない**（別領域 / 別テーブル）。
   Future<void> clear({CachedImageKind? kind}) async {
+    // 進行中の取得が破棄の後に書き戻さないよう、世代を進める。
+    _generation++;
+
     final query = database.select(database.cachedImages);
     if (kind != null) query.where((table) => table.kind.equalsValue(kind));
     await _deleteRows(await query.get());
+
+    // 行を持たない実体（書き込みの途中で落ちた分）もここで回収する。
+    await sweepOrphanFiles();
+  }
+
+  /// 行が無いのに残っている実体を消す。
+  ///
+  /// 書き込みは「実体 → 行」の順なので、途中で失敗したり OS に kill されたりすると
+  /// 実体だけが残る。孤児は `usage()` にも [clear] にも現れず永久に容量を食うため、
+  /// 削除操作のたびに回収する。
+  @visibleForTesting
+  Future<void> sweepOrphanFiles() async {
+    final directory = directories.imageCache;
+    if (!directory.existsSync()) return;
+
+    final fileName = database.cachedImages.fileName;
+    final rows = await (database.selectOnly(
+      database.cachedImages,
+    )..addColumns([fileName])).get();
+    final known = {for (final row in rows) row.read(fileName)};
+
+    for (final entity in directory.listSync()) {
+      if (entity is! File) continue;
+      if (known.contains(p.basename(entity.path))) continue;
+      await _deleteFile(entity);
+    }
   }
 
   /// ZIP が差し替わった巻の古い世代を捨てる。
   ///
-  /// キーは `v{volumeId}/{filesVersion}/{page}` なので、巻の接頭辞で選んで
-  /// 現在の世代以外を消す。
+  /// キーは `v{volumeId}/{filesVersion}/{page}@{配信元}` なので、巻の接頭辞で
+  /// 選んで現在の世代以外を消す。
   Future<void> evictOtherVersions({
     required int volumeId,
     required int keepFilesVersion,
@@ -285,24 +377,34 @@ class ImageCacheStore {
     ]);
   }
 
+  Future<void> _deleteFile(File file) async {
+    try {
+      if (file.existsSync()) await file.delete();
+    } on FileSystemException {
+      // 消せなくてもメタ情報は消す（次回の書き込みで上書きされる）。
+    }
+  }
+
   Future<void> _deleteRows(List<CachedImageRow> rows) async {
     if (rows.isEmpty) return;
 
-    for (final row in rows) {
-      final file = _fileFor(row.fileName);
-      try {
-        if (file.existsSync()) await file.delete();
-      } on FileSystemException {
-        // 消せなくてもメタ情報は消す（次回の書き込みで上書きされる）。
-      }
-    }
-
-    await database.batch((batch) {
-      batch.deleteWhere(
-        database.cachedImages,
-        (table) => table.key.isIn(rows.map((row) => row.key)),
+    // 実体と行を同じ区切りで消す（実体を全件消してから 1 文で行を消すと、
+    // 変数上限に当たったときに「実体だけ消えて行が全部残る」不整合になる）。
+    for (var start = 0; start < rows.length; start += _deleteChunkSize) {
+      final chunk = rows.sublist(
+        start,
+        math.min(start + _deleteChunkSize, rows.length),
       );
-    });
+      for (final row in chunk) {
+        await _deleteFile(_fileFor(row.fileName));
+      }
+      await database.batch((batch) {
+        batch.deleteWhere(
+          database.cachedImages,
+          (table) => table.key.isIn(chunk.map((row) => row.key)),
+        );
+      });
+    }
   }
 }
 

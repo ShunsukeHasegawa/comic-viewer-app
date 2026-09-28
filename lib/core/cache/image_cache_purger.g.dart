@@ -54,4 +54,4 @@ final class ImageCachePurgerProvider
   }
 }
 
-String _$imageCachePurgerHash() => r'c00b150ffb32d7e08f390b50760a49f639fded80';
+String _$imageCachePurgerHash() => r'0e05ae329ec47f272dd0d4ae688f1759024c380c';

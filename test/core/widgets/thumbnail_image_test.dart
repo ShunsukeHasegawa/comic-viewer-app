@@ -48,7 +48,11 @@ void main() {
   testWidgets('キャッシュキーは ?m= の世代を含む（差し替え後に古い表紙を出さない）', (tester) async {
     await pumpThumbnail(tester, apiUrl: '/books/thumbnail/340?m=17');
 
-    expect(requests.single.cacheKey, 't/books/thumbnail/340/17');
+    // 末尾の配信元は「開発ビルドで本番の画像を出さない」ための仕切り。
+    expect(
+      requests.single.cacheKey,
+      't/books/thumbnail/340/17@https://comic.lazgram.com',
+    );
     expect(requests.single.kind, CachedImageKind.thumbnail);
   });
 

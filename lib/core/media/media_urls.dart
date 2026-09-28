@@ -39,26 +39,35 @@ class MediaUrls {
     return _config.resolveRelative(trimmed);
   }
 
-  /// ページ画像のキャッシュキー（#8 のディスクキャッシュ / ダウンロードで使う）。
+  /// キャッシュキーに付ける配信元。
   ///
-  /// ホスト名は含めない（開発サーバーと本番を行き来してもキャッシュが混ざらないよう、
-  /// 保存先のスコープ側で分ける）。
-  static String pageCacheKey({
+  /// 保存先（`AppDirectories.imageCache` / drift の `comic_laz`）は配信元で
+  /// 分かれていない。同じ端末・同じ applicationId で本番ビルドと
+  /// `--dart-define=API_BASE_URL=...` の開発ビルドを行き来すると、巻 ID と
+  /// `files_version` が一致した瞬間に別サーバーの画像が表示されてしまうため、
+  /// **キー側で分ける**。
+  ///
+  /// 巻の接頭辞（`v{id}/`）で古い世代を掃除する `ImageCacheStore` を壊さないよう、
+  /// 配信元は必ず**末尾**に付ける。
+  String get _origin => '@${_config.apiBaseUrlString}';
+
+  /// ページ画像のキャッシュキー（#8 のディスクキャッシュ / ダウンロードで使う）。
+  String pageCacheKey({
     required int volumeId,
     required int page,
     required int filesVersion,
-  }) => 'v$volumeId/$filesVersion/$page';
+  }) => 'v$volumeId/$filesVersion/$page$_origin';
 
   /// サムネイルのキャッシュキー。`?m=` の値までを含めて世代を区別する。
   ///
   /// [thumbnail] と同じ正規化（trim / 空文字は「サムネイル無し」）を行う。
   /// キーと実際に取得する URL がずれないようにするため。
-  static String? thumbnailCacheKey(String? apiUrl) {
+  String? thumbnailCacheKey(String? apiUrl) {
     final normalized = apiUrl?.trim();
     if (normalized == null || normalized.isEmpty) return null;
     final uri = Uri.parse(normalized);
     final version = uri.queryParameters['m'] ?? '0';
-    return 't${uri.path}/$version';
+    return 't${uri.path}/$version$_origin';
   }
 }
 

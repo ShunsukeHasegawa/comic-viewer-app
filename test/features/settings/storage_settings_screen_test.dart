@@ -1,4 +1,5 @@
 import 'package:comic_laz/core/cache/cache_settings.dart';
+import 'package:comic_laz/core/cache/image_cache_store.dart';
 import 'package:comic_laz/core/storage/app_database.dart';
 import 'package:comic_laz/features/settings/presentation/storage_settings_screen.dart';
 import 'package:flutter/material.dart';
@@ -13,10 +14,14 @@ const _mb = 1024 * 1024;
 Future<CacheHarness> pumpScreen(
   WidgetTester tester, {
   CacheHarness? harness,
+  ImageCacheStore? store,
 }) async {
   final cache = harness ?? CacheHarness.create();
   final container = ProviderContainer(
-    overrides: [...testOverrides(), ...cache.overrides()],
+    overrides: [
+      ...testOverrides(),
+      ...cache.overrides(store: store),
+    ],
   );
   addTearDown(container.dispose);
 
@@ -131,6 +136,30 @@ void main() {
 
     expect((await harness.store.usage()).totalCount, 0);
     expect(downloaded.existsSync(), isTrue, reason: 'ダウンロード済みは LRU の対象外');
+  });
+
+  // 「更新できませんでした」だと、消えたのか消えていないのかが読み取れない
+  // （この画面のエラーは DB / ファイルの失敗で、API の例外ではない）。
+  testWidgets('削除に失敗したら「削除できなかった」と分かる文言を出す', (tester) async {
+    final harness = CacheHarness.create();
+    await harness.record('v1/100/1', bytes: 64);
+
+    await pumpScreen(
+      tester,
+      harness: harness,
+      store: harness.storeLike(FailingClearCacheStore.new),
+    );
+    await tester.tap(find.text('キャッシュを削除'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '削除'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('キャッシュの削除に失敗しました'), findsOneWidget);
+    expect(
+      find.textContaining('更新できませんでした'),
+      findsNothing,
+      reason: '再取得の失敗と削除の失敗を同じ文面にしない',
+    );
   });
 
   testWidgets('「サムネイルだけ削除」ではページ画像が残る', (tester) async {

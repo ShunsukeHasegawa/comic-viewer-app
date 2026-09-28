@@ -12,6 +12,14 @@ part 'dio_provider.g.dart';
 /// Web 版 `utils/api.ts` と同じタイムアウト（8 秒）。
 const apiTimeout = Duration(seconds: 8);
 
+/// 画像 / アーカイブ取得のタイムアウト。
+///
+/// 同じ [Dio] を通すが、JSON API の 8 秒をそのまま当てると落ちる。自宅サーバー
+/// （HDD）は久しく触っていない ZIP をシークするのに時間がかかり、応答が始まる前に
+/// `receiveTimeout` で切れる → `RetryInterceptor` がもう一度大きい画像を取りに行き、
+/// 待っていれば表示できたページが約 2 倍の時間のあと失敗になる。
+const imageTimeout = Duration(seconds: 60);
+
 /// JSON API を叩くリクエストに付けるヘッダ。
 ///
 /// 画像 / アーカイブ取得も同じ [Dio] を通す（Bearer 付与を共有するため）ので、

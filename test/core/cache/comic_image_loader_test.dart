@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:comic_laz/core/cache/comic_image_loader.dart';
+import 'package:comic_laz/core/cache/image_cache_store.dart';
 import 'package:comic_laz/core/media/media_urls.dart';
 import 'package:comic_laz/core/network/api_exception.dart';
 import 'package:comic_laz/core/network/dio_provider.dart';
@@ -39,6 +41,7 @@ ResponseBody _imageResponse(
 build({
   Future<ResponseBody> Function(RequestOptions options)? handler,
   String? token = 'stored-token',
+  ImageCacheStore Function(CacheHarness harness)? store,
 }) {
   final harness = CacheHarness.create();
   final container = ProviderContainer(
@@ -60,7 +63,10 @@ build({
   final dio = container.read(dioProvider)..httpClientAdapter = adapter;
 
   return (
-    loader: ComicImageLoader(dio: dio, store: harness.store),
+    loader: ComicImageLoader(
+      dio: dio,
+      store: store?.call(harness) ?? harness.store,
+    ),
     harness: harness,
     adapter: adapter,
     urls: container.read(mediaUrlsProvider),
@@ -246,6 +252,27 @@ void main() {
       expect(await fixture.harness.store.read(request.cacheKey), isNull);
     });
 
+    // キャッシュの読み出しは掃除 / 手動削除 / OS のキャッシュ削除と競合する。
+    // そこで投げると、取り直せば表示できる画像が「読み込めませんでした」になり、
+    // しかも `ApiException` ではないので文言も「読み込みに失敗しました。」になる。
+    test('キャッシュが読めなくてもネットワークから取り直す', () async {
+      final fixture = build(
+        store: (harness) => harness.storeLike(UnreadableCacheStore.new),
+      );
+
+      final bytes = await fixture.loader.load(
+        ComicImageRequest.page(
+          fixture.urls,
+          volumeId: 340,
+          page: 1,
+          filesVersion: 1,
+        ),
+      );
+
+      expect(bytes, imageBytes(32));
+      expect(fixture.adapter.requests, hasLength(1));
+    });
+
     test('失敗した直後でも再取得できる（進行中の記録を残さない）', () async {
       var fail = true;
       final fixture = build(
@@ -276,6 +303,56 @@ void main() {
     });
   });
 
+  group('ログアウトとの競合', () {
+    // ログアウト時の破棄より後に完了したダウンロードを書き戻すと、別のユーザーで
+    // 同じ巻を開いたときに前のユーザー向けに取得した画像が出てしまう（#8 / #15）。
+    test('取得中にログアウト（全削除）が入ったら書き戻さない', () async {
+      final gate = Completer<void>();
+      final fixture = build(
+        handler: (options) async {
+          await gate.future;
+          return _imageResponse(imageBytes(8));
+        },
+      );
+      final request = ComicImageRequest.page(
+        fixture.urls,
+        volumeId: 340,
+        page: 1,
+        filesVersion: 1,
+      );
+
+      final pending = fixture.loader.load(request);
+      await pumpEventQueue();
+      await fixture.harness.store.clear();
+      gate.complete();
+
+      expect(await pending, imageBytes(8), reason: '表示中の画像まで失敗にはしない');
+      expect(await fixture.harness.store.usage(), CacheUsage.empty);
+      expect(fixture.harness.fileCount, 0);
+    });
+  });
+
+  group('タイムアウト', () {
+    // JSON API の 8 秒をそのまま当てると、自宅サーバー（HDD）が ZIP をシークして
+    // いる間に切れ、再送も重なって「待てば表示できたページ」が失敗になる。
+    test('画像は API より長いタイムアウトで取りに行く', () async {
+      final fixture = build();
+
+      await fixture.loader.load(
+        ComicImageRequest.page(
+          fixture.urls,
+          volumeId: 340,
+          page: 1,
+          filesVersion: 1,
+        ),
+      );
+
+      final options = fixture.adapter.requests.single;
+      expect(options.receiveTimeout, imageTimeout);
+      expect(imageTimeout, greaterThan(apiTimeout));
+    });
+  });
+
   group('キャッシュキー', () {
     test('サムネイルは ?m= の世代まで含め、種別も分ける', () {
       final fixture = build();
@@ -285,7 +362,7 @@ void main() {
         '/books/thumbnail/340?m=17',
       );
 
-      expect(request?.cacheKey, 't/books/thumbnail/340/17');
+      expect(request?.cacheKey, 't/books/thumbnail/340/17@$_apiBaseUrl');
       expect(request?.kind, CachedImageKind.thumbnail);
       expect(request?.url.toString(), '$_apiBaseUrl/books/thumbnail/340?m=17');
     });
@@ -297,7 +374,9 @@ void main() {
       expect(ComicImageRequest.thumbnail(fixture.urls, '  '), isNull);
     });
 
-    test('ページはホスト名を含めない（開発 / 本番で混ざらないのは保存先で分ける）', () {
+    // 保存先（キャッシュディレクトリ / DB）は配信元で分かれていないので、
+    // キーに配信元が入っていないと開発ビルドで本番の画像を表示しうる。
+    test('ページは巻 / 世代 / ページ + 配信元で決まる', () {
       final fixture = build();
 
       final request = ComicImageRequest.page(
@@ -307,7 +386,7 @@ void main() {
         filesVersion: 99,
       );
 
-      expect(request.cacheKey, 'v340/99/7');
+      expect(request.cacheKey, 'v340/99/7@$_apiBaseUrl');
       expect(request.kind, CachedImageKind.page);
     });
   });
