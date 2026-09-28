@@ -9,6 +9,7 @@ import 'package:comic_laz/features/auth/application/auth_controller.dart';
 import 'package:comic_laz/features/auth/data/auth_api.dart';
 import 'package:comic_laz/features/auth/data/auth_store.dart';
 import 'package:comic_laz/features/auth/domain/auth_state.dart';
+import 'package:comic_laz/features/viewer/presentation/widgets/viewer_page_image.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
@@ -27,6 +28,8 @@ List<Override> testOverrides({
   UserApi? userApi,
   TaxonomyApi? taxonomyApi,
   ThumbnailBuilder? thumbnailBuilder,
+  ViewerImageBuilder? viewerImageBuilder,
+  PagePrecacher? pagePrecacher,
   String apiBaseUrl = 'http://localhost:8000',
 }) {
   return [
@@ -43,6 +46,14 @@ List<Override> testOverrides({
     userApiProvider.overrideWithValue(userApi ?? FakeUserApi()),
     taxonomyApiProvider.overrideWithValue(taxonomyApi ?? FakeTaxonomyApi()),
     // 画像はネットワークを触らせない（URL とヘッダだけ検証できるようにする）。
+    viewerImageBuilderProvider.overrideWithValue(
+      viewerImageBuilder ??
+          (context, url, headers, onRetry) =>
+              const ColoredBox(color: Color(0xFF444444)),
+    ),
+    pagePrecacherProvider.overrideWithValue(
+      pagePrecacher ?? (context, url, headers) async {},
+    ),
     thumbnailBuilderProvider.overrideWithValue(
       thumbnailBuilder ??
           (context, url, headers, fit) =>

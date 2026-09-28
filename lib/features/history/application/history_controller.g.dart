@@ -36,7 +36,7 @@ final class HistoryControllerProvider
   HistoryController create() => HistoryController();
 }
 
-String _$historyControllerHash() => r'56bcccb37466d796235c3890a55ae72501635ef8';
+String _$historyControllerHash() => r'46cc5ef561ad8679e0f01714f28821c9479660fd';
 
 /// 読書履歴の読み込み（`GET /api/user-volume-status/history?page=`、1 ページ 10 件）。
 

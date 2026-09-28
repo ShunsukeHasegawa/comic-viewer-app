@@ -36,7 +36,7 @@ final class StatsControllerProvider
   StatsController create() => StatsController();
 }
 
-String _$statsControllerHash() => r'0e733471eb3c12295c8d77fa527dfe6d8b55c46a';
+String _$statsControllerHash() => r'd62186b4f39ee42fd78aae416b9f1c9ce45f2c97';
 
 /// 読書統計（`GET /api/v2/user/stats`）。
 

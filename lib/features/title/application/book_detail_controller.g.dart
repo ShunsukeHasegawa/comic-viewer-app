@@ -54,7 +54,7 @@ final class BookDetailControllerProvider
 }
 
 String _$bookDetailControllerHash() =>
-    r'6e2a7a203f81b389efc50b1e2ecba1e6135da1d0';
+    r'b2cb0740cd48efca77920280d36423da51b17d02';
 
 /// タイトル詳細の読み込みとお気に入り操作。
 
