@@ -12,8 +12,10 @@ import '../../../core/widgets/app_back_button.dart';
 import '../../../core/widgets/error_view.dart';
 import '../../../core/widgets/thumbnail_image.dart';
 import '../../../domain/models/book_detail.dart';
+import '../../downloads/application/download_queue.dart';
 import '../../downloads/application/downloaded_lookup.dart';
 import '../application/book_detail_controller.dart';
+import 'widgets/title_download_dialog.dart';
 import 'widgets/volume_tile.dart';
 
 /// タイトル詳細 / 巻一覧画面。
@@ -104,7 +106,9 @@ class _DetailBody extends ConsumerWidget {
           ),
         ),
         SliverToBoxAdapter(child: _Meta(detail: detail)),
-        SliverToBoxAdapter(child: _VolumesHeader(detail: detail)),
+        SliverToBoxAdapter(
+          child: _VolumesHeader(detail: detail, isStale: data.isStale),
+        ),
         if (detail.volumes.isEmpty)
           const SliverToBoxAdapter(
             child: Padding(
@@ -545,39 +549,79 @@ class _Meta extends StatelessWidget {
   }
 }
 
-class _VolumesHeader extends StatelessWidget {
-  const _VolumesHeader({required this.detail});
+class _VolumesHeader extends ConsumerWidget {
+  const _VolumesHeader({required this.detail, required this.isStale});
 
   final BookDetail detail;
 
+  /// 端末の控えを表示している（圏外）。一括ダウンロードは積んでも失敗する
+  /// だけなので出さない。
+  final bool isStale;
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
-    final downloadable = detail.volumes.where((v) => v.isDownloadable).toList();
-    // 件数と容量は同じ巻から数える（サーバーの total_archive_bytes が無い場合に
-    // 「2 巻 (0 B)」のような食い違った表示にならないように）。
-    final bytes = downloadable.fold<int>(
-      0,
-      (sum, volume) => sum + (volume.archiveBytes ?? 0),
-    );
+    final downloads = ref.watch(downloadQueueProvider).value ?? const {};
+    final volumeIds = {for (final volume in detail.volumes) volume.id};
+    final active = [
+      for (final download in downloads.values)
+        if (download.isActive && volumeIds.contains(download.volumeId))
+          download.volumeId,
+    ];
+    final hasDownloadable = detail.volumes.any((v) => v.isDownloadable);
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 16, 8, 0),
       child: Row(
         children: [
           Expanded(child: Text('巻一覧', style: theme.textTheme.titleMedium)),
-          // タイトル単位の一括ダウンロードは #10（容量を見せてから実行する）。
-          TextButton.icon(
-            onPressed: null,
-            icon: const Icon(Icons.download_for_offline_outlined),
-            label: Text(
-              downloadable.isEmpty
-                  ? '一括ダウンロード不可'
-                  : '全 ${downloadable.length} 巻 (${formatBytes(bytes)})',
+          // 積んだ巻は一覧の各行でも止められるが、まとめて積んだものを
+          // 1 巻ずつ止めさせるのは酷なので、タイトル単位でも止められるようにする。
+          if (active.isNotEmpty)
+            TextButton.icon(
+              onPressed: () => _pauseAll(context, ref, active),
+              icon: const Icon(Icons.pause),
+              label: Text('${active.length} 巻を中断'),
             ),
-          ),
+          if (!isStale && hasDownloadable)
+            TextButton.icon(
+              onPressed: () => _download(context, ref),
+              icon: const Icon(Icons.download_for_offline_outlined),
+              label: const Text('まとめてダウンロード'),
+            ),
         ],
       ),
     );
+  }
+
+  Future<void> _download(BuildContext context, WidgetRef ref) async {
+    final queue = ref.read(downloadQueueProvider.notifier);
+    final plan = await showTitleDownloadDialog(context, detail: detail);
+    if (plan == null || !context.mounted) return;
+    try {
+      await queue.enqueueAll([
+        for (final volume in plan.volumes)
+          (volumeId: volume.id, bookId: detail.id),
+      ]);
+    } on Object catch (error) {
+      if (!context.mounted) return;
+      showActionFailure(context, error, what: 'ダウンロードの開始');
+    }
+  }
+
+  Future<void> _pauseAll(
+    BuildContext context,
+    WidgetRef ref,
+    List<int> volumeIds,
+  ) async {
+    final queue = ref.read(downloadQueueProvider.notifier);
+    try {
+      for (final volumeId in volumeIds) {
+        await queue.pause(volumeId);
+      }
+    } on Object catch (error) {
+      if (!context.mounted) return;
+      showActionFailure(context, error, what: 'ダウンロードの中断');
+    }
   }
 }

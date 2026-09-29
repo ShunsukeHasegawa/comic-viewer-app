@@ -1,6 +1,7 @@
 import 'package:comic_laz/core/network/api_exception.dart';
 import 'package:comic_laz/core/widgets/error_view.dart';
 import 'package:comic_laz/domain/models/book_detail.dart';
+import 'package:comic_laz/features/downloads/application/download_settings.dart';
 import 'package:comic_laz/features/downloads/domain/volume_download.dart';
 import 'package:comic_laz/features/library/application/library_controller.dart';
 import 'package:comic_laz/features/title/application/book_detail_controller.dart';
@@ -66,11 +67,13 @@ Future<ProviderContainer> pumpDetail(
   StubDownloadQueue? downloadQueue,
   Map<int, VolumeDownload>? downloads,
   FakeOfflineMetadataGateway? offline,
+  DownloadGate downloadGate = DownloadGate.open,
 }) async {
   final container = createContainer(
     booksApi: booksApi ?? FakeBooksApi(bookDetail: sampleDetail()),
     downloadQueue: downloadQueue == null ? null : () => downloadQueue,
     downloads: downloads,
+    downloadGate: downloadGate,
     offlineMetadata: offline,
   );
   addTearDown(container.dispose);
@@ -153,12 +156,8 @@ void main() {
   testWidgets('全巻の容量を表示する（一括ダウンロードの判断材料）', (tester) async {
     await pumpDetail(tester);
 
+    // 範囲ごとの巻数と容量は「まとめてダウンロード」のダイアログで見せる（#10）。
     expect(find.text('100.0 MB'), findsOneWidget, reason: 'メタ情報');
-    expect(
-      find.textContaining('全 1 巻 (100.0 MB)'),
-      findsOneWidget,
-      reason: '一括ダウンロードの対象巻数と容量',
-    );
   });
 
   testWidgets('読みかけの巻は「続きから読む」', (tester) async {
@@ -511,26 +510,163 @@ void main() {
     expect(find.text('1 巻を読む'), findsNothing);
   });
 
-  testWidgets('一括ダウンロードの件数と容量は同じ巻から数える', (tester) async {
-    await pumpDetail(
-      tester,
-      booksApi: FakeBooksApi(
-        bookDetail: sampleDetail(
-          volumes: const [
-            BookVolume(
-              id: 340,
-              volume: 1,
-              archiveBytes: 1048576,
-              filesVersion: 1,
-            ),
-            // files_version が無い = ダウンロード対象外
-            BookVolume(id: 341, volume: 2, archiveBytes: 99999999),
-          ],
-        ).copyWith(totalArchiveBytes: 0),
+  group('まとめてダウンロード（#10）', () {
+    // 1 巻は読了、4 巻はアーカイブが無い（数えない）。
+    final volumes = [
+      const BookVolume(
+        id: 340,
+        volume: 1,
+        archiveBytes: 1048576,
+        filesVersion: 1,
+        userStatus: VolumeUserStatus(
+          currentPage: 10,
+          maxPage: 10,
+          isFinished: true,
+        ),
       ),
-    );
+      const BookVolume(
+        id: 341,
+        volume: 2,
+        archiveBytes: 2097152,
+        filesVersion: 1,
+      ),
+      const BookVolume(
+        id: 342,
+        volume: 3,
+        archiveBytes: 3145728,
+        filesVersion: 1,
+      ),
+      const BookVolume(id: 343, volume: 4),
+    ];
 
-    expect(find.textContaining('全 1 巻 (1.0 MB)'), findsOneWidget);
+    Future<StubDownloadQueue> openDialog(
+      WidgetTester tester, {
+      DownloadGate downloadGate = DownloadGate.open,
+    }) async {
+      final queue = StubDownloadQueue();
+      await pumpDetail(
+        tester,
+        booksApi: FakeBooksApi(bookDetail: sampleDetail(volumes: volumes)),
+        downloadQueue: queue,
+        downloadGate: downloadGate,
+      );
+      await tester.tap(find.text('まとめてダウンロード'));
+      await tester.pumpAndSettle();
+      return queue;
+    }
+
+    testWidgets('範囲ごとの巻数と容量を見せてから積む', (tester) async {
+      final queue = await openDialog(tester);
+
+      // 1 巻数百 MB になるので、押した瞬間には積まない。
+      expect(queue.enqueued, isEmpty);
+      // 全巻と「最新の 3 巻」が同じ 3 巻になる。
+      expect(find.text('3 巻・6.0 MB'), findsNWidgets(2), reason: '全巻 / 最新 3 巻');
+      expect(find.text('2 巻・5.0 MB'), findsOneWidget, reason: '未読のみ');
+
+      await tester.tap(find.text('未読のみ'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('2 巻をダウンロード'));
+      await tester.pumpAndSettle();
+
+      expect(queue.enqueued, [
+        (volumeId: 341, bookId: 12),
+        (volumeId: 342, bookId: 12),
+      ], reason: '読む順（巻数の小さい順）に積む');
+    });
+
+    testWidgets('最新 N 巻は N を選べる', (tester) async {
+      final queue = await openDialog(tester);
+
+      await tester.tap(find.byKey(const Key('title-download-latest-count')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('1').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('1 巻をダウンロード'));
+      await tester.pumpAndSettle();
+
+      expect(queue.enqueued, [(volumeId: 342, bookId: 12)]);
+    });
+
+    testWidgets('Wi-Fi 待ちになることを実行前に伝える', (tester) async {
+      await openDialog(tester, downloadGate: DownloadGate.waitingForWifi);
+
+      expect(find.textContaining('Wi-Fi に接続するまで待機します'), findsOneWidget);
+    });
+
+    testWidgets('Wi-Fi 待ちの巻は「ダウンロード待ち」ではなくそう表示する', (tester) async {
+      await pumpDetail(
+        tester,
+        downloadGate: DownloadGate.waitingForWifi,
+        downloads: {
+          340: const VolumeDownload(
+            volumeId: 340,
+            bookId: 12,
+            filesVersion: 0,
+            status: VolumeDownloadStatus.queued,
+          ),
+        },
+      );
+
+      expect(find.textContaining('Wi-Fi 接続待ち'), findsOneWidget);
+    });
+
+    testWidgets('取得中・待機中の巻をタイトル単位で中断できる', (tester) async {
+      final queue = StubDownloadQueue(
+        initial: {
+          341: const VolumeDownload(
+            volumeId: 341,
+            bookId: 12,
+            filesVersion: 0,
+            status: VolumeDownloadStatus.downloading,
+          ),
+          342: const VolumeDownload(
+            volumeId: 342,
+            bookId: 12,
+            filesVersion: 0,
+            status: VolumeDownloadStatus.queued,
+          ),
+          // 別タイトルの巻は止めない。
+          999: const VolumeDownload(
+            volumeId: 999,
+            bookId: 77,
+            filesVersion: 0,
+            status: VolumeDownloadStatus.downloading,
+          ),
+        },
+      );
+      await pumpDetail(
+        tester,
+        booksApi: FakeBooksApi(bookDetail: sampleDetail(volumes: volumes)),
+        downloadQueue: queue,
+      );
+
+      await tester.tap(find.text('2 巻を中断'));
+      await tester.pumpAndSettle();
+
+      expect(queue.paused, unorderedEquals([341, 342]));
+    });
+
+    testWidgets('すべて手元にあるなら実行できない', (tester) async {
+      await pumpDetail(
+        tester,
+        downloads: {
+          340: const VolumeDownload(
+            volumeId: 340,
+            bookId: 12,
+            filesVersion: 1,
+            status: VolumeDownloadStatus.completed,
+          ),
+        },
+      );
+      await tester.tap(find.text('まとめてダウンロード'));
+      await tester.pumpAndSettle();
+
+      final button = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'ダウンロードする巻がありません'),
+      );
+      expect(button.onPressed, isNull);
+    });
   });
 
   testWidgets('再取得に失敗したらその場で知らせる（詳細は残す）', (tester) async {
@@ -606,6 +742,8 @@ void main() {
 
       expect(find.text('オフラインです。ダウンロード済みの巻だけ読めます。'), findsOneWidget);
       expect(find.byType(VolumeTile), findsNWidgets(2));
+      // 圏外で積んでも失敗するだけなので、一括ダウンロードは出さない。
+      expect(find.text('まとめてダウンロード'), findsNothing);
     });
 
     testWidgets('未ダウンロードの巻は無効表示にする（エラーダイアログを出さない）', (tester) async {

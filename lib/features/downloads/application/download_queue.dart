@@ -13,6 +13,7 @@ import '../data/archive_verifier.dart';
 import '../data/download_store.dart';
 import '../data/free_space_probe.dart';
 import '../domain/volume_download.dart';
+import 'download_settings.dart';
 
 part 'download_queue.g.dart';
 
@@ -55,6 +56,12 @@ enum _StopIntent {
 
   /// 一時ファイルも台帳も捨てる。
   cancel,
+
+  /// 一時ファイルを残して待機に戻す（Wi-Fi が切れた。#10）。
+  ///
+  /// ユーザーが止めたわけではないので「中断中」にはしない。Wi-Fi に戻れば
+  /// そのまま続きから再開する。
+  hold,
 }
 
 /// 巻単位のダウンロードキュー。
@@ -62,6 +69,8 @@ enum _StopIntent {
 /// - 同時実行数を [downloadConcurrency] に制限する
 /// - 中断・再開は `Range`（一時ファイルの実サイズを起点にする）
 /// - 失敗は指数バックオフで再試行。429 は `Retry-After` に従う
+/// - [downloadGateProvider] が閉じている間（Wi-Fi 限定で Wi-Fi に繋がって
+///   いない）は新しく始めず、走行中のものは待機に戻す（#10）
 /// - 完了前に検証（サイズ / ZIP として開けるか / ページ数）し、
 ///   通ったものだけ `.part` から本番のファイル名へ rename する
 @Riverpod(keepAlive: true)
@@ -102,6 +111,15 @@ class DownloadQueue extends _$DownloadQueue {
     _persistedBytes.clear();
     _installed.clear();
 
+    // Wi-Fi に繋がったら待機中のものを流し、切れたら走行中のものを待機に戻す。
+    ref.listen(downloadGateProvider, (_, gate) {
+      if (gate == DownloadGate.open) {
+        _pump();
+      } else {
+        _holdRunning();
+      }
+    });
+
     final store = await ref.watch(downloadStoreProvider.future);
     _store = store;
     ref.onDispose(_cancelAll);
@@ -109,16 +127,23 @@ class DownloadQueue extends _$DownloadQueue {
     final loaded = await store.loadAll();
     final restored = <int, VolumeDownload>{};
     for (final entry in loaded.entries) {
-      // アプリが落ちた時点で「取得中」だったものは中断に戻す。
-      // 起動と同時に自動再開はしない（HDD サーバーへ一斉に取りに行かせない。
-      // モバイル回線で勝手に数百 MB 落とさない）。一時ファイルは残すので、
-      // ユーザーが再開すれば途中から続く。
-      final download = entry.value.isActive
-          ? entry.value.copyWith(status: VolumeDownloadStatus.paused)
+      // アプリが落ちた時点で「取得中」だったものは待機に戻し、続きから取り直す。
+      // ユーザーは止めていない（まとめて積んだ巻の途中で OS に落とされただけ）
+      // ので「中断中」にはしない。以前は起動と同時に再開しないよう中断に
+      // 戻していたが、その理由（モバイル回線で勝手に数百 MB 落とさない / HDD
+      // サーバーへ一斉に取りに行かせない）は Wi-Fi 限定のゲートと同時実行数 1
+      // で守られる（#10）。一時ファイルは残っているので途中から続く。
+      final download = entry.value.status == VolumeDownloadStatus.downloading
+          ? entry.value.copyWith(status: VolumeDownloadStatus.queued)
           : entry.value;
       if (download != entry.value) await store.save(download);
       restored[entry.key] = download;
     }
+    // 台帳が state に入ってから流す（ゲートが先に開いていると、その通知の
+    // 時点ではまだ台帳が無く、何も始まらない）。
+    Future<void>(() {
+      if (ref.mounted) _pump();
+    }).ignore();
     return restored;
   }
 
@@ -149,6 +174,16 @@ class DownloadQueue extends _$DownloadQueue {
             );
     await _save(download);
     _pump();
+  }
+
+  /// まとめて積む（タイトル単位の一括ダウンロード。#10）。
+  ///
+  /// 並べた順に取得する（1 巻から順に読めるようになる）。
+  Future<void> enqueueAll(Iterable<({int volumeId, int bookId})> items) async {
+    for (final item in items) {
+      await enqueue(volumeId: item.volumeId, bookId: item.bookId);
+      if (!ref.mounted) return;
+    }
   }
 
   /// 中断する（一時ファイルは残す）。
@@ -218,6 +253,7 @@ class DownloadQueue extends _$DownloadQueue {
 
   /// 空いている枠に待機中のダウンロードを載せる。
   void _pump() {
+    if (!_isGateOpen) return;
     final limit = ref.read(downloadConcurrencyProvider);
     while (_running.length < limit) {
       final next = _nextQueued();
@@ -265,6 +301,11 @@ class DownloadQueue extends _$DownloadQueue {
     // status だけを書き換えて戻る。ここで status を見ないと「中断中」と表示した
     // まま数百 MB を落としきってしまう（モバイル回線を勝手に使い切らせない）。
     if (!download.isActive) return;
+    // マニフェストを取っている間に Wi-Fi が切れた。取得は始めずに待機へ戻す。
+    if (!_isGateOpen) {
+      await _save(download.copyWith(status: VolumeDownloadStatus.queued));
+      return;
+    }
 
     // 世代にかかわる項目（filesVersion / pageCount / archive_etag）は**検証が
     // 通ってから**台帳に書く（[_complete]）。取り直しの途中で落ちても、台帳は
@@ -381,6 +422,15 @@ class DownloadQueue extends _$DownloadQueue {
     final api = ref.read(volumesApiProvider);
 
     for (var attempt = 1; ; attempt++) {
+      // トークンを作る直前にゲートを見る。ここまでの await（ディレクトリ作成・
+      // 台帳の書き込み・空き容量・再試行の待ち時間）の間に Wi-Fi が切れても、
+      // トークンの無い取得は [_holdRunning] から止められない（ゲートの通知は
+      // 閉じた瞬間の 1 回だけ）。ここからトークンの登録までは await が無い。
+      if (!_isGateOpen) {
+        _stopIntents.putIfAbsent(volumeId, () => _StopIntent.hold);
+        await _handleStop(volumeId, part, generation: generation);
+        return false;
+      }
       final token = CancelToken();
       _cancelTokens[volumeId] = token;
       try {
@@ -499,6 +549,17 @@ class DownloadQueue extends _$DownloadQueue {
     final current = state.value?[volumeId];
     if (current == null) return;
     final received = part.existsSync() ? part.lengthSync() : 0;
+    if (intent == _StopIntent.hold) {
+      // 取り直しの途中でも台帳は旧世代を指したままなので、そのまま待機に戻せる
+      // （[_installed] も捨てない。再開後の失敗で旧世代へ戻す先として要る）。
+      await _save(
+        current.copyWith(
+          status: VolumeDownloadStatus.queued,
+          receivedBytes: received,
+        ),
+      );
+      return;
+    }
     await _savePaused(current, receivedBytes: received);
   }
 
@@ -654,6 +715,21 @@ class DownloadQueue extends _$DownloadQueue {
     final next = <int, VolumeDownload>{...?state.value}..remove(volumeId);
     state = AsyncData(next);
   }
+
+  /// Wi-Fi が切れた。走行中の取得を止めて待機に戻す（一時ファイルは残す）。
+  ///
+  /// ユーザーが既に中断 / 取り消しを指示しているものはそちらを優先する。
+  /// マニフェスト取得中・再試行の待ち時間中のもの（トークンが無い）は、
+  /// [_run] / [_fetch] がゲートを見て自分で待機に戻る。
+  void _holdRunning() {
+    for (final MapEntry(key: volumeId, value: token) in _cancelTokens.entries) {
+      _stopIntents.putIfAbsent(volumeId, () => _StopIntent.hold);
+      if (!token.isCancelled) token.cancel('waiting for wifi');
+    }
+  }
+
+  bool get _isGateOpen =>
+      ref.mounted && ref.read(downloadGateProvider) == DownloadGate.open;
 
   void _cancelAll() {
     for (final token in _cancelTokens.values) {

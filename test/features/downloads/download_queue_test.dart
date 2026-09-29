@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:comic_laz/core/device/network_kind_monitor.dart';
 import 'package:comic_laz/core/network/api_exception.dart';
 import 'package:comic_laz/core/storage/app_database.dart';
 import 'package:comic_laz/features/downloads/application/download_queue.dart';
+import 'package:comic_laz/features/downloads/application/download_settings.dart';
 import 'package:comic_laz/features/downloads/data/archive_verifier.dart';
 import 'package:comic_laz/features/downloads/domain/volume_download.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -32,6 +34,7 @@ void main() {
     int filesVersion = 111,
     int concurrency = 1,
     ArchiveVerifier? verifier,
+    NetworkKind network = NetworkKind.unmetered,
   }) {
     final bytes = archiveBytes ?? zipWithPages(3);
     final harness = DownloadHarness.create(
@@ -44,16 +47,32 @@ void main() {
       ),
       archiveBytes: bytes,
     )..verifier = verifier;
+    // キューを組み立てる前に決める（最初の問い合わせで回線の種類を読むため）。
+    harness.network.kind = network;
     final container = ProviderContainer(
       overrides: harness.overrides(concurrency: concurrency),
     );
     addTearDown(container.dispose);
+    // アプリと同じく購読しておく（購読の無い provider は一時停止され、
+    // 回線の切り替えがキューに届かない。app.dart 参照）。
+    container.listen(downloadQueueProvider, (_, _) {});
     active = container;
     return (
       harness: harness,
       container: container,
       queue: container.read(downloadQueueProvider.notifier),
     );
+  }
+
+  /// 条件が満たされるまで待つ（Wi-Fi 待ちは「落ち着かない」ので [settle] が使えない）。
+  ///
+  /// 途中まで実ファイルへ書くので、固定回数の `pumpEventQueue` ではマシンの
+  /// 負荷次第で待ち切れない（[settleDownloads] と同じ理由）。
+  Future<void> waitUntil(bool Function() condition) async {
+    for (var round = 0; round < 200 && !condition(); round++) {
+      await pumpEventQueue(times: 5);
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
   }
 
   VolumeDownload? downloadOf(
@@ -204,7 +223,9 @@ void main() {
       );
     });
 
-    test('アプリが落ちて残った「取得中」は中断に戻す（起動と同時には再開しない）', () async {
+    // まとめて積んだ巻の途中で OS に落とされても、残りを 1 巻ずつ再開させない。
+    // モバイル回線で勝手に落とさないことは Wi-Fi 限定のゲートが守る（#10）。
+    test('アプリが落ちて残った「取得中」は待機に戻し、続きから取り直す', () async {
       final scope = setUpQueue();
       // 前回の実行が残した状態を作る。
       await scope.harness.store.save(
@@ -223,11 +244,6 @@ void main() {
       );
 
       await scope.container.read(downloadQueueProvider.future);
-
-      expect(downloadOf(scope.container)!.status, VolumeDownloadStatus.paused);
-      expect(scope.harness.api.archiveCalls, 0, reason: '勝手に取りに行かない');
-
-      await scope.queue.resume(volumeId);
       await settle();
 
       expect(scope.harness.api.requestedOffsets, [40]);
@@ -837,6 +853,209 @@ void main() {
         reason: '実体を消したあとに completed の行が残ると、読めない「ダウンロード済み」が出る',
       );
       expect(scope.harness.archiveFile().existsSync(), isFalse);
+    });
+  });
+
+  group('Wi-Fi 限定（#10）', () {
+    test('モバイル回線では始めず、Wi-Fi に繋がったら始まる', () async {
+      final scope = setUpQueue(network: NetworkKind.metered);
+
+      await scope.queue.enqueue(volumeId: volumeId, bookId: bookId);
+      await pumpEventQueue(times: 50);
+
+      expect(downloadOf(scope.container)!.status, VolumeDownloadStatus.queued);
+      expect(
+        scope.harness.api.manifestCalls,
+        0,
+        reason: 'モバイル回線で 1 巻数百 MB を勝手に使わない（既定は Wi-Fi 限定）',
+      );
+      expect(
+        scope.container.read(downloadGateProvider),
+        DownloadGate.waitingForWifi,
+      );
+
+      scope.harness.network.switchTo(NetworkKind.unmetered);
+      await settle();
+
+      expect(
+        downloadOf(scope.container)!.status,
+        VolumeDownloadStatus.completed,
+      );
+    });
+
+    test('取得中に Wi-Fi が切れたら一時ファイルを残して待機に戻し、戻れば続きから取る', () async {
+      final scope = setUpQueue();
+      scope.harness.api.steps = [
+        FakeArchiveStep(
+          bytes: 40,
+          onDelivered: () async {
+            scope.harness.network.switchTo(NetworkKind.metered);
+            await pumpEventQueue();
+          },
+        ),
+        const FakeArchiveStep(),
+      ];
+
+      await scope.queue.enqueue(volumeId: volumeId, bookId: bookId);
+      await waitUntil(
+        () =>
+            downloadOf(scope.container)?.status ==
+                VolumeDownloadStatus.queued &&
+            scope.harness.api.archiveCalls > 0,
+      );
+
+      final held = downloadOf(scope.container)!;
+      expect(
+        held.status,
+        VolumeDownloadStatus.queued,
+        reason: 'ユーザーが止めたのではないので「中断中」にはしない（Wi-Fi に戻れば自動で再開）',
+      );
+      expect(held.receivedBytes, 40);
+      expect(scope.harness.partFile().lengthSync(), 40);
+
+      scope.harness.network.switchTo(NetworkKind.unmetered);
+      await settle();
+
+      expect(
+        downloadOf(scope.container)!.status,
+        VolumeDownloadStatus.completed,
+      );
+      expect(scope.harness.api.requestedOffsets, [
+        0,
+        40,
+      ], reason: '待機に戻しても一時ファイルは捨てず、続きから取る');
+    });
+
+    test('再試行の待ち時間中に Wi-Fi が切れたら再試行せずに待機へ戻す', () async {
+      final scope = setUpQueue();
+      scope.harness.api.steps = [
+        const FakeArchiveStep(bytes: 40, error: NetworkException()),
+        const FakeArchiveStep(),
+      ];
+      // 待ち時間の間に回線が切り替わる（Wi-Fi が切れた直後の通信エラー）。
+      scope.harness.duringDelay = () async {
+        scope.harness.network.switchTo(NetworkKind.metered);
+        await pumpEventQueue();
+      };
+
+      await scope.queue.enqueue(volumeId: volumeId, bookId: bookId);
+      await waitUntil(
+        () =>
+            downloadOf(scope.container)?.status ==
+                VolumeDownloadStatus.queued &&
+            scope.harness.delays.isNotEmpty,
+      );
+
+      expect(scope.harness.delays, hasLength(1));
+      expect(scope.harness.api.archiveCalls, 1, reason: 'モバイル回線で再試行しない');
+      final held = downloadOf(scope.container)!;
+      expect(held.status, VolumeDownloadStatus.queued);
+      expect(held.receivedBytes, 40, reason: '届いた分は捨てない');
+    });
+
+    test('設定を OFF にすればモバイル回線でも取得する', () async {
+      final scope = setUpQueue(network: NetworkKind.metered);
+      await scope.container.read(downloadWifiOnlyProvider.notifier).set(false);
+
+      await scope.queue.enqueue(volumeId: volumeId, bookId: bookId);
+      await settle();
+
+      expect(
+        downloadOf(scope.container)!.status,
+        VolumeDownloadStatus.completed,
+      );
+      // アプリを開き直しても OFF のまま。
+      expect(
+        await scope.container
+            .read(downloadSettingsStoreProvider)
+            .readWifiOnly(),
+        isFalse,
+      );
+    });
+
+    test('Wi-Fi 待ちの巻もユーザーが中断できる', () async {
+      final scope = setUpQueue(network: NetworkKind.metered);
+
+      await scope.queue.enqueue(volumeId: volumeId, bookId: bookId);
+      await pumpEventQueue(times: 50);
+      await scope.queue.pause(volumeId);
+      scope.harness.network.switchTo(NetworkKind.unmetered);
+      await pumpEventQueue(times: 50);
+
+      expect(
+        downloadOf(scope.container)!.status,
+        VolumeDownloadStatus.paused,
+        reason: '中断した巻は Wi-Fi に繋がっても勝手に始めない',
+      );
+      expect(scope.harness.api.manifestCalls, 0);
+    });
+
+    test('取得を始める直前に Wi-Fi が切れたら始めない', () async {
+      final scope = setUpQueue();
+      // マニフェストの後・トークンを作る前（空き容量を調べている間）に切れる。
+      // ゲートの通知は閉じた瞬間の 1 回だけなので、止める相手（トークン）が
+      // まだ無いこの隙間を取りこぼすと、モバイル回線で 1 巻まるごと落としてしまう。
+      scope.harness.freeSpace = 1 << 40;
+      scope.harness.duringFreeSpaceProbe = () async {
+        scope.harness.network.switchTo(NetworkKind.metered);
+        await pumpEventQueue();
+      };
+
+      await scope.queue.enqueue(volumeId: volumeId, bookId: bookId);
+      await waitUntil(
+        () =>
+            scope.harness.api.manifestCalls > 0 &&
+            downloadOf(scope.container)?.status == VolumeDownloadStatus.queued,
+      );
+
+      expect(scope.harness.api.archiveCalls, 0);
+      expect(downloadOf(scope.container)!.status, VolumeDownloadStatus.queued);
+    });
+
+    test('Wi-Fi 待ちのままアプリが落ちても、次に起動して Wi-Fi なら始まる', () async {
+      final scope = setUpQueue();
+      await scope.harness.store.save(
+        const VolumeDownload(
+          volumeId: volumeId,
+          bookId: bookId,
+          filesVersion: 0,
+          status: VolumeDownloadStatus.queued,
+        ),
+      );
+
+      await scope.container.read(downloadQueueProvider.future);
+      await settle();
+
+      expect(
+        downloadOf(scope.container)!.status,
+        VolumeDownloadStatus.completed,
+        reason: '「Wi-Fi に戻ると再開」の約束をアプリの再起動で破らない',
+      );
+    });
+  });
+
+  group('まとめて積む（#10）', () {
+    test('積んだ巻をすべて取得する', () async {
+      final scope = setUpQueue();
+      scope.harness.api.manifests[341] = testManifest(
+        id: 341,
+        archiveBytes: scope.harness.api.archiveBytes.length,
+      );
+
+      await scope.queue.enqueueAll([
+        (volumeId: volumeId, bookId: bookId),
+        (volumeId: 341, bookId: bookId),
+      ]);
+      await settle();
+
+      expect(
+        downloadOf(scope.container)!.status,
+        VolumeDownloadStatus.completed,
+      );
+      expect(
+        downloadOf(scope.container, 341)!.status,
+        VolumeDownloadStatus.completed,
+      );
     });
   });
 }

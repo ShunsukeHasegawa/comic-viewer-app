@@ -114,6 +114,8 @@ String _$downloadRetryDelayHash() =>
 /// - 同時実行数を [downloadConcurrency] に制限する
 /// - 中断・再開は `Range`（一時ファイルの実サイズを起点にする）
 /// - 失敗は指数バックオフで再試行。429 は `Retry-After` に従う
+/// - [downloadGateProvider] が閉じている間（Wi-Fi 限定で Wi-Fi に繋がって
+///   いない）は新しく始めず、走行中のものは待機に戻す（#10）
 /// - 完了前に検証（サイズ / ZIP として開けるか / ページ数）し、
 ///   通ったものだけ `.part` から本番のファイル名へ rename する
 
@@ -125,6 +127,8 @@ final downloadQueueProvider = DownloadQueueProvider._();
 /// - 同時実行数を [downloadConcurrency] に制限する
 /// - 中断・再開は `Range`（一時ファイルの実サイズを起点にする）
 /// - 失敗は指数バックオフで再試行。429 は `Retry-After` に従う
+/// - [downloadGateProvider] が閉じている間（Wi-Fi 限定で Wi-Fi に繋がって
+///   いない）は新しく始めず、走行中のものは待機に戻す（#10）
 /// - 完了前に検証（サイズ / ZIP として開けるか / ページ数）し、
 ///   通ったものだけ `.part` から本番のファイル名へ rename する
 final class DownloadQueueProvider
@@ -134,6 +138,8 @@ final class DownloadQueueProvider
   /// - 同時実行数を [downloadConcurrency] に制限する
   /// - 中断・再開は `Range`（一時ファイルの実サイズを起点にする）
   /// - 失敗は指数バックオフで再試行。429 は `Retry-After` に従う
+  /// - [downloadGateProvider] が閉じている間（Wi-Fi 限定で Wi-Fi に繋がって
+  ///   いない）は新しく始めず、走行中のものは待機に戻す（#10）
   /// - 完了前に検証（サイズ / ZIP として開けるか / ページ数）し、
   ///   通ったものだけ `.part` から本番のファイル名へ rename する
   DownloadQueueProvider._()
@@ -155,13 +161,15 @@ final class DownloadQueueProvider
   DownloadQueue create() => DownloadQueue();
 }
 
-String _$downloadQueueHash() => r'a78ae3e0731254bf452a0af2a596fe42dd1fdbcb';
+String _$downloadQueueHash() => r'5f0e7ec5eb5034bd8ea5c8118f7517a2ce82deee';
 
 /// 巻単位のダウンロードキュー。
 ///
 /// - 同時実行数を [downloadConcurrency] に制限する
 /// - 中断・再開は `Range`（一時ファイルの実サイズを起点にする）
 /// - 失敗は指数バックオフで再試行。429 は `Retry-After` に従う
+/// - [downloadGateProvider] が閉じている間（Wi-Fi 限定で Wi-Fi に繋がって
+///   いない）は新しく始めず、走行中のものは待機に戻す（#10）
 /// - 完了前に検証（サイズ / ZIP として開けるか / ページ数）し、
 ///   通ったものだけ `.part` から本番のファイル名へ rename する
 

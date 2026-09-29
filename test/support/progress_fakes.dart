@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:comic_laz/core/device/connectivity_monitor.dart';
+import 'package:comic_laz/core/device/network_kind_monitor.dart';
 import 'package:comic_laz/domain/models/volume_status_sync.dart';
 import 'package:comic_laz/features/progress/data/progress_store.dart';
 import 'package:comic_laz/features/progress/domain/reading_progress.dart';
@@ -245,6 +246,30 @@ class FakeConnectivityMonitor implements ConnectivityMonitor {
 
   /// 圏外 → 接続あり。
   void restore() => _controller.add(null);
+
+  Future<void> close() => _controller.close();
+}
+
+/// 回線の切り替えをテストから起こせる [NetworkKindMonitor]（#10）。
+class FakeNetworkKindMonitor implements NetworkKindMonitor {
+  FakeNetworkKindMonitor([this.kind = NetworkKind.unmetered]) {
+    addTearDown(close);
+  }
+
+  NetworkKind kind;
+
+  final _controller = StreamController<NetworkKind>.broadcast();
+
+  @override
+  Future<NetworkKind> current() async => kind;
+
+  @override
+  Stream<NetworkKind> get changes => _controller.stream;
+
+  void switchTo(NetworkKind next) {
+    kind = next;
+    _controller.add(next);
+  }
 
   Future<void> close() => _controller.close();
 }

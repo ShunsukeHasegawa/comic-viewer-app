@@ -6,6 +6,7 @@ import '../../../../core/widgets/error_view.dart';
 import '../../../../core/widgets/thumbnail_image.dart';
 import '../../../../domain/models/book_detail.dart';
 import '../../../downloads/application/download_queue.dart';
+import '../../../downloads/application/download_settings.dart';
 import '../../../downloads/domain/volume_download.dart';
 import '../../../library/presentation/widgets/book_tiles.dart';
 
@@ -33,6 +34,8 @@ class VolumeTile extends ConsumerWidget {
     // ダウンロード状態は 1 度だけ読み、行のラベルとボタンで共有する
     // （別々に watch すると表示と操作がずれる瞬間ができる）。
     final download = ref.watch(downloadQueueProvider).value?[volume.id];
+    final waitingForWifi =
+        ref.watch(downloadGateProvider) == DownloadGate.waitingForWifi;
 
     return ListTile(
       onTap: onOpen,
@@ -61,7 +64,7 @@ class VolumeTile extends ConsumerWidget {
               else
                 '未読',
               if (volume.archiveBytes case final bytes?) formatBytes(bytes),
-              downloadLabelOf(volume, download),
+              downloadLabelOf(volume, download, waitingForWifi: waitingForWifi),
               if (onOpen == null) 'オフラインでは読めません',
             ].join('・'),
             style: theme.textTheme.bodySmall,
@@ -88,7 +91,14 @@ class VolumeTile extends ConsumerWidget {
 }
 
 /// 行に出すダウンロード状態の文言（未DL / DL中 / DL済み / 更新あり）。
-String downloadLabelOf(BookVolume volume, VolumeDownload? download) {
+///
+/// [waitingForWifi] は Wi-Fi 限定の設定で Wi-Fi に繋がっていないこと（#10）。
+/// 待機中の巻が動かない理由を「ダウンロード待ち」のまま隠さない。
+String downloadLabelOf(
+  BookVolume volume,
+  VolumeDownload? download, {
+  bool waitingForWifi = false,
+}) {
   // サーバー側のアーカイブが消えていても、端末に落としてあるものは
   // 「ダウンロード済み」として見せる（削除する導線もここからしか無い）。
   if (download == null) {
@@ -96,7 +106,7 @@ String downloadLabelOf(BookVolume volume, VolumeDownload? download) {
   }
 
   return switch (download.status) {
-    VolumeDownloadStatus.queued => 'ダウンロード待ち',
+    VolumeDownloadStatus.queued => waitingForWifi ? 'Wi-Fi 接続待ち' : 'ダウンロード待ち',
     VolumeDownloadStatus.downloading => 'ダウンロード中 ${download.percent}%',
     VolumeDownloadStatus.paused => '中断中 ${download.percent}%',
     VolumeDownloadStatus.failed =>
@@ -112,7 +122,7 @@ String downloadLabelOf(BookVolume volume, VolumeDownload? download) {
 
 /// 巻のダウンロード操作。
 ///
-/// 一括ダウンロード（タイトル単位）は #10、ダウンロード一覧の画面は #13。
+/// 一括ダウンロード（タイトル単位）は詳細画面の見出し、ダウンロード一覧の画面は #13。
 /// ここは巻ごとの導線だけを持つ。
 class VolumeDownloadButton extends ConsumerWidget {
   const VolumeDownloadButton({

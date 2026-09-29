@@ -6,6 +6,7 @@ import '../../../core/storage/app_database.dart';
 import '../../../core/utils/format.dart';
 import '../../../core/widgets/app_back_button.dart';
 import '../../../core/widgets/error_view.dart';
+import '../../downloads/application/download_settings.dart';
 import '../application/storage_settings_controller.dart';
 
 /// ストレージ設定（キャッシュの可視化・上限・保持期間・手動削除）。
@@ -19,6 +20,7 @@ class StorageSettingsScreen extends ConsumerWidget {
   static const pageLimitKey = Key('storage-settings-page-limit');
   static const thumbnailLimitKey = Key('storage-settings-thumbnail-limit');
   static const retentionKey = Key('storage-settings-retention');
+  static const wifiOnlyKey = Key('storage-settings-wifi-only');
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -129,6 +131,10 @@ class _Body extends ConsumerWidget {
           onChanged: (retention) =>
               _update(context, ref, settings.copyWith(retention: retention)),
         ),
+        const Divider(),
+
+        const _SectionTitle('ダウンロード'),
+        const _WifiOnlyTile(),
         const Divider(),
 
         const _SectionTitle('削除'),
@@ -303,6 +309,38 @@ class _ChoiceTile<T> extends StatelessWidget {
           onChanged(selected);
         },
       ),
+    );
+  }
+}
+
+/// 「Wi-Fi 接続時のみダウンロード」（#10）。
+///
+/// キャッシュの設定とは保存先も読み込みも別なので、自分で watch する
+/// （キャッシュの使用量の再計算を待たずに切り替えられる）。
+class _WifiOnlyTile extends ConsumerWidget {
+  const _WifiOnlyTile();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final setting = ref.watch(downloadWifiOnlyProvider);
+    return SwitchListTile(
+      key: StorageSettingsScreen.wifiOnlyKey,
+      title: const Text('Wi-Fi 接続時のみダウンロード'),
+      subtitle: const Text('モバイル回線に切り替わると一時停止し、Wi-Fi に戻ると続きから再開します'),
+      // 読み込み中は操作させない（既定値を表示して押させると、読み込み後に
+      // 押したのと逆の値へ戻ったように見える）。読めなかったときは既定（ON。
+      // キューもそう扱う）を見せたうえで、保存し直せるようにしておく。
+      value: setting.value ?? true,
+      onChanged: setting.isLoading
+          ? null
+          : (value) async {
+              try {
+                await ref.read(downloadWifiOnlyProvider.notifier).set(value);
+              } on Object catch (error) {
+                if (!context.mounted) return;
+                showActionFailure(context, error, what: 'ダウンロードの設定の保存');
+              }
+            },
     );
   }
 }

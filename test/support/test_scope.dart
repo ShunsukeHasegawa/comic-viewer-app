@@ -13,6 +13,7 @@ import 'package:comic_laz/features/auth/data/auth_api.dart';
 import 'package:comic_laz/features/auth/data/auth_store.dart';
 import 'package:comic_laz/features/auth/domain/auth_state.dart';
 import 'package:comic_laz/features/downloads/application/download_queue.dart';
+import 'package:comic_laz/features/downloads/application/download_settings.dart';
 import 'package:comic_laz/features/downloads/domain/volume_download.dart';
 import 'package:comic_laz/features/library/data/library_repository.dart';
 import 'package:comic_laz/features/offline/application/offline_metadata_gateway.dart';
@@ -43,6 +44,8 @@ List<Override> testOverrides({
   StaleCacheEvictor? staleCacheEvictor,
   Map<int, VolumeDownload>? downloads,
   DownloadQueue Function()? downloadQueue,
+  DownloadGate downloadGate = DownloadGate.open,
+  DownloadWifiOnly Function()? downloadWifiOnly,
   ProgressStore? progressStore,
   ConnectivityMonitor? connectivityMonitor,
   OfflineMetadataGateway? offlineMetadata,
@@ -85,6 +88,11 @@ List<Override> testOverrides({
     downloadQueueProvider.overrideWith(
       downloadQueue ?? () => StubDownloadQueue(initial: {...?downloads}),
     ),
+    // 回線の種類はプラグイン、設定は drift。画面のテストでは結果だけ差し込む。
+    downloadGateProvider.overrideWithValue(downloadGate),
+    downloadWifiOnlyProvider.overrideWith(
+      downloadWifiOnly ?? StubDownloadWifiOnly.new,
+    ),
     // 読書進捗は drift（プラットフォームチャネル）を使うので、既定はメモリ実装。
     progressStoreProvider.overrideWithValue(
       progressStore ?? InMemoryProgressStore(),
@@ -126,6 +134,7 @@ ProviderContainer createContainer({
   TaxonomyApi? taxonomyApi,
   Map<int, VolumeDownload>? downloads,
   DownloadQueue Function()? downloadQueue,
+  DownloadGate downloadGate = DownloadGate.open,
   ProgressStore? progressStore,
   ConnectivityMonitor? connectivityMonitor,
   OfflineMetadataGateway? offlineMetadata,
@@ -144,6 +153,7 @@ ProviderContainer createContainer({
         taxonomyApi: taxonomyApi,
         downloads: downloads,
         downloadQueue: downloadQueue,
+        downloadGate: downloadGate,
         progressStore: progressStore,
         connectivityMonitor: connectivityMonitor,
         offlineMetadata: offlineMetadata,

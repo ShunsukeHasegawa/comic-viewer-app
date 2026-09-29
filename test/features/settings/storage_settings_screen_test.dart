@@ -1,6 +1,7 @@
 import 'package:comic_laz/core/cache/cache_settings.dart';
 import 'package:comic_laz/core/cache/image_cache_store.dart';
 import 'package:comic_laz/core/storage/app_database.dart';
+import 'package:comic_laz/features/downloads/application/download_settings.dart';
 import 'package:comic_laz/features/settings/presentation/storage_settings_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -19,7 +20,8 @@ Future<CacheHarness> pumpScreen(
   final cache = harness ?? CacheHarness.create();
   final container = ProviderContainer(
     overrides: [
-      ...testOverrides(),
+      // 「Wi-Fi 接続時のみ」も本物の drift に保存させる。
+      ...testOverrides(downloadWifiOnly: DownloadWifiOnly.new),
       ...cache.overrides(store: store),
     ],
   );
@@ -97,6 +99,20 @@ void main() {
       CacheLimit.mb256,
       reason: '次回起動でも同じ上限で動く必要がある',
     );
+  });
+
+  testWidgets('「Wi-Fi 接続時のみダウンロード」は既定で ON、切り替えると保存される', (tester) async {
+    final harness = await pumpScreen(tester);
+    final store = DownloadSettingsStore(harness.database);
+
+    final tile = find.byKey(StorageSettingsScreen.wifiOnlyKey);
+    expect(tester.widget<SwitchListTile>(tile).value, isTrue);
+
+    await tester.tap(tile);
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<SwitchListTile>(tile).value, isFalse);
+    expect(await store.readWifiOnly(), isFalse, reason: 'アプリを開き直しても OFF のまま');
   });
 
   testWidgets('保持期間を変えると保存される', (tester) async {

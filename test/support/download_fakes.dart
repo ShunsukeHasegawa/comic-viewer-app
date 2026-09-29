@@ -4,10 +4,12 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
+import 'package:comic_laz/core/device/network_kind_monitor.dart';
 import 'package:comic_laz/core/network/api_exception.dart';
 import 'package:comic_laz/data/api/volumes_api.dart';
 import 'package:comic_laz/domain/models/volume_manifest.dart';
 import 'package:comic_laz/features/downloads/application/download_queue.dart';
+import 'package:comic_laz/features/downloads/application/download_settings.dart';
 import 'package:comic_laz/features/downloads/data/archive_verifier.dart';
 import 'package:comic_laz/features/downloads/data/download_store.dart';
 import 'package:comic_laz/features/downloads/data/free_space_probe.dart';
@@ -19,6 +21,7 @@ import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'cache_fakes.dart';
+import 'progress_fakes.dart';
 
 /// 1 回の `downloadArchive` 呼び出しでの振る舞い。
 ///
@@ -189,6 +192,9 @@ class DownloadHarness {
   final GatedDownloadStore store;
   final FakeVolumesApi api;
 
+  /// 回線（既定は Wi-Fi。Wi-Fi 限定の設定は本物の drift で持つ）。
+  final network = FakeNetworkKindMonitor();
+
   /// 空き容量（`null` は「分からない」= 本番の既定と同じ）。
   int? freeSpace;
 
@@ -197,6 +203,12 @@ class DownloadHarness {
 
   /// バックオフで待った時間。
   final delays = <Duration>[];
+
+  /// 待ち時間の間に起こすこと（待っている間の回線の切り替えなど）。
+  Future<void> Function()? duringDelay;
+
+  /// 空き容量を調べている間に起こすこと（取得を始める直前の割り込み）。
+  Future<void> Function()? duringFreeSpaceProbe;
 
   /// 完了後に「オフライン用の詳細を控える」導線が呼ばれたタイトル（#11）。
   ///
@@ -207,6 +219,7 @@ class DownloadHarness {
     ...cache.overrides(),
     downloadStoreProvider.overrideWith((ref) async => store),
     volumesApiProvider.overrideWithValue(api),
+    networkKindMonitorProvider.overrideWithValue(network),
     downloadConcurrencyProvider.overrideWithValue(concurrency),
     offlineDetailWarmerProvider.overrideWithValue(
       (bookId) async => warmedBooks.add(bookId),
@@ -214,8 +227,12 @@ class DownloadHarness {
     // 待ち時間は記録だけして進める（テストを実時間で待たせない）。
     downloadRetryDelayProvider.overrideWithValue((duration) async {
       delays.add(duration);
+      await duringDelay?.call();
     }),
-    freeSpaceProbeProvider.overrideWithValue(() async => freeSpace),
+    freeSpaceProbeProvider.overrideWithValue(() async {
+      await duringFreeSpaceProbe?.call();
+      return freeSpace;
+    }),
     if (verifier case final verifier?)
       archiveVerifierProvider.overrideWithValue(verifier),
   ];
@@ -336,6 +353,19 @@ class StubDownloadQueue extends DownloadQueue {
   void emit(VolumeDownload download) {
     state = AsyncData({...?state.value, download.volumeId: download});
   }
+}
+
+/// drift を触らない「Wi-Fi 接続時のみ」の設定（画面のテスト用）。
+class StubDownloadWifiOnly extends DownloadWifiOnly {
+  StubDownloadWifiOnly({this.initial = true});
+
+  final bool initial;
+
+  @override
+  Future<bool> build() async => initial;
+
+  @override
+  Future<void> set(bool value) async => state = AsyncData(value);
 }
 
 /// 台帳を読み終えないキュー（圏外コールドスタートの読み込み中を模す）。
