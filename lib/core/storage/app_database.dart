@@ -101,6 +101,35 @@ class DownloadedVolumes extends Table {
   Set<Column<Object>> get primaryKey => {volumeId};
 }
 
+/// オフラインでも失わない読書進捗（#12）。
+///
+/// ページ送りのたびにここへ書き、オンラインのときに一括同期 API へ送る。
+/// 「送信済み（[synced]）」を行ごとに持つのは、**送れなかった進捗を再送しても
+/// 他端末の進捗を巻き戻さない**ため。送信できた行だけ `synced` を立て、
+/// サーバーの方が新しかった行はサーバー値で上書きする。
+///
+/// Web 版（localStorage）は未送信 1 件だけだったが、オフラインでは複数巻を
+/// 読み進められるので巻ごとに 1 行持つ。
+@DataClassName('ReadingProgressRow')
+class ReadingProgresses extends Table {
+  IntColumn get volumeId => integer()();
+
+  /// 表示していたページ（1 始まり）。`min(page, files.length)` に丸めた値。
+  IntColumn get currentPage => integer()();
+
+  /// 巻のページ数。0 ページ（ZIP が無い）の巻は行を作らない。
+  IntColumn get maxPage => integer()();
+
+  /// 端末が読んだと申告する時刻。一括同期 API の新旧比較はこの値同士で行う。
+  DateTimeColumn get readAt => dateTime()();
+
+  /// サーバーへ反映済みか。`false` の行だけを送る。
+  BoolColumn get synced => boolean().withDefault(const Constant(false))();
+
+  @override
+  Set<Column<Object>> get primaryKey => {volumeId};
+}
+
 /// アプリ設定（キャッシュ上限など）の保存先。
 ///
 /// 数が少なく型もばらばらなので、key-value で持つ。
@@ -116,14 +145,16 @@ class Settings extends Table {
 
 /// ローカル DB。
 ///
-/// #12 以降で進捗キュー・一覧キャッシュのテーブルを足す。
-@DriftDatabase(tables: [CachedImages, Settings, DownloadedVolumes])
+/// #11 で一覧 / 巻メタのキャッシュテーブルを足す。
+@DriftDatabase(
+  tables: [CachedImages, Settings, DownloadedVolumes, ReadingProgresses],
+)
 class AppDatabase extends _$AppDatabase {
   AppDatabase([QueryExecutor? executor])
     : super(executor ?? driftDatabase(name: 'comic_laz'));
 
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   /// 既存の端末を作り直さずに列 / テーブルを足す。
   ///
@@ -135,6 +166,8 @@ class AppDatabase extends _$AppDatabase {
     onUpgrade: (m, from, to) async {
       // v2: 巻単位のダウンロード管理（#9）。
       if (from < 2) await m.createTable(downloadedVolumes);
+      // v3: オフライン進捗のキュー（#12）。未送信の進捗は端末にしか無い。
+      if (from < 3) await m.createTable(readingProgresses);
     },
   );
 }

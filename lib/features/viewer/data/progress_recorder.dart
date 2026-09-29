@@ -1,51 +1,45 @@
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
-import '../../../core/network/api_exception.dart';
-import '../../../data/api/user_api.dart';
+import '../../progress/application/progress_syncer.dart';
+import '../../progress/data/local_progress_recorder.dart';
+import '../../progress/data/progress_store.dart';
 
 part 'progress_recorder.g.dart';
 
 /// 読書進捗の記録先。
 ///
-/// #12 でローカルキュー（drift）+ オンライン復帰時の一括同期に差し替える。
-/// 現状はその場でサーバーへ送り、失敗は握る（次の機会に送り直す）。
+/// 実装（#12）は「まず端末に書き、送れたら `synced` を立てる」ローカルキュー。
+/// ビューアは送れたかどうかだけ見て、送れなかった進捗を次の機会に送り直す。
 abstract interface class ProgressRecorder {
-  /// 進捗を記録する。送信できたかどうかを返す。
+  /// ページ送りごとの保存。**端末に書くだけで送信はしない**。
+  ///
+  /// 送信は巻の移動 / 画面を閉じる / バックグラウンド遷移にまとめる（HDD の
+  /// 自宅サーバーへの書き込みを抑える）が、保存はページ送りごとに行う。
+  /// アプリが OS に落とされても読んだところが残るようにするため。
+  Future<void> savePage({
+    required int volumeId,
+    required int currentPage,
+    required int maxPage,
+    required DateTime readAt,
+  });
+
+  /// 進捗を記録する。**サーバーへ送れたか**を返す（ローカル保存は常に行う）。
   Future<bool> record({
     required int volumeId,
     required int currentPage,
     required int maxPage,
     required DateTime readAt,
   });
-}
 
-class ApiProgressRecorder implements ProgressRecorder {
-  const ApiProgressRecorder(this._api);
-
-  final UserApi _api;
-
-  @override
-  Future<bool> record({
-    required int volumeId,
-    required int currentPage,
-    required int maxPage,
-    required DateTime readAt,
-  }) async {
-    try {
-      await _api.recordVolumeStatus(
-        volumeId: volumeId,
-        currentPage: currentPage,
-        maxPage: maxPage,
-        readAt: readAt,
-      );
-      return true;
-    } on ApiException {
-      // 圏外・失敗しても読書は止めない。#12 でローカルに貯めて後で送る。
-      return false;
-    }
-  }
+  /// まだサーバーへ送れていないローカルの進捗ページ（無ければ `null`）。
+  ///
+  /// オフラインで読み進めた巻を開き直したときに、サーバー由来の古いページから
+  /// 再開して**手元の進捗を巻き戻さない**ために使う。
+  Future<int?> unsyncedPage(int volumeId);
 }
 
 @Riverpod(keepAlive: true)
-ProgressRecorder progressRecorder(Ref ref) =>
-    ApiProgressRecorder(ref.watch(userApiProvider));
+ProgressRecorder progressRecorder(Ref ref) => LocalProgressRecorder(
+  store: ref.watch(progressStoreProvider),
+  syncer: ref.watch(progressSyncerProvider),
+);

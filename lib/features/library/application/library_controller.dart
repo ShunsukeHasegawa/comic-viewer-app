@@ -6,6 +6,8 @@ import '../../../data/api/taxonomy_api.dart';
 import '../../../data/api/user_api.dart';
 import '../../../domain/models/book.dart';
 import '../../../domain/models/reading_book.dart';
+import '../../progress/data/progress_store.dart';
+import '../../progress/domain/reading_progress.dart';
 import '../data/library_repository.dart';
 import '../domain/book_search_index.dart';
 import '../domain/library_filter.dart';
@@ -62,6 +64,7 @@ class LibraryController extends _$LibraryController {
     final repository = ref.read(libraryRepositoryProvider);
     final userApi = ref.read(userApiProvider);
     final taxonomyApi = ref.read(taxonomyApiProvider);
+    final progressStore = ref.read(progressStoreProvider);
     final previous = state.value;
 
     final result = await repository.loadBooks(forceRefresh: forceRefresh);
@@ -82,11 +85,15 @@ class LibraryController extends _$LibraryController {
       previous?.tags ?? const <Taxonomy>[],
     );
 
+    // オフラインで読み進めた巻は、サーバーの値のままだと読む前のページを指す。
+    // 未送信のローカル進捗があればそれを優先する（#12）。
+    final local = await _localProgress(progressStore);
+
     return LibraryData(
       books: result.books,
       favoriteIds: result.userStatus.favorites.toSet(),
       unreadIds: result.userStatus.unreads.toSet(),
-      reading: reading,
+      reading: applyLocalProgress(reading, local),
       categories: categories,
       tags: tags,
       searchIndex: BookSearchIndex.build(result.books),
@@ -110,6 +117,15 @@ class LibraryController extends _$LibraryController {
     ref
         .read(libraryRepositoryProvider)
         .updateCachedFavorite(bookId: bookId, isFavorite: isFavorite);
+  }
+
+  /// 端末に貯めた進捗。読めなくても一覧は出す（表示の補正にしか使わない）。
+  Future<Map<int, ReadingProgress>> _localProgress(ProgressStore store) async {
+    try {
+      return await store.loadAll();
+    } on Object {
+      return const {};
+    }
   }
 
   /// 補助的な取得。通信・サーバー起因の失敗は既定値で代替する。

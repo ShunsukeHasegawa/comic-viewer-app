@@ -1,6 +1,7 @@
 import 'package:comic_laz/core/cache/comic_image_loader.dart';
 import 'package:comic_laz/core/cache/image_cache_store.dart';
 import 'package:comic_laz/core/config/app_config.dart';
+import 'package:comic_laz/core/device/connectivity_monitor.dart';
 import 'package:comic_laz/core/device/device_name_resolver.dart';
 import 'package:comic_laz/core/session/session_data_purger.dart';
 import 'package:comic_laz/core/widgets/thumbnail_image.dart';
@@ -13,6 +14,7 @@ import 'package:comic_laz/features/auth/data/auth_store.dart';
 import 'package:comic_laz/features/auth/domain/auth_state.dart';
 import 'package:comic_laz/features/downloads/application/download_queue.dart';
 import 'package:comic_laz/features/downloads/domain/volume_download.dart';
+import 'package:comic_laz/features/progress/data/progress_store.dart';
 import 'package:comic_laz/features/viewer/presentation/widgets/viewer_page_image.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -22,6 +24,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'api_fakes.dart';
 import 'auth_fakes.dart';
 import 'download_fakes.dart';
+import 'progress_fakes.dart';
 
 /// プラットフォームチャネルとネットワークを触らないようにした標準の override 群。
 List<Override> testOverrides({
@@ -38,6 +41,8 @@ List<Override> testOverrides({
   StaleCacheEvictor? staleCacheEvictor,
   Map<int, VolumeDownload>? downloads,
   DownloadQueue Function()? downloadQueue,
+  ProgressStore? progressStore,
+  ConnectivityMonitor? connectivityMonitor,
   String apiBaseUrl = 'http://localhost:8000',
 }) {
   return [
@@ -76,6 +81,14 @@ List<Override> testOverrides({
     downloadQueueProvider.overrideWith(
       downloadQueue ?? () => StubDownloadQueue(initial: {...?downloads}),
     ),
+    // 読書進捗は drift（プラットフォームチャネル）を使うので、既定はメモリ実装。
+    progressStoreProvider.overrideWithValue(
+      progressStore ?? InMemoryProgressStore(),
+    ),
+    // ネットワーク復帰の検知はプラグイン。テストからは流さない。
+    connectivityMonitorProvider.overrideWithValue(
+      connectivityMonitor ?? FakeConnectivityMonitor(),
+    ),
   ];
 }
 
@@ -100,6 +113,8 @@ ProviderContainer createContainer({
   TaxonomyApi? taxonomyApi,
   Map<int, VolumeDownload>? downloads,
   DownloadQueue Function()? downloadQueue,
+  ProgressStore? progressStore,
+  ConnectivityMonitor? connectivityMonitor,
 }) {
   return ProviderContainer(
     overrides: testOverrides(
@@ -112,6 +127,8 @@ ProviderContainer createContainer({
       taxonomyApi: taxonomyApi,
       downloads: downloads,
       downloadQueue: downloadQueue,
+      progressStore: progressStore,
+      connectivityMonitor: connectivityMonitor,
     ),
   );
 }

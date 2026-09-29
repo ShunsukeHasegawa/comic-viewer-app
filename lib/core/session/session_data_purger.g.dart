@@ -10,14 +10,14 @@ part of 'session_data_purger.dart';
 // ignore_for_file: type=lint, type=warning
 /// 登録済みの破棄処理。
 ///
-/// 端末内にユーザー固有のデータを持つ機能は、ここに実装を足す（進捗 #12）。
+/// 端末内にユーザー固有のデータを持つ機能は、ここに実装を足す。
 
 @ProviderFor(sessionDataPurgers)
 final sessionDataPurgersProvider = SessionDataPurgersProvider._();
 
 /// 登録済みの破棄処理。
 ///
-/// 端末内にユーザー固有のデータを持つ機能は、ここに実装を足す（進捗 #12）。
+/// 端末内にユーザー固有のデータを持つ機能は、ここに実装を足す。
 
 final class SessionDataPurgersProvider
     extends
@@ -29,7 +29,7 @@ final class SessionDataPurgersProvider
     with $Provider<List<SessionDataPurger>> {
   /// 登録済みの破棄処理。
   ///
-  /// 端末内にユーザー固有のデータを持つ機能は、ここに実装を足す（進捗 #12）。
+  /// 端末内にユーザー固有のデータを持つ機能は、ここに実装を足す。
   SessionDataPurgersProvider._()
     : super(
         from: null,
@@ -65,4 +65,4 @@ final class SessionDataPurgersProvider
 }
 
 String _$sessionDataPurgersHash() =>
-    r'04e1dfbe5dda9c95ce0f6d68211521be9f3b8503';
+    r'a1a173dafdb17e7416f2332d15e2d637791ebcce';

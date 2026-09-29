@@ -73,15 +73,33 @@ class ViewerController extends _$ViewerController {
     ref.onDispose(flushProgress);
 
     final volume = await ref.read(booksApiProvider).fetchReadVolume(volumeId);
-    // 前回の続きから開く（サーバー由来でも範囲外の値は丸める）。
-    final startPage = volume.isEmpty ? 1 : volume.clampPage(volume.currentPage);
-    _lastRecordedPage = volume.isEmpty ? null : startPage;
+    final startPage = await _resolveStartPage(volume);
 
     _evictStaleImageCache(volume);
 
     final next = ViewerState(volume: volume, currentPage: startPage);
     _updatePending(next);
     return next;
+  }
+
+  /// 開始ページを決める。
+  ///
+  /// サーバーの `current_page` よりも**未送信のローカル進捗**を優先する（#12）。
+  /// オフラインで読み進めた巻を開き直したときに、送れていない進捗が無かった
+  /// ことにされて巻き戻るのを防ぐため。
+  ///
+  /// [_lastRecordedPage] は「送信済みのページ」なので、ローカル進捗から再開した
+  /// 場合は `null` のままにしておく（閉じるときに送信を試みさせる）。
+  Future<int> _resolveStartPage(ReadVolume volume) async {
+    _lastRecordedPage = null;
+    if (volume.isEmpty) return 1;
+
+    final unsyncedPage = await _recorder?.unsyncedPage(volume.id);
+    if (unsyncedPage != null) return volume.clampPage(unsyncedPage);
+
+    final startPage = volume.clampPage(volume.currentPage);
+    _lastRecordedPage = startPage;
+    return startPage;
   }
 
   /// ZIP が差し替わっていたら、この巻の古い世代の画像キャッシュを捨てる（#8）。
@@ -111,7 +129,29 @@ class ViewerController extends _$ViewerController {
 
     final next = current.copyWith(currentPage: clamped);
     _updatePending(next);
+    // ページ送りごとに端末へ書く（送信は巻移動 / 閉じる / バックグラウンドで
+    // まとめる）。表示を待たせないので待たない。
+    _saveProgressLocally();
     state = AsyncValue.data(next);
+  }
+
+  /// 現在のページをローカルに保存する（#12）。
+  ///
+  /// 送信はしないので失敗しても何も起きない（次のページ送りで書き直される）。
+  void _saveProgressLocally() {
+    final pending = _pending;
+    final recorder = _recorder;
+    if (pending == null || recorder == null) return;
+    unawaited(
+      recorder
+          .savePage(
+            volumeId: pending.volumeId,
+            currentPage: pending.page,
+            maxPage: pending.maxPage,
+            readAt: DateTime.now(),
+          )
+          .catchError((Object _) {}),
+    );
   }
 
   /// 次のページへ（RTL では画面左側のタップ）。
@@ -139,12 +179,9 @@ class ViewerController extends _$ViewerController {
     final api = ref.read(booksApiProvider);
     final next = await AsyncValue.guard(() async {
       final volume = await api.fetchReadVolume(volumeId);
-      final startPage = volume.isEmpty
-          ? 1
-          : volume.clampPage(volume.currentPage);
+      final startPage = await _resolveStartPage(volume);
       final state = ViewerState(volume: volume, currentPage: startPage);
       _updatePending(state);
-      _lastRecordedPage = volume.isEmpty ? null : startPage;
       _evictStaleImageCache(volume);
       return state;
     });

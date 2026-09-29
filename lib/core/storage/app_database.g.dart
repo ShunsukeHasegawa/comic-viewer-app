@@ -1399,6 +1399,371 @@ class DownloadedVolumesCompanion extends UpdateCompanion<DownloadedVolumeRow> {
   }
 }
 
+class $ReadingProgressesTable extends ReadingProgresses
+    with TableInfo<$ReadingProgressesTable, ReadingProgressRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $ReadingProgressesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _volumeIdMeta = const VerificationMeta(
+    'volumeId',
+  );
+  @override
+  late final GeneratedColumn<int> volumeId = GeneratedColumn<int>(
+    'volume_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _currentPageMeta = const VerificationMeta(
+    'currentPage',
+  );
+  @override
+  late final GeneratedColumn<int> currentPage = GeneratedColumn<int>(
+    'current_page',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _maxPageMeta = const VerificationMeta(
+    'maxPage',
+  );
+  @override
+  late final GeneratedColumn<int> maxPage = GeneratedColumn<int>(
+    'max_page',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _readAtMeta = const VerificationMeta('readAt');
+  @override
+  late final GeneratedColumn<DateTime> readAt = GeneratedColumn<DateTime>(
+    'read_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _syncedMeta = const VerificationMeta('synced');
+  @override
+  late final GeneratedColumn<bool> synced = GeneratedColumn<bool>(
+    'synced',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("synced" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    volumeId,
+    currentPage,
+    maxPage,
+    readAt,
+    synced,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'reading_progresses';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<ReadingProgressRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('volume_id')) {
+      context.handle(
+        _volumeIdMeta,
+        volumeId.isAcceptableOrUnknown(data['volume_id']!, _volumeIdMeta),
+      );
+    }
+    if (data.containsKey('current_page')) {
+      context.handle(
+        _currentPageMeta,
+        currentPage.isAcceptableOrUnknown(
+          data['current_page']!,
+          _currentPageMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_currentPageMeta);
+    }
+    if (data.containsKey('max_page')) {
+      context.handle(
+        _maxPageMeta,
+        maxPage.isAcceptableOrUnknown(data['max_page']!, _maxPageMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_maxPageMeta);
+    }
+    if (data.containsKey('read_at')) {
+      context.handle(
+        _readAtMeta,
+        readAt.isAcceptableOrUnknown(data['read_at']!, _readAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_readAtMeta);
+    }
+    if (data.containsKey('synced')) {
+      context.handle(
+        _syncedMeta,
+        synced.isAcceptableOrUnknown(data['synced']!, _syncedMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {volumeId};
+  @override
+  ReadingProgressRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return ReadingProgressRow(
+      volumeId: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}volume_id'],
+      )!,
+      currentPage: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}current_page'],
+      )!,
+      maxPage: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}max_page'],
+      )!,
+      readAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}read_at'],
+      )!,
+      synced: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}synced'],
+      )!,
+    );
+  }
+
+  @override
+  $ReadingProgressesTable createAlias(String alias) {
+    return $ReadingProgressesTable(attachedDatabase, alias);
+  }
+}
+
+class ReadingProgressRow extends DataClass
+    implements Insertable<ReadingProgressRow> {
+  final int volumeId;
+
+  /// 表示していたページ（1 始まり）。`min(page, files.length)` に丸めた値。
+  final int currentPage;
+
+  /// 巻のページ数。0 ページ（ZIP が無い）の巻は行を作らない。
+  final int maxPage;
+
+  /// 端末が読んだと申告する時刻。一括同期 API の新旧比較はこの値同士で行う。
+  final DateTime readAt;
+
+  /// サーバーへ反映済みか。`false` の行だけを送る。
+  final bool synced;
+  const ReadingProgressRow({
+    required this.volumeId,
+    required this.currentPage,
+    required this.maxPage,
+    required this.readAt,
+    required this.synced,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['volume_id'] = Variable<int>(volumeId);
+    map['current_page'] = Variable<int>(currentPage);
+    map['max_page'] = Variable<int>(maxPage);
+    map['read_at'] = Variable<DateTime>(readAt);
+    map['synced'] = Variable<bool>(synced);
+    return map;
+  }
+
+  ReadingProgressesCompanion toCompanion(bool nullToAbsent) {
+    return ReadingProgressesCompanion(
+      volumeId: Value(volumeId),
+      currentPage: Value(currentPage),
+      maxPage: Value(maxPage),
+      readAt: Value(readAt),
+      synced: Value(synced),
+    );
+  }
+
+  factory ReadingProgressRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return ReadingProgressRow(
+      volumeId: serializer.fromJson<int>(json['volumeId']),
+      currentPage: serializer.fromJson<int>(json['currentPage']),
+      maxPage: serializer.fromJson<int>(json['maxPage']),
+      readAt: serializer.fromJson<DateTime>(json['readAt']),
+      synced: serializer.fromJson<bool>(json['synced']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'volumeId': serializer.toJson<int>(volumeId),
+      'currentPage': serializer.toJson<int>(currentPage),
+      'maxPage': serializer.toJson<int>(maxPage),
+      'readAt': serializer.toJson<DateTime>(readAt),
+      'synced': serializer.toJson<bool>(synced),
+    };
+  }
+
+  ReadingProgressRow copyWith({
+    int? volumeId,
+    int? currentPage,
+    int? maxPage,
+    DateTime? readAt,
+    bool? synced,
+  }) => ReadingProgressRow(
+    volumeId: volumeId ?? this.volumeId,
+    currentPage: currentPage ?? this.currentPage,
+    maxPage: maxPage ?? this.maxPage,
+    readAt: readAt ?? this.readAt,
+    synced: synced ?? this.synced,
+  );
+  ReadingProgressRow copyWithCompanion(ReadingProgressesCompanion data) {
+    return ReadingProgressRow(
+      volumeId: data.volumeId.present ? data.volumeId.value : this.volumeId,
+      currentPage: data.currentPage.present
+          ? data.currentPage.value
+          : this.currentPage,
+      maxPage: data.maxPage.present ? data.maxPage.value : this.maxPage,
+      readAt: data.readAt.present ? data.readAt.value : this.readAt,
+      synced: data.synced.present ? data.synced.value : this.synced,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ReadingProgressRow(')
+          ..write('volumeId: $volumeId, ')
+          ..write('currentPage: $currentPage, ')
+          ..write('maxPage: $maxPage, ')
+          ..write('readAt: $readAt, ')
+          ..write('synced: $synced')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(volumeId, currentPage, maxPage, readAt, synced);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is ReadingProgressRow &&
+          other.volumeId == this.volumeId &&
+          other.currentPage == this.currentPage &&
+          other.maxPage == this.maxPage &&
+          other.readAt == this.readAt &&
+          other.synced == this.synced);
+}
+
+class ReadingProgressesCompanion extends UpdateCompanion<ReadingProgressRow> {
+  final Value<int> volumeId;
+  final Value<int> currentPage;
+  final Value<int> maxPage;
+  final Value<DateTime> readAt;
+  final Value<bool> synced;
+  const ReadingProgressesCompanion({
+    this.volumeId = const Value.absent(),
+    this.currentPage = const Value.absent(),
+    this.maxPage = const Value.absent(),
+    this.readAt = const Value.absent(),
+    this.synced = const Value.absent(),
+  });
+  ReadingProgressesCompanion.insert({
+    this.volumeId = const Value.absent(),
+    required int currentPage,
+    required int maxPage,
+    required DateTime readAt,
+    this.synced = const Value.absent(),
+  }) : currentPage = Value(currentPage),
+       maxPage = Value(maxPage),
+       readAt = Value(readAt);
+  static Insertable<ReadingProgressRow> custom({
+    Expression<int>? volumeId,
+    Expression<int>? currentPage,
+    Expression<int>? maxPage,
+    Expression<DateTime>? readAt,
+    Expression<bool>? synced,
+  }) {
+    return RawValuesInsertable({
+      if (volumeId != null) 'volume_id': volumeId,
+      if (currentPage != null) 'current_page': currentPage,
+      if (maxPage != null) 'max_page': maxPage,
+      if (readAt != null) 'read_at': readAt,
+      if (synced != null) 'synced': synced,
+    });
+  }
+
+  ReadingProgressesCompanion copyWith({
+    Value<int>? volumeId,
+    Value<int>? currentPage,
+    Value<int>? maxPage,
+    Value<DateTime>? readAt,
+    Value<bool>? synced,
+  }) {
+    return ReadingProgressesCompanion(
+      volumeId: volumeId ?? this.volumeId,
+      currentPage: currentPage ?? this.currentPage,
+      maxPage: maxPage ?? this.maxPage,
+      readAt: readAt ?? this.readAt,
+      synced: synced ?? this.synced,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (volumeId.present) {
+      map['volume_id'] = Variable<int>(volumeId.value);
+    }
+    if (currentPage.present) {
+      map['current_page'] = Variable<int>(currentPage.value);
+    }
+    if (maxPage.present) {
+      map['max_page'] = Variable<int>(maxPage.value);
+    }
+    if (readAt.present) {
+      map['read_at'] = Variable<DateTime>(readAt.value);
+    }
+    if (synced.present) {
+      map['synced'] = Variable<bool>(synced.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ReadingProgressesCompanion(')
+          ..write('volumeId: $volumeId, ')
+          ..write('currentPage: $currentPage, ')
+          ..write('maxPage: $maxPage, ')
+          ..write('readAt: $readAt, ')
+          ..write('synced: $synced')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -1406,6 +1771,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $SettingsTable settings = $SettingsTable(this);
   late final $DownloadedVolumesTable downloadedVolumes =
       $DownloadedVolumesTable(this);
+  late final $ReadingProgressesTable readingProgresses =
+      $ReadingProgressesTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -1414,6 +1781,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     cachedImages,
     settings,
     downloadedVolumes,
+    readingProgresses,
   ];
 }
 
@@ -2155,6 +2523,226 @@ typedef $$DownloadedVolumesTableProcessedTableManager =
       DownloadedVolumeRow,
       PrefetchHooks Function()
     >;
+typedef $$ReadingProgressesTableCreateCompanionBuilder =
+    ReadingProgressesCompanion Function({
+      Value<int> volumeId,
+      required int currentPage,
+      required int maxPage,
+      required DateTime readAt,
+      Value<bool> synced,
+    });
+typedef $$ReadingProgressesTableUpdateCompanionBuilder =
+    ReadingProgressesCompanion Function({
+      Value<int> volumeId,
+      Value<int> currentPage,
+      Value<int> maxPage,
+      Value<DateTime> readAt,
+      Value<bool> synced,
+    });
+
+class $$ReadingProgressesTableFilterComposer
+    extends Composer<_$AppDatabase, $ReadingProgressesTable> {
+  $$ReadingProgressesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get volumeId => $composableBuilder(
+    column: $table.volumeId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get currentPage => $composableBuilder(
+    column: $table.currentPage,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get maxPage => $composableBuilder(
+    column: $table.maxPage,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get readAt => $composableBuilder(
+    column: $table.readAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get synced => $composableBuilder(
+    column: $table.synced,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$ReadingProgressesTableOrderingComposer
+    extends Composer<_$AppDatabase, $ReadingProgressesTable> {
+  $$ReadingProgressesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get volumeId => $composableBuilder(
+    column: $table.volumeId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get currentPage => $composableBuilder(
+    column: $table.currentPage,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get maxPage => $composableBuilder(
+    column: $table.maxPage,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get readAt => $composableBuilder(
+    column: $table.readAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get synced => $composableBuilder(
+    column: $table.synced,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$ReadingProgressesTableAnnotationComposer
+    extends Composer<_$AppDatabase, $ReadingProgressesTable> {
+  $$ReadingProgressesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get volumeId =>
+      $composableBuilder(column: $table.volumeId, builder: (column) => column);
+
+  GeneratedColumn<int> get currentPage => $composableBuilder(
+    column: $table.currentPage,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get maxPage =>
+      $composableBuilder(column: $table.maxPage, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get readAt =>
+      $composableBuilder(column: $table.readAt, builder: (column) => column);
+
+  GeneratedColumn<bool> get synced =>
+      $composableBuilder(column: $table.synced, builder: (column) => column);
+}
+
+class $$ReadingProgressesTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $ReadingProgressesTable,
+          ReadingProgressRow,
+          $$ReadingProgressesTableFilterComposer,
+          $$ReadingProgressesTableOrderingComposer,
+          $$ReadingProgressesTableAnnotationComposer,
+          $$ReadingProgressesTableCreateCompanionBuilder,
+          $$ReadingProgressesTableUpdateCompanionBuilder,
+          (
+            ReadingProgressRow,
+            BaseReferences<
+              _$AppDatabase,
+              $ReadingProgressesTable,
+              ReadingProgressRow
+            >,
+          ),
+          ReadingProgressRow,
+          PrefetchHooks Function()
+        > {
+  $$ReadingProgressesTableTableManager(
+    _$AppDatabase db,
+    $ReadingProgressesTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$ReadingProgressesTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$ReadingProgressesTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$ReadingProgressesTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<int> volumeId = const Value.absent(),
+                Value<int> currentPage = const Value.absent(),
+                Value<int> maxPage = const Value.absent(),
+                Value<DateTime> readAt = const Value.absent(),
+                Value<bool> synced = const Value.absent(),
+              }) => ReadingProgressesCompanion(
+                volumeId: volumeId,
+                currentPage: currentPage,
+                maxPage: maxPage,
+                readAt: readAt,
+                synced: synced,
+              ),
+          createCompanionCallback:
+              ({
+                Value<int> volumeId = const Value.absent(),
+                required int currentPage,
+                required int maxPage,
+                required DateTime readAt,
+                Value<bool> synced = const Value.absent(),
+              }) => ReadingProgressesCompanion.insert(
+                volumeId: volumeId,
+                currentPage: currentPage,
+                maxPage: maxPage,
+                readAt: readAt,
+                synced: synced,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable<$ReadingProgressesTable, ReadingProgressRow>(
+                    table,
+                  ),
+                  BaseReferences<
+                    _$AppDatabase,
+                    $ReadingProgressesTable,
+                    ReadingProgressRow
+                  >(db, table, e),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$ReadingProgressesTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $ReadingProgressesTable,
+      ReadingProgressRow,
+      $$ReadingProgressesTableFilterComposer,
+      $$ReadingProgressesTableOrderingComposer,
+      $$ReadingProgressesTableAnnotationComposer,
+      $$ReadingProgressesTableCreateCompanionBuilder,
+      $$ReadingProgressesTableUpdateCompanionBuilder,
+      (
+        ReadingProgressRow,
+        BaseReferences<
+          _$AppDatabase,
+          $ReadingProgressesTable,
+          ReadingProgressRow
+        >,
+      ),
+      ReadingProgressRow,
+      PrefetchHooks Function()
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -2165,6 +2753,8 @@ class $AppDatabaseManager {
       $$SettingsTableTableManager(_db, _db.settings);
   $$DownloadedVolumesTableTableManager get downloadedVolumes =>
       $$DownloadedVolumesTableTableManager(_db, _db.downloadedVolumes);
+  $$ReadingProgressesTableTableManager get readingProgresses =>
+      $$ReadingProgressesTableTableManager(_db, _db.readingProgresses);
 }
 
 // **************************************************************************

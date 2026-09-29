@@ -30,8 +30,12 @@ ReadVolume volumeFixture({
 ({ProviderContainer container, RecordingProgressRecorder recorder}) build({
   ReadVolume? volume,
   bool recordFails = false,
+
+  /// まだ送れていないローカル進捗（巻 ID → ページ）。
+  Map<int, int> unsyncedPages = const {},
 }) {
-  final recorder = RecordingProgressRecorder(succeeds: !recordFails);
+  final recorder = RecordingProgressRecorder(succeeds: !recordFails)
+    ..unsyncedPages.addAll(unsyncedPages);
   final container = ProviderContainer(
     overrides: [
       ...testOverrides(
@@ -60,6 +64,21 @@ void main() {
       expect(state.pageCount, 5);
       expect(state.slideCount, 6, reason: '巻末オーバーレイを含む');
       expect(state.hasNextVolume, isTrue);
+    });
+
+    test('未送信のローカル進捗があればサーバーの値より優先する', () async {
+      // 圏外で読み進めた分がサーバーに届いていない状態で開き直したとき、
+      // サーバーの古いページから再開すると手元の進捗が巻き戻る（#12）。
+      final fixture = build(
+        volume: volumeFixture(currentPage: 2),
+        unsyncedPages: const {340: 4},
+      );
+
+      final state = await fixture.container.read(
+        viewerControllerProvider(340).future,
+      );
+
+      expect(state.currentPage, 4);
     });
 
     test('サーバー由来のページ番号が範囲外でも丸める', () async {

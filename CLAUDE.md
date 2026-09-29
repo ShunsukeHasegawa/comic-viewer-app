@@ -74,8 +74,17 @@ test/         lib と同じ構成。共通フェイクは test/support/
   古い進捗を送ると他端末の進捗を巻き戻す。
 - 認証は Bearer（`POST /api/auth/token` は 201 で `{token, user, expires_at}`）。
   401 のみセッション失効として扱い、403 はリソース単位の権限エラー。
-- オフライン向けに `GET /api/v2/volumes/{id}/manifest`、`GET /api/v2/volumes/{id}/archive`、
-  `POST /api/v2/user-volume-status/bulk` が**サーバー側に実装済み**。
+- `POST /api/v2/user-volume-status/bulk`（進捗の一括同期。1〜100 件）
+  → `{items: [{volume_id, current_page, max_page, read_at}]}`（`read_at` は
+  **タイムゾーン付き**・秒精度。TZ 無しは `Asia/Tokyo` と解釈される）。応答は
+  `{applied: [status], skipped: [{volume_id, reason, current}]}`、`reason` は
+  `not_found` / `stale` / `future_read_at`。`status` は
+  `{volume_id, current_page, max_page, is_finished, read_at, updated_at}`。
+  競合解決は**クライアント申告の `read_at` 同士**の比較（サーバーが新しければ
+  `stale` + `current`）。単発 API は無条件 upsert なので、アプリは 1 件でも
+  こちらを使う（#12）。
+- オフライン向けに `GET /api/v2/volumes/{id}/manifest`、`GET /api/v2/volumes/{id}/archive` が
+  **サーバー側に実装済み**。
   実装前に `gh api repos/ShunsukeHasegawa/comic-viewer/contents/<path>` で
   コントローラ / リソースの形を確認すること（推測で書かない）。
 - 画像: `/books/view/{volumeId}/{page}`（数値のみ）、`/books/thumbnail/{volumeId}?m=`。

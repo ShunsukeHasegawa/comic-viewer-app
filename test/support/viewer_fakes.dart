@@ -11,6 +11,25 @@ class RecordingProgressRecorder implements ProgressRecorder {
   final records =
       <({int volumeId, int currentPage, int maxPage, DateTime readAt})>[];
 
+  /// 未送信として残っているローカル進捗（巻 ID → ページ）。
+  ///
+  /// ビューアが「サーバーの値より手元の未送信進捗を優先する」ことを試すために使う。
+  final unsyncedPages = <int, int>{};
+
+  /// ローカル保存（送信しない）だけを受けたページ。
+  final saved = <({int volumeId, int currentPage, int maxPage})>[];
+
+  @override
+  Future<void> savePage({
+    required int volumeId,
+    required int currentPage,
+    required int maxPage,
+    required DateTime readAt,
+  }) async {
+    saved.add((volumeId: volumeId, currentPage: currentPage, maxPage: maxPage));
+    unsyncedPages[volumeId] = currentPage;
+  }
+
   @override
   Future<bool> record({
     required int volumeId,
@@ -24,8 +43,17 @@ class RecordingProgressRecorder implements ProgressRecorder {
       maxPage: maxPage,
       readAt: readAt,
     ));
+    if (succeeds) {
+      unsyncedPages.remove(volumeId);
+    } else {
+      // 送れなかった進捗は端末に残る（次に開いたときの再開位置になる）。
+      unsyncedPages[volumeId] = currentPage;
+    }
     return succeeds;
   }
+
+  @override
+  Future<int?> unsyncedPage(int volumeId) async => unsyncedPages[volumeId];
 }
 
 /// 呼び出しだけ記録する [ScreenWakeLock]。

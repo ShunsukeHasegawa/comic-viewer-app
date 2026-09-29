@@ -8,6 +8,7 @@ import 'package:comic_laz/domain/models/book.dart';
 import 'package:comic_laz/domain/models/book_detail.dart';
 import 'package:comic_laz/domain/models/read_volume.dart';
 import 'package:comic_laz/domain/models/reading_book.dart';
+import 'package:comic_laz/domain/models/volume_status_sync.dart';
 
 /// ネットワークを触らない [BooksApi]。
 ///
@@ -110,6 +111,18 @@ class FakeUserApi implements UserApi {
   final recorded =
       <({int volumeId, int currentPage, int maxPage, DateTime? readAt})>[];
 
+  /// 一括同期の応答を作る（`null` なら全件を採用したことにする）。
+  VolumeStatusSyncResult Function(List<VolumeStatusSyncItem> items)? onSync;
+
+  /// 一括同期で投げる例外（圏外 / サーバーエラーの再現）。
+  ApiException? syncError;
+
+  /// 応答を返す前に実行する処理（同期中に読み進める状況を作る）。
+  Future<void> Function()? beforeSync;
+
+  /// 送ったバッチ（何件ずつまとめたかの検証に使う）。
+  final syncedBatches = <List<VolumeStatusSyncItem>>[];
+
   @override
   Future<List<ReadingBook>> fetchReading() async {
     if (readingError case final error?) throw error;
@@ -141,6 +154,29 @@ class FakeUserApi implements UserApi {
       maxPage: maxPage,
       readAt: readAt,
     ));
+  }
+
+  @override
+  Future<VolumeStatusSyncResult> syncVolumeStatuses(
+    List<VolumeStatusSyncItem> items,
+  ) async {
+    syncedBatches.add(items);
+    await beforeSync?.call();
+    if (syncError case final error?) throw error;
+    if (onSync case final onSync?) return onSync(items);
+    return VolumeStatusSyncResult(
+      applied: [
+        for (final item in items)
+          VolumeStatusSnapshot(
+            volumeId: item.volumeId,
+            currentPage: item.currentPage,
+            maxPage: item.maxPage,
+            isFinished: item.currentPage >= item.maxPage,
+            readAt: item.readAt.toUtc(),
+            updatedAt: item.readAt.toUtc(),
+          ),
+      ],
+    );
   }
 }
 

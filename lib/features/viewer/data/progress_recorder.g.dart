@@ -53,4 +53,4 @@ final class ProgressRecorderProvider
   }
 }
 
-String _$progressRecorderHash() => r'd95361abf94d1af9896a9def02fb4644afaca51c';
+String _$progressRecorderHash() => r'e39065c524601237aaa6b3daef579849c0a2c01d';
