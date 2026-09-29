@@ -148,6 +148,10 @@ class ViewerController extends _$ViewerController {
   ///
   /// [_lastRecordedPage] は「送信済みのページ」なので、未送信のローカル進捗から
   /// 再開した場合は `null` のままにしておく（閉じるときに送信を試みさせる）。
+  ///
+  /// 最後まで読んだ巻は 1 ページ目から始める（Web 版 `pages/book/view/[id].vue`
+  /// の `activePage >= files.length` と同じ判定）。最終ページのまま再開すると、
+  /// 読み終えた本を開くたびに巻末オーバーレイが出るだけになる。
   Future<int> _resolveStartPage(
     ReadVolume volume, {
     required bool isStale,
@@ -156,16 +160,38 @@ class ViewerController extends _$ViewerController {
     if (volume.isEmpty) return 1;
 
     final local = await _readLocalProgress(volume.id);
+    final resumePage = _resumePage(volume, local: local, isStale: isStale);
+
+    if (resumePage >= volume.pageCount) {
+      // 「送信済み」を 1 にして、開いただけでは進捗を送らせない。読み終えた巻を
+      // 誤って開いて閉じただけで、サーバーの読了が 1 ページ目へ巻き戻るのを防ぐ
+      // （未送信のローカル進捗も同じ理由で上書きしない）。ページを送れば
+      // そこから記録が再開する。
+      _lastRecordedPage = 1;
+      return 1;
+    }
+
+    // 未送信の進捗から再開したときは「送信済み」を立てない（閉じるときに
+    // 送信を試みさせる）。
+    if (local != null && local.isPending) return resumePage;
+    _lastRecordedPage = resumePage;
+    return resumePage;
+  }
+
+  /// 続きから読むページ（読了判定を入れる前の値）。
+  int _resumePage(
+    ReadVolume volume, {
+    required ReadingProgress? local,
+    required bool isStale,
+  }) {
     if (local != null && local.isPending) {
       return volume.clampPage(local.currentPage);
     }
-
-    var startPage = volume.clampPage(volume.currentPage);
-    if (isStale && local != null && local.currentPage > startPage) {
-      startPage = volume.clampPage(local.currentPage);
+    final serverPage = volume.clampPage(volume.currentPage);
+    if (isStale && local != null && local.currentPage > serverPage) {
+      return volume.clampPage(local.currentPage);
     }
-    _lastRecordedPage = startPage;
-    return startPage;
+    return serverPage;
   }
 
   /// 端末に残っているこの巻の進捗を読む。読めなければ `null`（サーバーの値で開く）。

@@ -1,7 +1,11 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../core/cache/comic_image_loader.dart';
+import '../../../core/media/media_urls.dart';
 import '../../../core/router/app_routes.dart';
 import '../../../core/utils/format.dart';
 import '../../../core/widgets/app_back_button.dart';
@@ -9,7 +13,6 @@ import '../../../core/widgets/error_view.dart';
 import '../../../core/widgets/thumbnail_image.dart';
 import '../../../domain/models/book_detail.dart';
 import '../../downloads/application/downloaded_lookup.dart';
-import '../../library/presentation/widgets/book_tiles.dart';
 import '../application/book_detail_controller.dart';
 import 'widgets/volume_tile.dart';
 
@@ -24,23 +27,14 @@ class TitleDetailScreen extends ConsumerWidget {
     final async = ref.watch(bookDetailControllerProvider(bookId));
     final controller = ref.read(bookDetailControllerProvider(bookId).notifier);
     final data = async.value;
-    final detail = data?.detail;
 
     return Scaffold(
-      appBar: AppBar(
-        leading: const AppBackButton(),
-        title: Text(detail?.title ?? 'タイトル詳細'),
-        actions: [
-          if (detail != null)
-            IconButton(
-              icon: Icon(
-                detail.isFavorite ? Icons.favorite : Icons.favorite_outline,
-              ),
-              tooltip: detail.isFavorite ? 'お気に入りから外す' : 'お気に入りに追加',
-              onPressed: () => _toggleFavorite(context, controller),
-            ),
-        ],
-      ),
+      // 詳細が出せるときは AppBar を置かない。戻る / お気に入りはヒーローの上に
+      // 重ね、スクロールとともに流す（Web 版スマホレイアウトと同じ）。固定の
+      // AppBar にすると、下までスクロールしたとき背景の無い白い帯が残る。
+      appBar: data == null
+          ? AppBar(leading: const AppBackButton(), title: const Text('タイトル詳細'))
+          : null,
       body: switch ((data, async.error)) {
         (null, final error?) => ErrorView(
           error: error,
@@ -49,7 +43,10 @@ class TitleDetailScreen extends ConsumerWidget {
         (null, null) => const Center(child: CircularProgressIndicator()),
         (final data?, _) => RefreshIndicator(
           onRefresh: () => _refresh(context, ref, bookId),
-          child: _DetailBody(data: data),
+          child: _DetailBody(
+            data: data,
+            onToggleFavorite: () => _toggleFavorite(context, controller),
+          ),
         ),
       },
     );
@@ -80,9 +77,10 @@ Future<void> _refresh(BuildContext context, WidgetRef ref, int bookId) async {
 }
 
 class _DetailBody extends ConsumerWidget {
-  const _DetailBody({required this.data});
+  const _DetailBody({required this.data, required this.onToggleFavorite});
 
   final BookDetailData data;
+  final VoidCallback onToggleFavorite;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -97,15 +95,14 @@ class _DetailBody extends ConsumerWidget {
       physics: const AlwaysScrollableScrollPhysics(),
       slivers: [
         if (data.isStale) const SliverToBoxAdapter(child: _OfflineNotice()),
-        SliverToBoxAdapter(child: _Hero(detail: detail)),
-        if (resume != null)
-          SliverToBoxAdapter(
-            child: _ResumeButton(
-              detail: detail,
-              volume: resume,
-              canOpen: canOpen(resume),
-            ),
+        SliverToBoxAdapter(
+          child: _Hero(
+            detail: detail,
+            resume: resume,
+            canOpenResume: resume != null && canOpen(resume),
+            onToggleFavorite: onToggleFavorite,
           ),
+        ),
         SliverToBoxAdapter(child: _Meta(detail: detail)),
         SliverToBoxAdapter(child: _VolumesHeader(detail: detail)),
         if (detail.volumes.isEmpty)
@@ -169,79 +166,288 @@ class _OfflineNotice extends StatelessWidget {
   }
 }
 
+/// 画像をそのまま見せる高さ（この下から文字が始まる）。
+const _heroImageHeight = 260.0;
+
+/// タイトルの顔。背景に作品の絵を敷き、その上に文字と「読む」を重ねる。
+///
+/// Web 版スマホレイアウト（`components/title/TitleHero.vue`）に合わせた構成。
+/// 背景は**1 巻の 1 ページ目**で、サムネイル（小さい）を引き伸ばすより絵が
+/// 鮮明に出る。ダウンロード済みならこの画像もローカルから解決される（#11）。
 class _Hero extends StatelessWidget {
-  const _Hero({required this.detail});
+  const _Hero({
+    required this.detail,
+    required this.resume,
+    required this.canOpenResume,
+    required this.onToggleFavorite,
+  });
+
+  final BookDetail detail;
+  final BookVolume? resume;
+  final bool canOpenResume;
+  final VoidCallback onToggleFavorite;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final meta = [?detail.publisher, ?detail.label].join(' · ');
+
+    return Stack(
+      children: [
+        Positioned.fill(child: _HeroBackground(detail: detail)),
+        Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _HeroChrome(
+              isFavorite: detail.isFavorite,
+              onToggleFavorite: onToggleFavorite,
+            ),
+            const SizedBox(height: _heroImageHeight),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    detail.title,
+                    style: theme.textTheme.headlineSmall?.copyWith(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  if (detail.authors.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      detail.authors.join(' / '),
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: Colors.white70,
+                      ),
+                    ),
+                  ],
+                  if (meta.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      meta,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: Colors.white54,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                  _HeroChips(detail: detail),
+                  if (detail.overview case final overview?
+                      when overview.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    _HeroOverview(overview: overview),
+                  ],
+                  const SizedBox(height: 14),
+                  _ResumeButton(volume: resume, canOpen: canOpenResume),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+/// 背景の絵。文字が乗る下半分だけぼかし、全面に暗いグラデーションを重ねる。
+class _HeroBackground extends ConsumerWidget {
+  const _HeroBackground({required this.detail});
+
+  final BookDetail detail;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final request = _backgroundRequest(ref.watch(mediaUrlsProvider), detail);
+    // 画像が無い / 読み込み中でも文字は白なので、下地は必ず暗くしておく。
+    if (request == null) return const ColoredBox(color: Colors.black);
+
+    final image = ref.watch(thumbnailBuilderProvider)(
+      context,
+      request,
+      BoxFit.cover,
+    );
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // ぼかしを始める位置は「絵を見せる高さ」に合わせる。あらすじの展開で
+        // ヒーローの高さが変わるため、割合はその都度求める。
+        final height = constraints.maxHeight;
+        final start = height <= 0
+            ? 1.0
+            : (_heroImageHeight / height).clamp(0.0, 1.0);
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            const ColoredBox(color: Colors.black),
+            image,
+            // ぼかした同じ絵を上から重ねて「徐々にぼける」ようにする。
+            // `BackdropFilter` だと境界に直線が出るため、絵そのものを 2 枚使う。
+            ShaderMask(
+              blendMode: BlendMode.dstIn,
+              shaderCallback: (rect) => LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: const [Colors.transparent, Colors.black],
+                stops: [start, (start + 0.08).clamp(0.0, 1.0)],
+              ).createShader(rect),
+              child: ImageFiltered(
+                imageFilter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+                child: image,
+              ),
+            ),
+            const DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Color(0x66000000),
+                    Color(0x33000000),
+                    Color(0xE6000000),
+                  ],
+                  stops: [0, 0.35, 1],
+                ),
+              ),
+              child: SizedBox.expand(),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// 背景に使う画像。1 巻の 1 ページ目、無ければその巻のサムネイル。
+  ///
+  /// ページ URL には `files_version` が要るので、アーカイブが無い巻
+  /// （`files_version` が `null`）ではサムネイルで代用する。
+  static ComicImageRequest? _backgroundRequest(
+    MediaUrls urls,
+    BookDetail detail,
+  ) {
+    if (detail.volumes.isEmpty) return null;
+    final first = detail.volumes.first;
+    final filesVersion = first.filesVersion;
+    if (filesVersion == null) {
+      return ComicImageRequest.thumbnail(urls, first.thumbnail);
+    }
+    return ComicImageRequest.page(
+      urls,
+      volumeId: first.id,
+      page: 1,
+      filesVersion: filesVersion,
+    );
+  }
+}
+
+/// 絵の上に浮かせる操作（戻る / お気に入り）。
+class _HeroChrome extends StatelessWidget {
+  const _HeroChrome({required this.isFavorite, required this.onToggleFavorite});
+
+  final bool isFavorite;
+  final VoidCallback onToggleFavorite;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = IconButton.styleFrom(
+      backgroundColor: Colors.black38,
+      foregroundColor: Colors.white,
+    );
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        8,
+        MediaQuery.paddingOf(context).top + 8,
+        8,
+        0,
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          AppBackButton(style: style),
+          IconButton(
+            style: style,
+            icon: Icon(isFavorite ? Icons.favorite : Icons.favorite_outline),
+            tooltip: isFavorite ? 'お気に入りから外す' : 'お気に入りに追加',
+            onPressed: onToggleFavorite,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 完結 / 巻数 / タグ。
+class _HeroChips extends StatelessWidget {
+  const _HeroChips({required this.detail});
 
   final BookDetail detail;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final progress = detail.readingProgress;
-    final cover = detail.volumes.isEmpty
-        ? null
-        : detail.volumes.first.thumbnail;
+    Widget chip(String label) => Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: Colors.white24,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        label,
+        style: theme.textTheme.labelSmall?.copyWith(color: Colors.white),
+      ),
+    );
 
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Row(
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: [
+        if (detail.isComplete) chip('完結'),
+        chip(
+          detail.isComplete
+              ? '全 ${detail.volumes.length} 巻'
+              : '${detail.volumes.length} 巻まで',
+        ),
+        for (final tag in detail.tags) chip(tag),
+      ],
+    );
+  }
+}
+
+/// あらすじ。長いものは畳んでおく（ヒーローが画面を埋め尽くさないように）。
+class _HeroOverview extends StatefulWidget {
+  const _HeroOverview({required this.overview});
+
+  final String overview;
+
+  @override
+  State<_HeroOverview> createState() => _HeroOverviewState();
+}
+
+class _HeroOverviewState extends State<_HeroOverview> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return GestureDetector(
+      onTap: () => setState(() => _expanded = !_expanded),
+      behavior: HitTestBehavior.opaque,
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(
-            width: 110,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: ThumbnailImage(
-                apiUrl: cover,
-                aspectRatio: bookCoverAspectRatio,
-              ),
-            ),
+          Text(
+            widget.overview,
+            maxLines: _expanded ? null : 3,
+            overflow: _expanded ? null : TextOverflow.ellipsis,
+            style: theme.textTheme.bodySmall?.copyWith(color: Colors.white70),
           ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(detail.title, style: theme.textTheme.titleLarge),
-                const SizedBox(height: 8),
-                if (detail.authors.isNotEmpty)
-                  Text(
-                    detail.authors.join(' / '),
-                    style: theme.textTheme.bodyMedium,
-                  ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 4,
-                  children: [
-                    if (detail.isComplete) const Chip(label: Text('完結')),
-                    Chip(
-                      label: Text(
-                        detail.isComplete
-                            ? '全 ${detail.volumes.length} 巻'
-                            : '${detail.volumes.length} 巻まで',
-                      ),
-                    ),
-                  ],
-                ),
-                if (progress != null && progress.totalVolumes > 0) ...[
-                  const SizedBox(height: 8),
-                  Text(
-                    '読了 ${progress.readVolumes} / ${progress.totalVolumes} 巻',
-                    style: theme.textTheme.bodySmall,
-                  ),
-                  const SizedBox(height: 4),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(2),
-                    child: LinearProgressIndicator(
-                      value: (progress.readVolumes / progress.totalVolumes)
-                          .clamp(0, 1),
-                      minHeight: 4,
-                    ),
-                  ),
-                ],
-              ],
-            ),
+          const SizedBox(height: 2),
+          Text(
+            _expanded ? '閉じる' : 'もっと見る',
+            style: theme.textTheme.labelSmall?.copyWith(color: Colors.white),
           ),
         ],
       ),
@@ -250,32 +456,40 @@ class _Hero extends StatelessWidget {
 }
 
 class _ResumeButton extends StatelessWidget {
-  const _ResumeButton({
-    required this.detail,
-    required this.volume,
-    required this.canOpen,
-  });
+  const _ResumeButton({required this.volume, required this.canOpen});
 
-  final BookDetail detail;
-  final BookVolume volume;
+  /// 続きから読む巻。`null` は読める巻が無い（巻が登録されていない）。
+  final BookVolume? volume;
 
   /// 開けるか（圏外で未ダウンロードの巻は開けない）。
   final bool canOpen;
 
   @override
   Widget build(BuildContext context) {
-    final isResume = volume.isInProgress;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+    final target = volume;
+    final isResume = target?.isInProgress ?? false;
+    return SizedBox(
+      width: double.infinity,
       child: FilledButton.icon(
-        onPressed: canOpen
-            ? () => context.push(AppRoutes.viewer(volume.id))
+        style: FilledButton.styleFrom(
+          backgroundColor: Colors.white,
+          foregroundColor: Colors.black,
+          disabledBackgroundColor: Colors.white24,
+          disabledForegroundColor: Colors.white60,
+        ),
+        onPressed: target != null && canOpen
+            ? () => context.push(AppRoutes.viewer(target.id))
             : null,
-        icon: Icon(canOpen ? Icons.play_arrow : Icons.cloud_off_outlined),
-        label: Text(switch ((canOpen, isResume)) {
-          (false, _) => 'オフラインでは読めません',
-          (true, true) => '${volume.volume} 巻の続きから読む',
-          (true, false) => '${volume.volume} 巻を読む',
+        icon: Icon(
+          target != null && canOpen
+              ? Icons.play_arrow
+              : Icons.cloud_off_outlined,
+        ),
+        label: Text(switch ((target, canOpen, isResume)) {
+          (null, _, _) => '読める巻がありません',
+          (_, false, _) => 'オフラインでは読めません',
+          (final target?, _, true) => '${target.volume} 巻の続きから読む',
+          (final target?, _, false) => '${target.volume} 巻を読む',
         }),
       ),
     );
@@ -290,28 +504,20 @@ class _Meta extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    // 出版社 / レーベル / タグ / あらすじはヒーロー側に出している。
     final rows = <(String, String)>[
-      if (detail.publisher case final publisher?) ('出版社', publisher),
-      if (detail.label case final label?) ('レーベル', label),
       if (detail.categories.isNotEmpty)
         ('カテゴリ', detail.categories.map((c) => c.name).join('、')),
-      if (detail.tags.isNotEmpty) ('タグ', detail.tags.join('、')),
       if (detail.totalArchiveBytes > 0)
         ('全巻の容量', formatBytes(detail.totalArchiveBytes)),
     ];
+    if (rows.isEmpty) return const SizedBox.shrink();
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (detail.overview case final overview?
-              when overview.isNotEmpty) ...[
-            Text('あらすじ', style: theme.textTheme.titleSmall),
-            const SizedBox(height: 4),
-            Text(overview, style: theme.textTheme.bodyMedium),
-            const SizedBox(height: 12),
-          ],
           for (final (label, value) in rows)
             Padding(
               padding: const EdgeInsets.only(bottom: 4),

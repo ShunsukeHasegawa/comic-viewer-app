@@ -97,15 +97,57 @@ void main() {
   testWidgets('タイトル・著者・メタ情報・巻一覧を表示する', (tester) async {
     await pumpDetail(tester);
 
-    expect(find.text('進撃の巨人'), findsNWidgets(2), reason: 'AppBar とヒーロー');
+    // AppBar は置かず、タイトルはヒーローにだけ出す（Web 版と同じ構成）。
+    expect(find.text('進撃の巨人'), findsOneWidget, reason: 'ヒーロー');
+    expect(find.byType(AppBar), findsNothing);
     expect(find.text('諫山創'), findsOneWidget);
     expect(find.text('巨人と戦う話'), findsOneWidget);
-    expect(find.text('講談社'), findsOneWidget);
+    expect(find.text('講談社 · 少年マガジンコミックス'), findsOneWidget, reason: '出版社とレーベル');
     expect(find.text('完結'), findsOneWidget);
     expect(find.byType(VolumeTile), findsNWidgets(2));
     expect(find.text('1 巻'), findsOneWidget);
     expect(find.text('2 巻'), findsOneWidget);
     expect(find.text('全 2 巻'), findsOneWidget, reason: 'ヒーローの巻数');
+  });
+
+  testWidgets('ヒーローの背景は 1 巻の 1 ページ目', (tester) async {
+    // サムネイル（小さい）を引き伸ばすより絵が鮮明に出る。ダウンロード済みなら
+    // この画像もローカルから解決される（#11）ので、圏外でも背景が出る。
+    await pumpDetail(tester);
+
+    final stubs = tester
+        .widgetList<StubThumbnail>(find.byType(StubThumbnail))
+        .toList();
+    final page = stubs.where((stub) => stub.request.page != null).toList();
+    expect(page, isNotEmpty, reason: '背景にページ画像を使う');
+    expect(page.first.request.page!.volumeId, 340, reason: '1 巻');
+    expect(page.first.request.page!.page, 1, reason: '1 ページ目');
+  });
+
+  testWidgets('アーカイブが無いタイトルはサムネイルを背景にする', (tester) async {
+    // ページ URL には files_version が要る。無い巻で組み立てると壊れた URL に
+    // なるので、サムネイルで代用する。
+    await pumpDetail(
+      tester,
+      booksApi: FakeBooksApi(
+        bookDetail: sampleDetail(
+          volumes: const [
+            BookVolume(
+              id: 340,
+              volume: 1,
+              thumbnail: '/books/thumbnail/340?m=1',
+            ),
+          ],
+        ),
+      ),
+    );
+
+    final stubs = tester.widgetList<StubThumbnail>(find.byType(StubThumbnail));
+    expect(
+      stubs.every((stub) => stub.request.page == null),
+      isTrue,
+      reason: 'ページ画像は組み立てない',
+    );
   });
 
   testWidgets('全巻の容量を表示する（一括ダウンロードの判断材料）', (tester) async {

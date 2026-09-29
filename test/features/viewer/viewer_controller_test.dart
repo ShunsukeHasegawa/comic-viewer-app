@@ -135,7 +135,7 @@ void main() {
       final fixture = build(
         readVolumeError: const NetworkException(),
         offline: FakeOfflineMetadataGateway(
-          volumes: {340: volumeFixture(currentPage: 5)},
+          volumes: {340: volumeFixture(currentPage: 4)},
         ),
         syncedPages: const {340: 2},
       );
@@ -144,7 +144,7 @@ void main() {
         viewerControllerProvider(340).future,
       );
 
-      expect(state.currentPage, 5);
+      expect(state.currentPage, 4);
     });
 
     test('サーバーに確認できたときは送信済みのローカル値で上書きしない', () async {
@@ -162,14 +162,41 @@ void main() {
       expect(state.currentPage, 2);
     });
 
-    test('サーバー由来のページ番号が範囲外でも丸める', () async {
+    test('最後まで読んだ巻は 1 ページ目から開く', () async {
+      // 最終ページのまま再開すると、読み終えた本を開くたびに巻末オーバーレイが
+      // 出るだけになる（Web 版と同じ挙動）。
+      final fixture = build(volume: volumeFixture(currentPage: 5));
+
+      final state = await fixture.container.read(
+        viewerControllerProvider(340).future,
+      );
+
+      expect(state.currentPage, 1);
+    });
+
+    test('読み終えた巻を開いて閉じただけでは読了を巻き戻さない', () async {
+      // 1 ページ目から開き直すからといって、そこを新しい進捗として送ると
+      // サーバーの読了が消える。ページを送って初めて記録する。
+      final fixture = build(volume: volumeFixture(currentPage: 5));
+      await fixture.container.read(viewerControllerProvider(340).future);
+
+      await fixture.container
+          .read(viewerControllerProvider(340).notifier)
+          .flushProgress();
+
+      expect(fixture.recorder.records, isEmpty);
+    });
+
+    test('サーバー由来のページ番号が範囲外なら読了として扱う', () async {
+      // ZIP が縮んだ等でページ数を超えた値が返ることがある。丸めると最終ページに
+      // なるので、読了と同じ扱いで 1 ページ目から開く。
       final fixture = build(volume: volumeFixture(currentPage: 99));
 
       final state = await fixture.container.read(
         viewerControllerProvider(340).future,
       );
 
-      expect(state.currentPage, 5);
+      expect(state.currentPage, 1);
     });
 
     test('ページが 0 枚の巻でも落ちない', () async {
