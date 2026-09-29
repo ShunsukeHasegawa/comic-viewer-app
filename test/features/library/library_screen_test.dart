@@ -1,6 +1,7 @@
 import 'package:comic_laz/core/device/connectivity_monitor.dart';
 import 'package:comic_laz/core/network/api_exception.dart';
 import 'package:comic_laz/core/widgets/error_view.dart';
+import 'package:comic_laz/core/widgets/thumbnail_image.dart';
 import 'package:comic_laz/data/api/conditional_response.dart';
 import 'package:comic_laz/domain/models/book.dart';
 import 'package:comic_laz/domain/models/reading_book.dart';
@@ -97,6 +98,36 @@ void main() {
     expect(find.byType(BookGridTile), findsNWidgets(2));
     expect(find.text('進撃の巨人'), findsOneWidget);
     expect(find.text('2 件'), findsOneWidget);
+  });
+
+  testWidgets('表紙の大きさはタイトルの行数に左右されない', (tester) async {
+    // 表紙を残りの高さに合わせていると、タイトルが 1 行の本と 2 行の本で
+    // 表紙の大きさが変わる（Web 版は枠を固定しているので揃っている）。
+    await pumpLibrary(
+      tester,
+      booksApi: FakeBooksApi(
+        books: [
+          testBook(id: 1, title: '短い', kana: 'みじかい', latestVolume: 1),
+          testBook(
+            id: 2,
+            title: '折り返して二行になるとても長いタイトルの作品',
+            kana: 'おりかえして',
+            latestVolume: 1,
+          ),
+        ],
+      ),
+    );
+
+    final covers = find.descendant(
+      of: find.byType(BookGridTile),
+      matching: find.byType(ThumbnailImage),
+    );
+    expect(covers, findsNWidgets(2));
+    final short = tester.getSize(covers.at(0));
+    final long = tester.getSize(covers.at(1));
+    expect(long, short);
+    // Web 版（`aspect-[2/3]`）と同じ縦横比で切り抜く。
+    expect(short.width / short.height, closeTo(bookCoverAspectRatio, 0.01));
   });
 
   testWidgets('グリッドとリストを切り替えられる', (tester) async {

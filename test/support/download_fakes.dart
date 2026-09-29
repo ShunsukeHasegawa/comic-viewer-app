@@ -246,6 +246,11 @@ Future<void> settleDownloads(
 }) async {
   for (var round = 0; round < rounds; round++) {
     await pumpEventQueue(times: 5);
+    // `pumpEventQueue` はイベントループに譲るだけで**実時間を待たない**ので、
+    // 実ファイルの読み書きと ZIP 検証が終わる前に 200 回を使い切ってしまう
+    // （マシンが重いときだけ落ちる、原因の分かりにくいテストになる）。
+    // 1 周ごとに僅かに実時間を進めて、I/O が完了する余地を作る。
+    await Future<void>.delayed(const Duration(milliseconds: 5));
     final downloads = container.read(downloadQueueProvider).value;
     // まだ build 中（null）なら落ち着いたとは言えない。
     if (downloads == null) continue;

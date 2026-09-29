@@ -12,8 +12,12 @@ String volumeLabel(Book book) {
   return book.isComplete ? '全 $volume 巻' : '$volume 巻まで';
 }
 
-/// 表紙の縦横比（一般的なコミックの表紙）。
-const bookCoverAspectRatio = 0.7;
+/// 表紙の縦横比。
+///
+/// Web 版（`components/common/Thumbnail.vue` の `aspect-[2/3]`）に合わせる。
+/// 元画像の縦横比は本ごとにばらばらなので、**枠を固定して切り抜く**
+/// （`BoxFit.cover`）。枠を画像に合わせると一覧で本ごとに大きさが変わる。
+const bookCoverAspectRatio = 2 / 3;
 
 /// グリッド表示の 1 冊。
 class BookGridTile extends StatelessWidget {
@@ -36,7 +40,10 @@ class BookGridTile extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Expanded(
+          // 表紙は縦横比で固定する。`Expanded` にすると、タイトルが 1 行の本と
+          // 2 行の本で残りの高さが変わり、表紙の大きさが本ごとにばらつく。
+          AspectRatio(
+            aspectRatio: bookCoverAspectRatio,
             child: Stack(
               fit: StackFit.expand,
               children: [
@@ -57,19 +64,30 @@ class BookGridTile extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 6),
-          Text(
-            book.title,
-            style: theme.textTheme.bodyMedium,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-          ),
-          if (book.latestVolume != null)
-            Text(
-              volumeLabel(book),
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
+          // 文字は表紙の下の残りに収める。端末の文字サイズ設定を大きくしても
+          // 隣のタイルへはみ出さないように切り取る（表紙の大きさは変えない）。
+          Expanded(
+            child: ClipRect(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    book.title,
+                    style: theme.textTheme.bodyMedium,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  if (book.latestVolume != null)
+                    Text(
+                      volumeLabel(book),
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                ],
               ),
             ),
+          ),
         ],
       ),
     );

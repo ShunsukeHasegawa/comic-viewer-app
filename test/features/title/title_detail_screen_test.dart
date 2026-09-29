@@ -75,6 +75,14 @@ Future<ProviderContainer> pumpDetail(
   );
   addTearDown(container.dispose);
 
+  // 既定の 800x600 だと、ヒーロー + メタ情報の下に巻一覧が 1 件しか入らない。
+  // 実機（縦長）と同じように巻が並ぶ高さにしておく（スクロールしないと
+  // 見えない、という理由でテストが落ちるのを避ける）。
+  tester.view.physicalSize = const Size(800, 1400);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+
   await tester.pumpWidget(
     UncontrolledProviderScope(
       container: container,

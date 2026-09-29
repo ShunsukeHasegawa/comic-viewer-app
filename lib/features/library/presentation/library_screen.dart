@@ -134,8 +134,10 @@ class _BookGrid extends StatelessWidget {
           maxCrossAxisExtent: 160,
           mainAxisSpacing: 12,
           crossAxisSpacing: 12,
-          // 表紙 + タイトル 2 行 + 巻数
-          childAspectRatio: 0.52,
+          // 表紙（幅の 1.5 倍の高さ）+ 余白 + タイトル 2 行 + 巻数 が収まる比率。
+          // 表紙は `AspectRatio` で固定なので、ここを変えても表紙の大きさは
+          // 揃ったまま（変わるのは文字に使える高さだけ）。
+          childAspectRatio: 0.45,
         ),
         delegate: SliverChildBuilderDelegate(childCount: books.length, (
           context,

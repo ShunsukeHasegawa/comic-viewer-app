@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../../features/auth/application/auth_controller.dart';
@@ -57,6 +58,23 @@ Dio dio(Ref ref) {
   );
   // 一時的な通信エラーの 1 回だけの再送（GET / HEAD のみ）。
   dio.interceptors.add(RetryInterceptor(dio));
+  if (kDebugMode) dio.interceptors.add(FailedRequestLogger());
   ref.onDispose(() => dio.close());
   return dio;
+}
+
+/// 失敗したリクエストだけを `logcat` / コンソールへ出す（デバッグビルド限定）。
+///
+/// 画面に出せるのは利用者向けの文言だけなので、実機で「どの URL が何で失敗したか」
+/// が分からない。成功したリクエストは出さない（ページ画像で数百行流れる）。
+class FailedRequestLogger extends Interceptor {
+  @override
+  void onError(DioException err, ErrorInterceptorHandler handler) {
+    final status = err.response?.statusCode;
+    debugPrint(
+      '[api] ${err.requestOptions.method} '
+      '${err.requestOptions.uri} -> ${status ?? err.type.name}',
+    );
+    handler.next(err);
+  }
 }
