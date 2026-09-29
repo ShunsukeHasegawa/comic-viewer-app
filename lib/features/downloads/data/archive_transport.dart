@@ -30,14 +30,27 @@ abstract interface class ArchiveTransport {
 
   /// 一時停止。止められなければ `false`。
   ///
-  /// **走っている（`running` が届いた）転送にだけ呼ぶ**こと。Android の
-  /// パッケージは、holding queue や Wi-Fi 待ちで待機しているだけのタスクにも
-  /// `true` を返す（止める印を付けるだけ）。そのタスクは待機のまま残り、
-  /// 後で走り出して同時実行の枠を使ってから止まる。待機中の転送は取り消す。
+  /// `false` は「ネイティブにもう走っている転送が無い」（書き上がって完了が
+  /// 届く途中 / 失敗した）ことが多い。Android は見つかったタスクには必ず
+  /// `true` を返し、iOS は再開データを作れなければ自分で failed を送る。
+  ///
+  /// **走っている（`running` が届いた）転送か、再開データのある転送にだけ
+  /// 呼ぶ**こと。Android のパッケージは、holding queue や Wi-Fi 待ちで待機
+  /// しているだけのタスクにも `true` を返す（止める印を付けるだけ）。そのタスクは
+  /// 待機のまま残り、後で走り出して同時実行の枠を使ってから止まる。再開データの
+  /// 無い待機中の転送は取り消す（捨てるものが無い）。
   Future<bool> pause(String taskId);
 
   /// 再開。再開データが無ければ `false`（呼び出し側が積み直す）。
   Future<bool> resume(String taskId);
+
+  /// 再開データ（書きかけの続きから取るための情報）が残っているか。
+  ///
+  /// 待機中の転送を止めるときの判断に使う。再開データがあるもの（続きから
+  /// 再開した / 時間切れや Wi-Fi 設定で再投入された）を取り消すと、
+  /// canceled は最終状態なのでパッケージが再開データを捨て、先頭から
+  /// 落とし直しになる。
+  Future<bool> hasResumeData(String taskId);
 
   Future<void> cancel(String taskId);
 
@@ -57,8 +70,12 @@ abstract interface class ArchiveTransport {
   /// どの転送も指していないパッケージの一時ファイルを消す。
   ///
   /// 通信の失敗で終わった転送の書きかけ（Android）が残り続けないように。
-  /// 走っている転送があれば何もしない（書きかけを消すと完了時に失敗する）。
-  Future<void> sweepOrphanTempFiles();
+  /// [staleOnly] のとき、またはネイティブに生きている転送があるときは、
+  /// しばらく書き込まれていないもの（`transferTempStaleAge`）だけを消す
+  /// （走行中の書きかけも同じ名前で、消すと完了時の移動が失敗する）。
+  /// **投入（[enqueue]）と並べて呼ばない**こと。一覧を見てから消すまでの
+  /// 間に積まれた転送の書きかけを消しうる（呼び出し側が直列にする）。
+  Future<void> sweepOrphanTempFiles({bool staleOnly = false});
 
   /// 全部捨てる（ログアウト。#15）。
   ///
@@ -68,6 +85,13 @@ abstract interface class ArchiveTransport {
 
   /// 通知の許可を求める（Android 13 以上 / iOS）。拒否されても転送は続く。
   Future<bool> requestNotificationPermission();
+
+  /// 通知の許可を確かめ直し、Android の foreground 実行の設定を合わせる。
+  ///
+  /// 許可はアプリの外（設定アプリ）で後から変えられる。[start] のときの
+  /// 判断のままだと、取り消された後も foreground のつもりで走り、
+  /// WorkManager の 10 分の上限で止められる（`foregroundModeFor` 参照）。
+  Future<void> refreshForegroundMode();
 }
 
 /// 転送の状態。

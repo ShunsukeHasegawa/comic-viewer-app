@@ -249,6 +249,12 @@ const archiveTransferStartOptions = (
 /// 9 分の pause も起きないまま WorkManager の 10 分の上限で止められ、
 /// 長い巻が毎回失敗する。
 ///
+/// 許可は後から取り消せる。パッケージは保存した値だけを見るので、取り消し後も
+/// 「always」のまま走る。アプリが開いている間の取り消しは前面復帰のたびに
+/// 合わせ直し（`ArchiveTransport.refreshForegroundMode`）、閉じている間の
+/// 取り消しはネイティブの `ComicLazApplication` がプロセスの起動時に
+/// 「never」へ直す（取り消しはプロセスを殺すので、次のワーカーは必ずそこを通る）。
+///
 /// 残る穴: Android 12 以上ではアプリが背面にいる間に foreground へ移れない。
 /// holding queue が背面で取り出した 2 巻目以降はパッケージが通常実行に
 /// 戻す（`setForegroundNotification` の例外を拾って `runInForeground =

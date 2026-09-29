@@ -152,20 +152,25 @@ void main() {
       await start();
 
       expect(
-        harness.transport.tempSweeps,
-        greaterThan(0),
+        harness.transport.tempSweepModes,
+        contains(isFalse),
         reason: '失敗した転送の書きかけ（Android）は誰も指さず、容量を食い続ける（F9）',
       );
     });
 
-    test('走っている転送があれば、起動時に一時ファイルを掃除させない', () async {
+    test('走っている転送があれば、起動時はしばらく書き込まれていない一時ファイルだけを掃除させる', () async {
       await saveRow(VolumeDownloadStatus.downloading);
       await writeManifest();
       snapshots({taskIdOf(volumeId): TransferState.running});
 
       await start();
 
-      expect(harness.transport.tempSweeps, 0);
+      expect(harness.transport.tempSweepModes, isNotEmpty);
+      expect(
+        harness.transport.tempSweepModes,
+        everyElement(isTrue),
+        reason: '走行中の書きかけも同じ名前。消すと完了時の移動が失敗する',
+      );
     });
 
     test('rename の後に落ちて完了が再送されても壊れない', () async {

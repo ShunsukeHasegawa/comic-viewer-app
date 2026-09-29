@@ -36,6 +36,27 @@ void main() {
     expect(orphan.existsSync(), isFalse);
   });
 
+  test('走行中の転送があるときは、しばらく書き込まれていない書きかけだけを消す', () async {
+    // まとめて積んだ巻が走り続けている間も、失敗した巻の書きかけ（数百 MB）を
+    // 溜め込まない。一方で、走っている転送の書きかけは同じ名前で、消すと完了時の
+    // 移動が失敗する。受信のたびに書き足されて更新時刻が新しいので、古さで見分ける。
+    final now = DateTime(2026, 9, 29, 12);
+    final orphan = write('${transferTempFilePrefix}111')
+      ..setLastModifiedSync(now.subtract(const Duration(minutes: 3)));
+    final running = write('${transferTempFilePrefix}222')
+      ..setLastModifiedSync(now.subtract(const Duration(seconds: 5)));
+
+    final deleted = await deleteTransferTempFiles(
+      [support],
+      olderThan: transferTempStaleAge,
+      now: now,
+    );
+
+    expect(deleted, 1);
+    expect(orphan.existsSync(), isFalse);
+    expect(running.existsSync(), isTrue);
+  });
+
   test('パッケージの一時ファイル以外（ダウンロード済みの巻など）には触らない', () async {
     final other = write('downloads.sqlite');
     Directory(p.join(support.path, 'downloads')).createSync();

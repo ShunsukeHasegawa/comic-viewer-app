@@ -77,8 +77,10 @@ class FakeVolumesApi implements VolumesApi {
 ///
 /// キューの判断が本物のパッケージの振る舞いに依存するところは、同じように
 /// 振る舞わせる（都合のよい値を返すフェイクだと、実機でだけ壊れる）:
-/// - failed / canceled を流すと再開データを捨てる（`_clearPauseResumeInfo`）。
-///   その後の [resume] は `false`。
+/// - 再開データは paused を流したときにできる（ネイティブが止め終わってから
+///   届く）。それまでの [resume] は `false`（`BaseDownloader.resume` は再開
+///   データが無ければ断る）。failed / canceled / completed を流すと捨てる
+///   （`_clearPauseResumeInfo`）。[resume] しても最終状態までは残る。
 /// - [pause] は、待機しているだけのタスクにも `true` を返す（Android の
 ///   `pauseTaskWithId` は印を付けるだけ）。
 /// - [enqueue] の途中（[onEnqueue]）に届いた [cancel] は空振りする（ネイティブは
@@ -108,7 +110,12 @@ class FakeArchiveTransport implements ArchiveTransport {
   int resetCount = 0;
   int snapshotCalls = 0;
   int notificationRequests = 0;
-  int tempSweeps = 0;
+  int foregroundRefreshes = 0;
+
+  /// [sweepOrphanTempFiles] の呼び出し（`staleOnly` の値）。
+  final tempSweepModes = <bool>[];
+
+  int get tempSweeps => tempSweepModes.length;
 
   /// [snapshot] が返す一覧（起動時の照合の入力）。
   List<TransferSnapshot> snapshotResult = const [];
@@ -123,6 +130,9 @@ class FakeArchiveTransport implements ArchiveTransport {
   /// [pause] の途中で起こすこと（一時停止の往復の隙を作る）。
   Future<void> Function(String taskId)? onPause;
 
+  /// [sweepOrphanTempFiles] の途中で起こすこと（掃除の await の隙を作る）。
+  Future<void> Function()? onSweep;
+
   /// [start] の途中で起こすこと（起動時に届く、閉じている間の完了）。
   Future<void> Function()? onStart;
 
@@ -132,8 +142,8 @@ class FakeArchiveTransport implements ArchiveTransport {
   /// ネイティブが受け付けて、まだ終わっていないタスク。
   final _native = <String>{};
 
-  /// 失敗 / 取り消しで再開データが捨てられたタスク。
-  final _resumeDataDropped = <String>{};
+  /// 再開データがあるタスク。
+  final _resumeData = <String>{};
 
   /// ネイティブが受け付けて、取り消されずに残っているタスク（誰も追って
   /// いない転送が裏で走り続けていないかを確かめる）。
@@ -163,7 +173,7 @@ class FakeArchiveTransport implements ArchiveTransport {
     // ネイティブが受け付けるのは呼び出しが返る直前（この間の取り消しは空振り）。
     if (enqueueResult) {
       _native.add(request.taskId);
-      _resumeDataDropped.remove(request.taskId);
+      _resumeData.remove(request.taskId);
     }
     return enqueueResult;
   }
@@ -178,9 +188,13 @@ class FakeArchiveTransport implements ArchiveTransport {
   @override
   Future<bool> resume(String taskId) async {
     resumed.add(taskId);
-    if (_resumeDataDropped.contains(taskId)) return false;
+    if (!_resumeData.contains(taskId)) return false;
     return resumeResult;
   }
+
+  @override
+  Future<bool> hasResumeData(String taskId) async =>
+      _resumeData.contains(taskId);
 
   @override
   Future<void> cancel(String taskId) async {
@@ -192,20 +206,35 @@ class FakeArchiveTransport implements ArchiveTransport {
   @override
   Future<List<TransferSnapshot>> snapshot() async {
     snapshotCalls++;
+    // 一時停止中として残っている転送には再開データがある。
+    for (final snapshot in snapshotResult) {
+      if (snapshot.hasResumeData || snapshot.state == TransferState.paused) {
+        _resumeData.add(snapshot.taskId);
+      }
+    }
     return snapshotResult;
   }
 
   @override
-  Future<void> forget(String taskId) async => forgotten.add(taskId);
+  Future<void> forget(String taskId) async {
+    forgotten.add(taskId);
+    _resumeData.remove(taskId);
+  }
 
   @override
   Future<void> forgetForeign(String taskId) async {
     forgotten.add(taskId);
     foreignForgotten.add(taskId);
+    _resumeData.remove(taskId);
   }
 
   @override
-  Future<void> sweepOrphanTempFiles() async => tempSweeps++;
+  Future<void> sweepOrphanTempFiles({bool staleOnly = false}) async {
+    log.add('sweep');
+    tempSweepModes.add(staleOnly);
+    await onSweep?.call();
+    log.add('sweep done');
+  }
 
   @override
   Future<void> reset() async {
@@ -220,6 +249,9 @@ class FakeArchiveTransport implements ArchiveTransport {
     return true;
   }
 
+  @override
+  Future<void> refreshForegroundMode() async => foregroundRefreshes++;
+
   /// OS から届くイベントを流す。
   ///
   /// 本物と同じく、終わった（失敗 / 取り消し / 完了）タスクはネイティブから
@@ -227,11 +259,13 @@ class FakeArchiveTransport implements ArchiveTransport {
   void emit(TransferEvent event) {
     if (event case TransferStateChanged(:final taskId, :final state)) {
       switch (state) {
-        case TransferState.failed || TransferState.canceled:
+        case TransferState.failed ||
+            TransferState.canceled ||
+            TransferState.completed:
           _native.remove(taskId);
-          _resumeDataDropped.add(taskId);
-        case TransferState.completed:
-          _native.remove(taskId);
+          _resumeData.remove(taskId);
+        case TransferState.paused:
+          _resumeData.add(taskId);
         case _:
       }
     }
@@ -276,14 +310,22 @@ class FakeArchiveTransport implements ArchiveTransport {
       emit(TransferStateChanged(taskIdOf(volumeId), state));
 
   /// [volumeId] の直近の転送を失敗させる。
-  void fail(int volumeId, TransferFailureKind kind, {String message = ''}) =>
-      emit(
-        TransferStateChanged(
-          taskIdOf(volumeId),
-          TransferState.failed,
-          failure: TransferFailure(kind: kind, message: message),
-        ),
-      );
+  void fail(
+    int volumeId,
+    TransferFailureKind kind, {
+    String message = '',
+    int? httpCode,
+  }) => emit(
+    TransferStateChanged(
+      taskIdOf(volumeId),
+      TransferState.failed,
+      failure: TransferFailure(
+        kind: kind,
+        httpCode: httpCode,
+        message: message,
+      ),
+    ),
+  );
 }
 
 /// 後片付けの途中に別の処理を割り込ませられる [DownloadStore]。
@@ -311,6 +353,18 @@ class GatedDownloadStore extends DownloadStore {
   /// `deleteRow` が DB から消し終えた後、呼び出し元へ戻る前に待たせる
   /// （削除の await の隙に別の処理の保存を差し込む）。
   Completer<void>? afterDeleteRow;
+
+  /// 次の `save` に入る前に待たせる（台帳の書き込みの await の隙を作る）。
+  /// 使われたら `null` に戻る（入ったことを確かめるのに使える）。
+  Completer<void>? beforeSave;
+
+  @override
+  Future<void> save(VolumeDownload download) async {
+    final gate = beforeSave;
+    beforeSave = null;
+    if (gate != null) await gate.future;
+    await super.save(download);
+  }
 
   @override
   Future<void> deleteRow(int volumeId) async {

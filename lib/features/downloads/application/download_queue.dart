@@ -101,6 +101,13 @@ class DownloadQueue extends _$DownloadQueue {
   /// OS から paused が届いたら続きを取る巻（止め終わる前に「再開」された）。
   final _resumeOnPaused = <int>{};
 
+  /// 一時停止を受け付けてもらったが、まだ paused が届いていない巻。
+  ///
+  /// 「止めた」はネイティブが受け付けただけで、再開データは止め終わりの
+  /// paused と一緒に届く。その前に resume すると断られ、先頭から積み直しに
+  /// なる（同じ ID なので、遅れて届く paused も新しい転送と取り違える）。
+  final _pausedEventPending = <int>{};
+
   /// 起動時の照合の前に届いた完了（taskId）。
   ///
   /// 照合の一覧（記録）に載っていなくても、完了が届いたなら書き上がった
@@ -139,7 +146,11 @@ class DownloadQueue extends _$DownloadQueue {
   final _pending = <Future<void>>{};
 
   /// 投入を積んだ順に 1 本ずつ流す（`creationTime` の順番を崩さない）。
+  /// 一時ファイルの掃除も同じ鎖に載せる（[_scheduleTempSweep]）。
   Future<void> _submitChain = Future.value();
+
+  /// 一時ファイルの掃除が鎖に載って、まだ始まっていない（重ねて載せない）。
+  bool _tempSweepQueued = false;
 
   /// 転送のイベントを届いた順に 1 つずつ処理する。
   Future<void> _eventChain = Future.value();
@@ -224,10 +235,13 @@ class DownloadQueue extends _$DownloadQueue {
         .onRestored
         .listen((_) => _submitPending());
     ref.onDispose(restored.cancel);
-    final resumed = ref
-        .read(appResumeMonitorProvider)
-        .onResumed
-        .listen((_) => _submitPending());
+    final resumed = ref.read(appResumeMonitorProvider).onResumed.listen((_) {
+      // 通知の許可は設定アプリで後から取り消せる。起動時の判断のままだと
+      // foreground のつもりで走り、WorkManager の 10 分の上限で止められる
+      // （`foregroundModeFor`）。前面に戻るたびに合わせ直す。
+      _track(transport.refreshForegroundMode());
+      _submitPending();
+    });
     ref.onDispose(resumed.cancel);
 
     try {
@@ -344,29 +358,71 @@ class DownloadQueue extends _$DownloadQueue {
     }
     final task = _tasks[volumeId];
 
-    // 止める意図を**先に台帳へ書く**（F1）。OS から届く paused は、台帳が
-    // 中断になっているかどうかで「ユーザーが止めた」か「9 分の時間切れ /
-    // Wi-Fi の切り替えによる一時的なもの」かを見分ける。
-    await _savePaused(current);
-    if (task == null || !ref.mounted) return;
-    // 投入の処理（マニフェスト取得中）はここで止めなくても、台帳を見て畳む。
-
-    var paused = false;
-    // 走っている転送だけを一時停止する（F11）。待機中のものに頼むと、Android は
-    // 「止めた」と返したまま待機に残し、後で走り出して同時実行の枠を使う。
-    if (_runningTasks.contains(volumeId)) {
-      _pausing.add(volumeId);
-      try {
-        paused = await _transport!.pause(task.toString());
-      } on Object catch (error) {
-        debugPrint('[downloads] pause failed: $error');
-      } finally {
-        _pausing.remove(volumeId);
-      }
-      if (!ref.mounted) return;
+    if (task == null) {
+      // 止める意図を台帳へ書く（F1）。投入の処理（マニフェスト取得中）は
+      // ここで止めなくても、台帳を見て畳む。
+      await _savePaused(current);
+      return;
     }
-    final pausedSeen = _pausedSeen.remove(volumeId);
-    final resumeRequested = _resumeRequested.remove(volumeId);
+    if (_pausing.contains(volumeId)) {
+      // 先の中断の処理中に「再開」され、もう一度「中断」された。最後の操作に
+      // 従う（先の中断がそのまま止める）。
+      _resumeRequested.remove(volumeId);
+      await _savePaused(current);
+      return;
+    }
+
+    // F3: 中断の処理（台帳の書き込み〜OS との往復）の間に押された「再開」は
+    // この処理が引き受ける。**最初の await より前に**印を付ける（台帳の
+    // 書き込みを待つ間に押された「再開」が、止め終わる前に resume して
+    // 断られ、先頭から積み直すことのないように）。
+    _pausing.add(volumeId);
+    var paused = false;
+    var pauseFailed = false;
+    var wasRunning = false;
+    bool pausedSeen;
+    bool resumeRequested;
+    try {
+      // 止める意図を**先に台帳へ書く**（F1）。OS から届く paused は、台帳が
+      // 中断になっているかどうかで「ユーザーが止めた」か「9 分の時間切れ /
+      // Wi-Fi の切り替えによる一時的なもの」かを見分ける。
+      await _savePaused(current);
+      // 止める前に再開された（OS には何もしていないので、そのまま続く）/
+      // 削除 / 積み直し / ログアウトされた（後はそちらに任せる）。
+      if (!ref.mounted ||
+          _tasks[volumeId] != task ||
+          _resumeRequested.contains(volumeId)) {
+        return;
+      }
+      // 走っている転送は一時停止する。待機中のものは、再開データがある
+      // （続きから再開した / 時間切れや Wi-Fi 設定で再投入された）ときだけ
+      // 一時停止の印に任せる（F11）。Android は待機中のタスクに印を付ける
+      // だけなので、後で走り出して同時実行の枠を一瞬使ってから止まる。
+      // それでも取り消すと、canceled は最終状態なのでパッケージが再開データを
+      // 捨て、書きかけごと先頭から落とし直しになる。
+      wasRunning = _runningTasks.contains(volumeId);
+      final canPause = wasRunning || await _hasResumeData(task);
+      if (!ref.mounted ||
+          _tasks[volumeId] != task ||
+          _resumeRequested.contains(volumeId)) {
+        return;
+      }
+      if (canPause) {
+        try {
+          paused = await _transport!.pause(task.toString());
+        } on Object catch (error) {
+          pauseFailed = true;
+          debugPrint('[downloads] pause failed: $error');
+        }
+      }
+    } finally {
+      // ここまでに押された「再開」はこの後で扱う。この後に押されたものは
+      // resume() 自身が扱う（同期的に引き継ぐので取りこぼさない）。
+      _pausing.remove(volumeId);
+      pausedSeen = _pausedSeen.remove(volumeId);
+      resumeRequested = _resumeRequested.remove(volumeId);
+    }
+    if (!ref.mounted) return;
     // 止めている間に削除 / 積み直し / ログアウトされた。後はそちらに任せる。
     if (_tasks[volumeId] != task) return;
 
@@ -374,7 +430,8 @@ class DownloadQueue extends _$DownloadQueue {
       // F3: OS に止めてもらっている間に「再開」が押された（台帳は待機中に
       // 戻っている）。再開データは止め終わってから届くので、paused が
       // 届いてから続きを取る。放置すると、ネイティブは止まったまま表示だけ
-      // 「待機中」で動かなくなる。止められなかったなら、そのまま走り続ける。
+      // 「待機中」で動かなくなる。止めていない / 止められなかったなら、
+      // そのまま走り続ける（書き上がっていれば完了が確定する）。
       if (!paused) return;
       _liveTasks.remove(volumeId);
       _runningTasks.remove(volumeId);
@@ -388,11 +445,31 @@ class DownloadQueue extends _$DownloadQueue {
     if (paused) {
       _liveTasks.remove(volumeId);
       _runningTasks.remove(volumeId);
+      if (!pausedSeen) _pausedEventPending.add(volumeId);
       return;
     }
-    // 走っていない（holding queue で待っているだけ / 再試行待ち）転送は
-    // 一時停止できないので取り消す。中断中の表示のまま落としきらせない。
+    if (wasRunning && !pauseFailed) {
+      // 走っていたのに「止められない」と返った = ネイティブにはもう走っている
+      // タスクが無い（書き上がって完了が届く途中 / 失敗した）。取り消しに回すと
+      // 書き上がった ZIP（書き込み先そのもの）を消してしまう。取り消さず、
+      // 届く最終状態に任せる: 完了なら [_install] が確定し、失敗なら台帳
+      // （中断）のまま片付く。
+      _liveTasks.remove(volumeId);
+      _runningTasks.remove(volumeId);
+      return;
+    }
+    // 再開データの無い待機中（holding queue で待っているだけ / 再試行待ち）の
+    // 転送は捨てるものが無いので取り消す。中断中の表示のまま落としきらせない。
     await _cancelTask(task);
+  }
+
+  Future<bool> _hasResumeData(ArchiveTaskId task) async {
+    try {
+      return await _transport!.hasResumeData(task.toString());
+    } on Object catch (error) {
+      debugPrint('[downloads] resume data lookup failed: $error');
+      return false;
+    }
   }
 
   /// 中断 / 失敗したダウンロードを続きから再開する。
@@ -402,6 +479,14 @@ class DownloadQueue extends _$DownloadQueue {
     final current = state.value?[volumeId];
     if (current == null || !current.isResumable) return;
 
+    // F3: 中断の処理の最中（台帳の書き込み〜OS との往復）。今 resume しても
+    // 再開データがまだ無いので、止め終わってから [pause] が続きを取る。
+    // **最初の await より前に**確かめる。台帳の書き込みを待つ間に中断の
+    // 処理が終わると、下で再開データの無い resume をして断られ、書きかけを
+    // 捨てて先頭から積み直すことになる。
+    final deferToPause =
+        _tasks.containsKey(volumeId) && _pausing.contains(volumeId);
+    if (deferToPause) _resumeRequested.add(volumeId);
     _attempts.remove(volumeId);
     await _save(
       current.copyWith(
@@ -409,17 +494,17 @@ class DownloadQueue extends _$DownloadQueue {
         clearFailureReason: true,
       ),
     );
-    if (!ref.mounted) return;
+    if (!ref.mounted || deferToPause) return;
 
     final task = _tasks[volumeId];
     if (task != null) {
-      // F3: 中断の最中（OS へ一時停止を頼んでいる往復の間）。今 resume しても
-      // 再開データがまだ無いので、止め終わってから [pause] が続きを取る。
+      // 台帳の書き込みを待つ間に中断が始まった。
       if (_pausing.contains(volumeId)) {
         _resumeRequested.add(volumeId);
         return;
       }
       if (_liveTasks.contains(volumeId)) return;
+      if (_deferResumeUntilPaused(volumeId)) return;
       if (await _tryResume(task)) return;
       _clearTask(volumeId);
       await _forgetQuietly(task);
@@ -589,6 +674,7 @@ class DownloadQueue extends _$DownloadQueue {
       }
       if (sameGeneration) {
         // 中断した取り直しを「更新あり」から再開した場合など。続きから取る。
+        if (_deferResumeUntilPaused(volumeId)) return;
         if (await _tryResume(existing)) return;
         if (_isStale(generation)) return;
         _clearTask(volumeId);
@@ -829,6 +915,7 @@ class DownloadQueue extends _$DownloadQueue {
         if (!isCurrent) return;
         // 時間切れの再投入が走り出すまでは一時停止できない（F11）。
         _runningTasks.remove(volumeId);
+        _pausedEventPending.remove(volumeId);
         if (_pausing.contains(volumeId)) _pausedSeen.add(volumeId);
         if (_resumeOnPaused.remove(volumeId)) {
           // F3: 止め終わる前に「再開」が押されていた。再開データが揃ったので
@@ -982,7 +1069,7 @@ class DownloadQueue extends _$DownloadQueue {
         _scheduleSubmit(volumeId);
 
       case TransferFailureKind.connection || TransferFailureKind.other
-          when _isWaitingForWifi:
+          when failure.httpCode == null && _isWaitingForWifi:
         // F3: Wi-Fi 限定で Wi-Fi が切れた失敗は回数に数えない（数えると
         // Wi-Fi が 3 回途切れるだけで「失敗」になる）。積み直せば、ネイティブが
         // Wi-Fi に戻るまで待ってから取り始める。
@@ -990,6 +1077,10 @@ class DownloadQueue extends _$DownloadQueue {
         // がワーカーを止め、その失敗が connection ではなく理由無し / 一般の
         // 例外（CancellationException）として届くため（モバイル回線が生きて
         // いるので、パッケージの「オフラインなら再試行待ち」も効かない）。
+        // HTTP の応答があった失敗は除く。サーバーまで届いている = Wi-Fi 切れ
+        // ではない。Wi-Fi 待ちの判定（VPN だけの回線などを従量制とみなす）と
+        // OS の制約が食い違うと、決まって 4xx を返す巻を数えずに待ち時間無しで
+        // 積み直し続け、自宅サーバーを叩き続ける。下の「数えて待つ」側に回す。
         await _resubmit(task, generation: generation);
 
       case TransferFailureKind.connection ||
@@ -1045,6 +1136,9 @@ class DownloadQueue extends _$DownloadQueue {
     _clearTask(task.volumeId);
     await _forgetQuietly(task);
     if (_isStale(generation)) return;
+    // 積み直しは新しい一時ファイルに書く。他の巻が走り続けていても、置き去りの
+    // 書きかけを掃除する（投入より先に鎖に載せ、空き容量の判定に間に合わせる）。
+    _scheduleTempSweep();
     _scheduleSubmit(task.volumeId);
   }
 
@@ -1060,6 +1154,19 @@ class DownloadQueue extends _$DownloadQueue {
     await _forgetQuietly(task);
     if (_isStale(generation)) return;
     _scheduleSubmit(task.volumeId);
+  }
+
+  /// 一時停止を受け付けてもらい、止め終わりの paused を待っている巻なら、
+  /// 届いてから続きを取るよう予約して `true`。
+  ///
+  /// 再開データは paused と一緒に届くので、その前の resume は断られる
+  /// （パッケージの `resume` は再開データが無ければ `false`）。断られて
+  /// 積み直すと書きかけを捨てて先頭からになり、遅れて届く paused も同じ ID の
+  /// 新しい転送と取り違える。
+  bool _deferResumeUntilPaused(int volumeId) {
+    if (!_pausedEventPending.contains(volumeId)) return false;
+    _resumeOnPaused.add(volumeId);
+    return true;
   }
 
   Future<bool> _tryResume(ArchiveTaskId task) async {
@@ -1116,7 +1223,19 @@ class DownloadQueue extends _$DownloadQueue {
       filesVersion: task.filesVersion,
     );
 
-    final download = state.value?[volumeId];
+    var download = state.value?[volumeId];
+    if (download != null &&
+        download.status == VolumeDownloadStatus.paused &&
+        _tasks[volumeId] == task) {
+      // 中断した「今の転送」の完了 = 止める前に書き上がっていた（中断と
+      // ネイティブの完了の競合。[pause] は止められなかった転送を取り消さずに
+      // 残す）。捨てると数百 MB を先頭から落とし直すことになるので確定する。
+      // 削除 / 別世代の積み直し / ログアウトなら今の転送から外れているので、
+      // 下で取り込まずに捨てる。
+      download = download.copyWith(status: VolumeDownloadStatus.queued);
+      await _save(download);
+      if (_isStale(generation)) return;
+    }
     // 既に確定済み（完了の再送）。
     if (download != null &&
         download.isCompleted &&
@@ -1231,7 +1350,7 @@ class DownloadQueue extends _$DownloadQueue {
     if (_tasks[volumeId] == task) _clearTask(volumeId);
     _attempts.remove(volumeId);
     await _forgetQuietly(task);
-    _sweepTempFilesIfIdle();
+    _scheduleTempSweep();
   }
 
   /// ZIP が本番のファイル名で手元にある巻を確定する。
@@ -1446,8 +1565,9 @@ class DownloadQueue extends _$DownloadQueue {
     );
     if (_isStale(generation)) return;
     // 失敗で置き去りになったパッケージの一時ファイル（F9）。積み直しを
-    // 始める前に、何も走っていなければ消す。
-    if (_liveTasks.isEmpty) await _sweepTempFiles();
+    // 始める前に消す（走っている転送があれば古いものだけ）。投入は照合が
+    // 終わる（_ready）まで待つので、ここでは投入と並ばない。
+    await _sweepTempFiles(staleOnly: _liveTasks.isNotEmpty);
     if (_isStale(generation)) return;
 
     for (final task in installs) {
@@ -1524,6 +1644,7 @@ class DownloadQueue extends _$DownloadQueue {
     _resumeRequested.remove(volumeId);
     _pausedSeen.remove(volumeId);
     _resumeOnPaused.remove(volumeId);
+    _pausedEventPending.remove(volumeId);
   }
 
   Future<void> _forgetQuietly(Object task) async {
@@ -1543,19 +1664,33 @@ class DownloadQueue extends _$DownloadQueue {
     }
   }
 
-  /// 何も走らせていない・積もうとしていないときに、置き去りの一時ファイルを
-  /// 消す（F9）。走っている転送の書きかけを消さないよう、最後の判断は
-  /// 転送側（ネイティブの一覧）でもう一度する。
-  void _sweepTempFilesIfIdle() {
-    if (!ref.mounted || _liveTasks.isNotEmpty || _submitting.isNotEmpty) {
-      return;
-    }
-    _track(_sweepTempFiles());
+  /// 置き去りの一時ファイルを消す（F9）。
+  ///
+  /// 投入と同じ鎖に載せる。転送側は「ネイティブの一覧を見る → 消す」の間に
+  /// await を挟むので、並んで積まれた転送の書きかけ（同じ名前）を一覧に無い
+  /// ものとして消しうる（完了時の移動が失敗する）。鎖の上では投入が走らない
+  /// ので、載った時点の [_liveTasks] で決めてよい: 何も生きていなければ全部、
+  /// 生きていればしばらく書き込まれていないものだけを消す。まとめて積んだ
+  /// 巻が走り続ける間も、失敗した巻の書きかけ（数百 MB）を溜めないため。
+  /// 最後の判断は転送側（ネイティブの一覧）でもう一度する。
+  void _scheduleTempSweep() {
+    if (!ref.mounted || _tempSweepQueued) return;
+    _tempSweepQueued = true;
+    final generation = _generation;
+    final ready = _ready;
+    final link = _submitChain.then((_) async {
+      _tempSweepQueued = false;
+      await ready.future;
+      if (_isStale(generation)) return;
+      await _sweepTempFiles(staleOnly: _liveTasks.isNotEmpty);
+    });
+    _submitChain = link.catchError((Object _) {});
+    _track(link);
   }
 
-  Future<void> _sweepTempFiles() async {
+  Future<void> _sweepTempFiles({required bool staleOnly}) async {
     try {
-      await _transport?.sweepOrphanTempFiles();
+      await _transport?.sweepOrphanTempFiles(staleOnly: staleOnly);
     } on Object catch (error) {
       debugPrint('[downloads] temp sweep failed: $error');
     }
@@ -1605,7 +1740,7 @@ class DownloadQueue extends _$DownloadQueue {
         failureReason: reason,
       ),
     );
-    _sweepTempFilesIfIdle();
+    _scheduleTempSweep();
   }
 
   Future<void> _complete(
@@ -1721,6 +1856,7 @@ class DownloadQueue extends _$DownloadQueue {
     _resumeRequested.clear();
     _pausedSeen.clear();
     _resumeOnPaused.clear();
+    _pausedEventPending.clear();
     _earlyCompleted.clear();
     _submitAgain.clear();
     _awaitingInstall.clear();
@@ -1730,6 +1866,7 @@ class DownloadQueue extends _$DownloadQueue {
     _attempts.clear();
     _reservedBytes.clear();
     _submitChain = Future.value();
+    _tempSweepQueued = false;
     _eventChain = Future.value();
     _installChain = Future.value();
   }

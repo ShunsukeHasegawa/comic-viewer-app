@@ -158,6 +158,10 @@ class BackgroundArchiveTransport implements ArchiveTransport {
   }
 
   @override
+  Future<bool> hasResumeData(String taskId) async =>
+      await _storage.retrieveResumeData(taskId) != null;
+
+  @override
   Future<void> cancel(String taskId) async {
     // 一時停止中のタスク（パッケージの保存領域にしかいない）もこれで取り消せる。
     await _downloader.cancelTaskWithId(taskId);
@@ -240,8 +244,10 @@ class BackgroundArchiveTransport implements ArchiveTransport {
   }
 
   @override
-  Future<void> sweepOrphanTempFiles() async {
-    // 走っている転送の書きかけも同じ名前なので、1 本でも生きていれば触らない。
+  Future<void> sweepOrphanTempFiles({bool staleOnly = false}) async {
+    // 走っている転送の書きかけも同じ名前。1 本でも生きていれば、しばらく
+    // 書き込まれていないもの（失敗して置き去りになったもの）だけを消す。
+    // まとめて積んだ巻が走り続ける間も、失敗のたびに数百 MB を溜めない。
     final listed = await _downloader.allTasks(group: archiveTransferGroup);
     final alive = mergeTransferSnapshots(
       records: const [],
@@ -249,14 +255,15 @@ class BackgroundArchiveTransport implements ArchiveTransport {
       resumeIds: const {},
       pausedIds: await _pausedIds(),
     ).where((snapshot) => snapshot.state != TransferState.paused);
-    if (alive.isNotEmpty) return;
-    // 一時停止中の転送の書きかけは「再開」で続きに使うので残す。
+    final busy = staleOnly || alive.isNotEmpty;
+    // 一時停止中 / 再試行待ちの転送の書きかけは「再開」で続きに使うので残す。
     final keep = {
       for (final data in await _storage.retrieveAllResumeData()) data.data,
     };
     final deleted = await deleteTransferTempFiles(
       await _tempDirectories(),
       keepPaths: keep,
+      olderThan: busy ? transferTempStaleAge : null,
     );
     if (deleted > 0) debugPrint('[transfer] swept $deleted temp files');
   }
@@ -316,25 +323,41 @@ class BackgroundArchiveTransport implements ArchiveTransport {
         status = await permissions.request(PermissionType.notifications);
       }
       final granted = status == PermissionStatus.granted;
-      if (granted) {
-        // 許可が出たので foreground 実行に切り替える（次に走るタスクから効く）。
-        _logConfigureResults(
-          await _downloader.configure(
-            androidConfig: [
-              (
-                Config.runInForeground,
-                foregroundModeFor(notificationsGranted: true),
-              ),
-            ],
-          ),
-        );
-      }
+      // 許可が出たら foreground 実行に切り替える（次に走るタスクから効く）。
+      if (granted) await _configureForeground(granted: true);
       return granted;
     } on Object catch (error) {
       // 通知が出せなくても転送は続くので、失敗は「許可されなかった」扱いにする。
       debugPrint('[transfer] notification permission failed: $error');
       return false;
     }
+  }
+
+  @override
+  Future<void> refreshForegroundMode() async {
+    // 設定アプリで許可を取り消されても、パッケージは保存済みの「always」の
+    // まま走らせる（許可を見ない）。前面に戻るたびに合わせ直す。アプリが
+    // 閉じている間の取り消しは、ネイティブの ComicLazApplication が
+    // プロセスの起動時に「never」へ直す（取り消しはプロセスを殺すので、
+    // 次のワーカーは必ず新しいプロセスで起動時の処理を通る）。
+    try {
+      await _configureForeground(granted: await _notificationsGranted());
+    } on Object catch (error) {
+      debugPrint('[transfer] foreground refresh failed: $error');
+    }
+  }
+
+  Future<void> _configureForeground({required bool granted}) async {
+    _logConfigureResults(
+      await _downloader.configure(
+        androidConfig: [
+          (
+            Config.runInForeground,
+            foregroundModeFor(notificationsGranted: granted),
+          ),
+        ],
+      ),
+    );
   }
 }
 
