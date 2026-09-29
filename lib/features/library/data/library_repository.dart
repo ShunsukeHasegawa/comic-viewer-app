@@ -1,64 +1,14 @@
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../../../core/network/api_exception.dart';
-import '../../../core/session/session_data_purger.dart';
 import '../../../data/api/books_api.dart';
 import '../../../domain/models/book.dart';
+import '../../offline/data/offline_catalog.dart';
+import '../domain/library_snapshot.dart';
+
+export '../domain/library_snapshot.dart';
 
 part 'library_repository.g.dart';
-
-/// 取得済みの一覧とその ETag。
-class LibrarySnapshot {
-  const LibrarySnapshot({
-    required this.books,
-    required this.fetchedAt,
-    this.etag,
-    this.userStatus,
-  });
-
-  final List<Book> books;
-
-  /// 次回の `If-None-Match` に使う。
-  final String? etag;
-
-  final DateTime fetchedAt;
-
-  /// 圏外でも未読 / お気に入りの表示を保つための控え。
-  final UserStatus? userStatus;
-
-  LibrarySnapshot copyWith({String? etag, UserStatus? userStatus}) =>
-      LibrarySnapshot(
-        books: books,
-        fetchedAt: fetchedAt,
-        etag: etag ?? this.etag,
-        userStatus: userStatus ?? this.userStatus,
-      );
-}
-
-/// 一覧キャッシュの置き場所。
-///
-/// #11 で drift による永続化に差し替える（アプリ再起動後もオフラインで一覧が出る）。
-/// 現状はプロセス内のみ。
-abstract interface class LibraryCacheStore {
-  LibrarySnapshot? read();
-
-  void write(LibrarySnapshot snapshot);
-
-  void clear();
-}
-
-class InMemoryLibraryCacheStore implements LibraryCacheStore {
-  LibrarySnapshot? _snapshot;
-
-  @override
-  LibrarySnapshot? read() => _snapshot;
-
-  @override
-  void write(LibrarySnapshot snapshot) => _snapshot = snapshot;
-
-  @override
-  void clear() => _snapshot = null;
-}
 
 /// 一覧取得の結果。
 class LibraryLoadResult {
@@ -80,6 +30,9 @@ class LibraryLoadResult {
 }
 
 /// ライブラリ一覧の取得（ETag 条件付き GET + キャッシュ）。
+///
+/// キャッシュは #11 で drift へ永続化した。アプリを再起動してもオフラインで
+/// 一覧が出せるようにするため（ETag も一緒に持つので、復帰後は 304 で済む）。
 class LibraryRepository {
   LibraryRepository({required this.api, required this.cache});
 
@@ -90,8 +43,11 @@ class LibraryRepository {
   ///
   /// オフライン起動時はこのキャッシュの `userStatus` を使うので、ここを
   /// 更新しないと「お気に入りにしたはずなのに消えている」ことになる。
-  void updateCachedFavorite({required int bookId, required bool isFavorite}) {
-    final snapshot = cache.read();
+  Future<void> updateCachedFavorite({
+    required int bookId,
+    required bool isFavorite,
+  }) async {
+    final snapshot = await cache.read();
     final status = snapshot?.userStatus;
     if (snapshot == null || status == null) return;
 
@@ -101,7 +57,7 @@ class LibraryRepository {
     } else {
       favorites.remove(bookId);
     }
-    cache.write(
+    await cache.write(
       snapshot.copyWith(
         userStatus: status.copyWith(favorites: favorites.toList()),
       ),
@@ -116,7 +72,7 @@ class LibraryRepository {
   /// 通信できないときは手元のキャッシュを `isStale` つきで返す。
   /// キャッシュも無ければ例外を投げる。
   Future<LibraryLoadResult> loadBooks({bool forceRefresh = false}) async {
-    final cached = cache.read();
+    final cached = await cache.read();
 
     try {
       final response = await api.fetchBooks(
@@ -125,7 +81,7 @@ class LibraryRepository {
 
       if (response.isNotModified && cached != null) {
         final refreshed = cached.copyWith(etag: response.etag);
-        cache.write(refreshed);
+        await cache.write(refreshed);
         final userStatus = await _loadUserStatus(refreshed);
         return LibraryLoadResult(
           books: refreshed.books,
@@ -143,7 +99,7 @@ class LibraryRepository {
         // 未読 / お気に入りが取れなかったときに備え、前回の控えを引き継ぐ。
         userStatus: cached?.userStatus,
       );
-      cache.write(snapshot);
+      await cache.write(snapshot);
       final userStatus = await _loadUserStatus(snapshot);
       return LibraryLoadResult(
         books: books,
@@ -153,7 +109,7 @@ class LibraryRepository {
       );
     } on ApiException catch (error) {
       // 認証エラーはそのまま伝える（ログイン画面へ戻す）。
-      if (!_isRecoverable(error) || cached == null) rethrow;
+      if (!error.isTransient || cached == null) rethrow;
       return LibraryLoadResult(
         books: cached.books,
         userStatus: cached.userStatus ?? const UserStatus(),
@@ -167,44 +123,25 @@ class LibraryRepository {
   Future<UserStatus> _loadUserStatus(LibrarySnapshot snapshot) async {
     try {
       final status = await api.fetchUserStatus();
-      cache.write(snapshot.copyWith(userStatus: status));
+      // 変わっていなければ書き直さない。キャッシュは一覧ごと 1 行なので、
+      // 書くたびに数百冊の JSON を作り直すことになる（304 の更新で毎回起きる）。
+      if (status != snapshot.userStatus) {
+        await cache.write(snapshot.copyWith(userStatus: status));
+      }
       return status;
     } on ApiException catch (error) {
-      if (!_isRecoverable(error)) rethrow;
+      if (!error.isTransient) rethrow;
       return snapshot.userStatus ?? const UserStatus();
     }
   }
-
-  /// 通信環境やサーバーの一時的な問題か（= 手元の内容で代替してよい）。
-  static bool _isRecoverable(ApiException error) =>
-      error is NetworkException ||
-      error is ApiTimeoutException ||
-      error is ServerException ||
-      error is TooManyRequestsException;
 }
 
 @Riverpod(keepAlive: true)
-LibraryCacheStore libraryCacheStore(Ref ref) => InMemoryLibraryCacheStore();
+LibraryCacheStore libraryCacheStore(Ref ref) =>
+    PersistentLibraryCacheStore(ref.watch(offlineCatalogProvider));
 
 @Riverpod(keepAlive: true)
 LibraryRepository libraryRepository(Ref ref) => LibraryRepository(
   api: ref.watch(booksApiProvider),
   cache: ref.watch(libraryCacheStoreProvider),
 );
-
-/// ログアウト時に一覧キャッシュを破棄する（#3 / #15）。
-class LibraryCachePurger implements SessionDataPurger {
-  const LibraryCachePurger(this.cache);
-
-  final LibraryCacheStore cache;
-
-  @override
-  String get debugLabel => 'library cache';
-
-  @override
-  Future<void> purgeSessionData() async => cache.clear();
-}
-
-@Riverpod(keepAlive: true)
-SessionDataPurger libraryCachePurger(Ref ref) =>
-    LibraryCachePurger(ref.watch(libraryCacheStoreProvider));

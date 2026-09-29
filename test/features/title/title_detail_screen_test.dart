@@ -12,6 +12,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../../support/api_fakes.dart';
 import '../../support/download_fakes.dart';
+import '../../support/offline_fakes.dart';
 import '../../support/test_scope.dart';
 
 BookDetail sampleDetail({
@@ -63,10 +64,14 @@ Future<ProviderContainer> pumpDetail(
   WidgetTester tester, {
   FakeBooksApi? booksApi,
   StubDownloadQueue? downloadQueue,
+  Map<int, VolumeDownload>? downloads,
+  FakeOfflineMetadataGateway? offline,
 }) async {
   final container = createContainer(
     booksApi: booksApi ?? FakeBooksApi(bookDetail: sampleDetail()),
     downloadQueue: downloadQueue == null ? null : () => downloadQueue,
+    downloads: downloads,
+    offlineMetadata: offline,
   );
   addTearDown(container.dispose);
 
@@ -374,7 +379,11 @@ void main() {
 
       expect(api.favorites, contains(12));
       expect(
-        container.read(bookDetailControllerProvider(12)).value?.isFavorite,
+        container
+            .read(bookDetailControllerProvider(12))
+            .value
+            ?.detail
+            .isFavorite,
         isTrue,
       );
       expect(find.byTooltip('お気に入りから外す'), findsOneWidget);
@@ -516,6 +525,80 @@ void main() {
     );
 
     expect(find.text('登録されている巻がありません。'), findsOneWidget);
+  });
+
+  group('オフライン（#11）', () {
+    /// 圏外（詳細も取れない）で、1 巻だけダウンロード済みの状態。
+    Future<void> pumpOffline(WidgetTester tester) async {
+      // オフラインの案内が入ると既定の 800x600 では 2 巻目が画面外になり、
+      // 遅延生成の SliverList が作らない（見つからない）。縦を広げておく。
+      tester.view.physicalSize = const Size(800, 1200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+
+      await pumpDetail(
+        tester,
+        booksApi: FakeBooksApi(bookDetailError: const NetworkException()),
+        offline: FakeOfflineMetadataGateway(details: {12: sampleDetail()}),
+        downloads: {
+          340: const VolumeDownload(
+            volumeId: 340,
+            bookId: 12,
+            filesVersion: 1,
+            status: VolumeDownloadStatus.completed,
+          ),
+        },
+      );
+    }
+
+    testWidgets('端末の控えで詳細を表示し、オフラインであることを伝える', (tester) async {
+      await pumpOffline(tester);
+
+      expect(find.text('オフラインです。ダウンロード済みの巻だけ読めます。'), findsOneWidget);
+      expect(find.byType(VolumeTile), findsNWidgets(2));
+    });
+
+    testWidgets('未ダウンロードの巻は無効表示にする（エラーダイアログを出さない）', (tester) async {
+      await pumpOffline(tester);
+
+      // 1 巻（ダウンロード済み）は開ける。2 巻は開けない。
+      final tiles = tester.widgetList<VolumeTile>(find.byType(VolumeTile));
+      expect(tiles.map((tile) => tile.onOpen != null), [true, false]);
+      expect(find.textContaining('オフラインでは読めません'), findsOneWidget);
+    });
+
+    testWidgets('控えが無ければエラー表示（黙って空の詳細を見せない）', (tester) async {
+      await pumpDetail(
+        tester,
+        booksApi: FakeBooksApi(bookDetailError: const NetworkException()),
+        offline: FakeOfflineMetadataGateway(),
+      );
+
+      expect(find.byType(ErrorView), findsOneWidget);
+    });
+
+    // 「詳細を開く → ダウンロード」の順に操作されるので、取得時点ではまだ
+    // 未ダウンロード（= 控えは保存されない）。完了を契機に控え直さないと、
+    // 圏外でそのタイトルの詳細が開けない。
+    testWidgets('ダウンロードが完了したら詳細を控え直す（圏外で開けるように）', (tester) async {
+      final offline = FakeOfflineMetadataGateway();
+      final queue = StubDownloadQueue();
+      await pumpDetail(tester, downloadQueue: queue, offline: offline);
+      expect(offline.savedDetails, [12], reason: '取得時にも控えを試みる');
+
+      // ダウンロード完了をキューの状態として流す。
+      queue.emit(
+        const VolumeDownload(
+          volumeId: 340,
+          bookId: 12,
+          filesVersion: 1,
+          status: VolumeDownloadStatus.completed,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(offline.savedDetails, [12, 12], reason: '完了後にもう一度控える');
+    });
   });
 }
 

@@ -77,6 +77,7 @@ class CacheUsage {
 /// - 上限超過は最後に使った時刻の古い順に削除する
 /// - 保持期間を過ぎたものも削除する
 /// - **ダウンロード済みデータ（#9）はこの対象外**（勝手に消さない）
+/// - 保護印（[PinnedImages]）が付いた画像は LRU / 保持期間で消さない（#11）
 ///
 /// メモリ上のデコード済み画像は Flutter の `ImageCache` が持つため、ここでは
 /// ディスクのみを扱う（二重に持たない）。
@@ -273,6 +274,7 @@ class ImageCacheStore {
 
   Future<void> _evict() async {
     final settings = await settingsStore.read();
+    final protected = await pinnedKeys();
 
     // 期限切れ（保持期間を過ぎたもの）。
     if (settings.retention.duration case final retention?) {
@@ -282,7 +284,10 @@ class ImageCacheStore {
                 (table) => table.lastUsedAt.isSmallerThanValue(threshold),
               ))
               .get();
-      await _deleteRows(expired);
+      await _deleteRows([
+        for (final row in expired)
+          if (!protected.contains(row.key)) row,
+      ]);
     }
 
     // 種別ごとの上限。
@@ -291,15 +296,24 @@ class ImageCacheStore {
           ? settings.pageLimit.bytes
           : settings.thumbnailLimit.bytes;
       if (limit == null) continue;
-      await evictToLimit(kind, limit);
+      await evictToLimit(kind, limit, protected: protected);
     }
   }
 
   /// [kind] の合計が [limitBytes] 以下になるまで、古い順に削除する。
   ///
   /// 設定の上限は 256MB 以上なので、削除順の検証はここを直接呼ぶ。
+  ///
+  /// 保護印の付いた画像（[protected]）は削除しないが、**合計には数える**。
+  /// 数えないと上限を超えて使い続けることになるので、保護対象が多いときは
+  /// その分だけ普通の画像が早く追い出される。
   @visibleForTesting
-  Future<void> evictToLimit(CachedImageKind kind, int limitBytes) async {
+  Future<void> evictToLimit(
+    CachedImageKind kind,
+    int limitBytes, {
+    Set<String>? protected,
+  }) async {
+    final keep = protected ?? await pinnedKeys();
     final rows =
         await (database.select(database.cachedImages)
               ..where((table) => table.kind.equalsValue(kind))
@@ -313,15 +327,53 @@ class ImageCacheStore {
     final victims = <CachedImageRow>[];
     for (final row in rows) {
       if (total <= limitBytes) break;
+      if (keep.contains(row.key)) continue;
       victims.add(row);
       total -= row.bytes;
     }
     await _deleteRows(victims);
   }
 
+  /// 保護印の付いたキャッシュキー（#11）。
+  Future<Set<String>> pinnedKeys() async {
+    final key = database.pinnedImages.key;
+    final rows = await (database.selectOnly(
+      database.pinnedImages,
+    )..addColumns([key])).get();
+    return {for (final row in rows) ?row.read(key)};
+  }
+
+  /// [bookId] のために [keys] を保護する。
+  ///
+  /// 実体がまだ無いキーでも印は置ける（次に取得したものがそのまま守られる）。
+  Future<void> pin({
+    required int bookId,
+    required Iterable<String> keys,
+  }) async {
+    final rows = [
+      for (final key in keys) PinnedImageRow(key: key, bookId: bookId),
+    ];
+    if (rows.isEmpty) return;
+    await database.batch((batch) {
+      batch.insertAllOnConflictUpdate(database.pinnedImages, rows);
+    });
+  }
+
+  /// [bookIds] 以外のタイトルの保護印を外す（ダウンロードを消したとき）。
+  Future<void> retainPins(Set<int> bookIds) async {
+    final query = database.delete(database.pinnedImages);
+    if (bookIds.isNotEmpty) {
+      query.where((table) => table.bookId.isNotIn(bookIds));
+    }
+    await query.go();
+  }
+
   /// 一時キャッシュを削除する。[kind] を指定するとその種別だけ。
   ///
   /// **ダウンロード済みデータは消さない**（別領域 / 別テーブル）。
+  /// 保護印（#11）の付いた画像も、ユーザーが明示的に「削除」を選んだときは消す。
+  /// 印そのものは残すので、オンラインで取り直した分から再び守られる
+  /// （ログアウト時は `OfflineMetadataPurger` が印ごと捨てる）。
   Future<void> clear({CachedImageKind? kind}) async {
     // 進行中の取得が破棄の後に書き戻さないよう、世代を進める。
     _generation++;

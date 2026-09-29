@@ -130,6 +130,52 @@ class ReadingProgresses extends Table {
   Set<Column<Object>> get primaryKey => {volumeId};
 }
 
+/// オフライン再生のためのメタ情報（#11）。
+///
+/// 一覧 / タイトル詳細 / 巻情報 / カテゴリ・タグを **JSON のまま**キーで持つ。
+/// 列に展開しないのは、オフラインで必要なのが「キーで丸ごと引く」用途だけで、
+/// 絞り込みや並び替えは取り出した後にメモリ上で行うため。列に割ると API の形が
+/// 変わるたびにマイグレーションが必要になる（読めない payload は捨てればよい）。
+@DataClassName('OfflineMetadataRow')
+class OfflineMetadataEntries extends Table {
+  @override
+  String get tableName => 'offline_metadata';
+
+  /// `books` / `categories` / `tags` / `book/{bookId}` / `volume/{volumeId}`。
+  TextColumn get key => text()();
+
+  /// モデルの `toJson()` をそのまま入れた JSON。
+  TextColumn get payload => text()();
+
+  /// 次回の `If-None-Match` に使う（一覧のみ）。
+  TextColumn get etag => text().nullable()();
+
+  DateTimeColumn get fetchedAt => dateTime()();
+
+  @override
+  Set<Column<Object>> get primaryKey => {key};
+}
+
+/// 一時キャッシュの LRU / 保持期間で消してはいけない画像（#11）。
+///
+/// ダウンロード済みタイトルのサムネイルは、オフラインで一覧 / 詳細を出すために
+/// 必須なので LRU の対象から外す。ページ画像と違い ZIP から作り直せないため、
+/// 一度消えるとオンラインに戻るまで復活しない。
+///
+/// 実体は [CachedImages] 側にあり、この表は「消さない印」だけを持つ。
+/// **まだ取得していないキーも印だけ先に置ける**（あとで書かれた実体が守られる）。
+@DataClassName('PinnedImageRow')
+class PinnedImages extends Table {
+  /// キャッシュキー（`MediaUrls.thumbnailCacheKey`）。
+  TextColumn get key => text()();
+
+  /// どのタイトルのために保護しているか（ダウンロードを消したら印も消す）。
+  IntColumn get bookId => integer()();
+
+  @override
+  Set<Column<Object>> get primaryKey => {key};
+}
+
 /// アプリ設定（キャッシュ上限など）の保存先。
 ///
 /// 数が少なく型もばらばらなので、key-value で持つ。
@@ -144,17 +190,22 @@ class Settings extends Table {
 }
 
 /// ローカル DB。
-///
-/// #11 で一覧 / 巻メタのキャッシュテーブルを足す。
 @DriftDatabase(
-  tables: [CachedImages, Settings, DownloadedVolumes, ReadingProgresses],
+  tables: [
+    CachedImages,
+    Settings,
+    DownloadedVolumes,
+    ReadingProgresses,
+    OfflineMetadataEntries,
+    PinnedImages,
+  ],
 )
 class AppDatabase extends _$AppDatabase {
   AppDatabase([QueryExecutor? executor])
     : super(executor ?? driftDatabase(name: 'comic_laz'));
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   /// 既存の端末を作り直さずに列 / テーブルを足す。
   ///
@@ -168,6 +219,12 @@ class AppDatabase extends _$AppDatabase {
       if (from < 2) await m.createTable(downloadedVolumes);
       // v3: オフライン進捗のキュー（#12）。未送信の進捗は端末にしか無い。
       if (from < 3) await m.createTable(readingProgresses);
+      // v4: オフライン再生のメタ情報とサムネイルの保護（#11）。
+      // どちらも取り直せるデータなので、作るだけでよい。
+      if (from < 4) {
+        await m.createTable(offlineMetadataEntries);
+        await m.createTable(pinnedImages);
+      }
     },
   );
 }

@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
+import '../../features/downloads/data/downloaded_page_source.dart';
 import '../media/media_urls.dart';
 import '../network/api_exception.dart';
 import '../network/dio_provider.dart';
@@ -25,6 +26,7 @@ class ComicImageRequest {
     required this.url,
     required this.cacheKey,
     required this.kind,
+    this.page,
   });
 
   /// ビューアのページ画像。
@@ -46,6 +48,11 @@ class ComicImageRequest {
         filesVersion: filesVersion,
       ),
       kind: CachedImageKind.page,
+      page: ComicPageRef(
+        volumeId: volumeId,
+        page: page,
+        filesVersion: filesVersion,
+      ),
     );
   }
 
@@ -69,6 +76,12 @@ class ComicImageRequest {
   /// ページ / サムネイル。上限を別枠で管理するため保存時に記録する。
   final CachedImageKind kind;
 
+  /// ダウンロード済み ZIP から取り出すための座標（サムネイルは `null`）。
+  ///
+  /// キャッシュキーを文字列として解析して求めない。キーの形は保存先の都合で
+  /// 変わりうるので、作った側が素の値を持ったまま運ぶ。
+  final ComicPageRef? page;
+
   @override
   bool operator ==(Object other) =>
       other is ComicImageRequest &&
@@ -83,19 +96,54 @@ class ComicImageRequest {
   String toString() => 'ComicImageRequest($cacheKey, $url)';
 }
 
+/// ページ画像の座標（巻 / ページ番号 / 世代）。
+///
+/// [page] は `/books/view/{volumeId}/{page}` の番号 = **ZIP のエントリ番号**。
+@immutable
+class ComicPageRef {
+  const ComicPageRef({
+    required this.volumeId,
+    required this.page,
+    required this.filesVersion,
+  });
+
+  final int volumeId;
+  final int page;
+  final int filesVersion;
+
+  @override
+  bool operator ==(Object other) =>
+      other is ComicPageRef &&
+      other.volumeId == volumeId &&
+      other.page == page &&
+      other.filesVersion == filesVersion;
+
+  @override
+  int get hashCode => Object.hash(volumeId, page, filesVersion);
+
+  @override
+  String toString() => 'ComicPageRef(v$volumeId/$filesVersion/$page)';
+}
+
 /// コミック画像の取得口。**画像を取る経路はここ 1 本に集約する**。
 ///
-/// 解決順は「一時キャッシュ → ネットワーク」。ダウンロード済みローカルを
-/// 最優先にするのは #11 で [load] の先頭に差し込む（このクラスだけを直せば
-/// 表示・先読みの両方に効く）。
+/// 解決順は「**ダウンロード済みローカル → 一時キャッシュ → ネットワーク**」（#11）。
+/// ここ 1 箇所で決めるので、表示も先読みも同じ順で解決される。
 ///
 /// 認証は `Dio` の `AuthInterceptor` に任せる。API と同じオリジンにだけ Bearer が
 /// 付き、他オリジン（CDN 等）へはトークンを送らない。判定を二重に持たない。
 class ComicImageLoader {
-  ComicImageLoader({required this.dio, required this.store});
+  ComicImageLoader({
+    required this.dio,
+    required this.store,
+    this.localPages = const NoDownloadedPageSource(),
+  });
 
   final Dio dio;
   final ImageCacheStore store;
+
+  /// ダウンロード済み ZIP（#9）からページを取り出す口。
+  final DownloadedPageSource localPages;
 
   /// 進行中の取得（表示と先読みが同じページに重なることがある）。
   final _inFlight = <String, Future<Uint8List>>{};
@@ -112,7 +160,11 @@ class ComicImageLoader {
   }
 
   Future<Uint8List> _load(ComicImageRequest request) async {
-    // #11 でここにダウンロード済みローカルファイルの参照を挿す。
+    // 1. 明示的にダウンロードした巻（ZIP）。圏外でもここで解決する。
+    final local = await _readLocal(request);
+    if (local != null) return local;
+
+    // 2. 一時キャッシュ。
     try {
       final cached = await store.read(request.cacheKey);
       if (cached != null) return cached.bytes;
@@ -122,6 +174,7 @@ class ComicImageLoader {
       // （しかも `ApiException` ですらない例外が UI へ漏れる）。
     }
 
+    // 3. ネットワーク。
     // ダウンロードの最中にログアウト（全削除）が入ったら書き戻さないための世代。
     // 前のユーザーの画像がディスクに残ると、別のユーザーがそれを見てしまう。
     final generation = store.generation;
@@ -138,6 +191,25 @@ class ComicImageLoader {
       // 保存に失敗しても表示は続ける（容量不足・OS のキャッシュ削除など）。
     }
     return downloaded.bytes;
+  }
+
+  /// ダウンロード済みのページ。無い / 世代が違う / 読めないときは `null`。
+  ///
+  /// サムネイルは ZIP に入っていないので見に行かない（[ComicImageRequest.page]
+  /// が `null` = サムネイル）。
+  Future<Uint8List?> _readLocal(ComicImageRequest request) async {
+    final page = request.page;
+    if (page == null) return null;
+    try {
+      return await localPages.readPage(
+        volumeId: page.volumeId,
+        page: page.page,
+        filesVersion: page.filesVersion,
+      );
+    } on Object {
+      // ローカルが読めないだけなら、一時キャッシュ / ネットワークへ落ちる。
+      return null;
+    }
   }
 
   Future<({Uint8List bytes, String? contentType})> _download(Uri url) async {
@@ -180,6 +252,7 @@ Future<ComicImageLoader> comicImageLoader(Ref ref) async {
   return ComicImageLoader(
     dio: ref.watch(dioProvider),
     store: await ref.watch(imageCacheStoreProvider.future),
+    localPages: await ref.watch(downloadedPageSourceProvider.future),
   );
 }
 

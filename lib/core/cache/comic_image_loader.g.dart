@@ -59,4 +59,4 @@ final class ComicImageLoaderProvider
   }
 }
 
-String _$comicImageLoaderHash() => r'0641ef6da42d881216661f47235cd0677207e1a0';
+String _$comicImageLoaderHash() => r'f95ca9e5e9f2a8af22dd4307dc7315c678243d62';

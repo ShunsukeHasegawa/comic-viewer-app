@@ -51,6 +51,12 @@ test/         lib と同じ構成。共通フェイクは test/support/
   手元の進捗やキャッシュを捨てない。
 - 画像 URL の組み立ては `MediaUrls` だけ。ページは `?v={files_version}` 必須、
   サムネイルは API が返す `?m=` 付き相対 URL をそのまま解決（`null` は組み立て直さない）。
+- 画像の取得経路は `ComicImageLoader` だけ。解決順は「ダウンロード済みローカル（ZIP）
+  → 一時キャッシュ → ネットワーク」で、増やすときもここ 1 箇所で決める（#11）。
+- オフライン用のメタ情報（一覧 / 詳細 / 巻情報 / カテゴリ）の出し入れは
+  `OfflineMetadataGateway`（`features/offline/`）を通す。画面から drift を直接触らない。
+- 「オフラインか」は OS の接続状態ではなく**実際の通信結果**で判断する
+  （`LibraryData.isStale` など）。`ConnectivityMonitor` は再試行の合図としてだけ使う。
 - 画像に Bearer を付けるのは **API と同じオリジンのみ**（`AppConfig.isApiOrigin`）。
 - 端末内にユーザー固有データを持つ機能は `SessionDataPurger` を
   `sessionDataPurgersProvider` に登録する（ログアウト時に破棄。#15）。

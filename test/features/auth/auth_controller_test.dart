@@ -111,6 +111,86 @@ void main() {
     });
   });
 
+  // セーフモードはサーバー側が正（`is_unsafe` の巻は配信されない）なので、
+  // 端末に落ちているデータは「そのとき見られたもの」だけ。ただし別のユーザーや
+  // 別の設定に変わった後は、一覧・詳細・サムネイルがキャッシュ経由で見えて
+  // しまうので破棄する（#11）。
+  group('ユーザー / セーフモードの変更', () {
+    /// 前回は [previous]、今回サーバーが [next} を返した状況を作る。
+    Future<RecordingPurger> restoreWith(User previous, User next) async {
+      final api = MockAuthApi()..stubCurrentUser(next);
+      final purger = RecordingPurger();
+      final container = createContainer(
+        authStore: FakeAuthStore(token: 'valid', user: previous),
+        authApi: api,
+        purgers: [purger],
+      );
+      addTearDown(container.dispose);
+
+      await settleAuth(container);
+      expect(
+        container.read(authControllerProvider),
+        AuthState.authenticated(next),
+      );
+      return purger;
+    }
+
+    test('別のユーザーに変わったら端末内データを破棄する', () async {
+      final purger = await restoreWith(
+        testUser,
+        const User(id: 2, name: '別の人'),
+      );
+
+      expect(purger.calls, 1);
+    });
+
+    test('セーフモード設定が変わったら端末内データを破棄する', () async {
+      final purger = await restoreWith(
+        testUser,
+        testUser.copyWith(safeMode: true),
+      );
+
+      expect(purger.calls, 1, reason: '前の設定で取った一覧がオフラインで見えてしまう');
+    });
+
+    test('同じユーザー・同じ設定なら破棄しない', () async {
+      final purger = await restoreWith(testUser, testUser);
+
+      expect(purger.calls, 0);
+    });
+
+    test('ログイン時にユーザーが変わっていても破棄する', () async {
+      final api = MockAuthApi();
+      when(
+        () => api.createToken(
+          email: any(named: 'email'),
+          password: any(named: 'password'),
+          deviceName: any(named: 'deviceName'),
+        ),
+      ).thenAnswer(
+        (_) async => const AuthTokenResult(
+          token: 'new-token',
+          user: User(id: 2, name: '別の人'),
+        ),
+      );
+      final purger = RecordingPurger();
+      final container = createContainer(
+        // ログアウトを経ずに別のユーザーでログインした（トークンだけ消えた状態）。
+        authStore: FakeAuthStore(user: testUser),
+        authApi: api,
+        purgers: [purger],
+      );
+      addTearDown(container.dispose);
+      await settleAuth(container);
+
+      await container
+          .read(authControllerProvider.notifier)
+          .login(email: 'b@example.com', password: 'secret');
+
+      expect(purger.calls, 1);
+    });
+  });
+
   group('login', () {
     test('トークンとユーザーを保存してログイン済みになる', () async {
       final api = MockAuthApi();

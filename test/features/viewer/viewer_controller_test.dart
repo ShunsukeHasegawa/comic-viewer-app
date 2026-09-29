@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../support/api_fakes.dart';
+import '../../support/offline_fakes.dart';
 import '../../support/test_scope.dart';
 import '../../support/viewer_fakes.dart';
 
@@ -36,6 +37,12 @@ ReadVolume volumeFixture({
 
   /// ローカル進捗の読み出しで投げる例外（ローカル DB が読めない状況）。
   Object? unsyncedPageError,
+
+  /// 巻情報の取得で投げる例外（圏外の再現）。
+  ApiException? readVolumeError,
+
+  /// 端末に控えてあるオフライン用メタ情報。
+  FakeOfflineMetadataGateway? offline,
 }) {
   final recorder = RecordingProgressRecorder(succeeds: !recordFails)
     ..unsyncedPages.addAll(unsyncedPages)
@@ -43,7 +50,11 @@ ReadVolume volumeFixture({
   final container = ProviderContainer(
     overrides: [
       ...testOverrides(
-        booksApi: FakeBooksApi(readVolume: volume ?? volumeFixture()),
+        booksApi: FakeBooksApi(
+          readVolume: volume ?? volumeFixture(),
+          readVolumeError: readVolumeError,
+        ),
+        offlineMetadata: offline,
       ),
       progressRecorderProvider.overrideWithValue(recorder),
     ],
@@ -412,6 +423,62 @@ void main() {
       await fixture.container.read(viewerControllerProvider(340).future);
 
       expect(await notifier.moveToNextVolume(), isNull);
+    });
+  });
+
+  group('オフライン（#11）', () {
+    test('圏外では端末に控えた巻情報で開く', () async {
+      final offline = FakeOfflineMetadataGateway(
+        volumes: {340: volumeFixture(pageCount: 3, currentPage: 2)},
+      );
+      final fixture = build(
+        readVolumeError: const NetworkException(),
+        offline: offline,
+      );
+
+      final state = await fixture.container.read(
+        viewerControllerProvider(340).future,
+      );
+
+      expect(state.pageCount, 3);
+      expect(state.currentPage, 2);
+      expect(state.isStale, isTrue, reason: '次巻へ進めるかの判断に使う');
+    });
+
+    test('控えが無い巻（未ダウンロード）は開けない', () async {
+      final fixture = build(
+        readVolumeError: const NetworkException(),
+        offline: FakeOfflineMetadataGateway(),
+      );
+
+      await expectLater(
+        fixture.container.read(viewerControllerProvider(340).future),
+        throwsA(isA<NetworkException>()),
+      );
+    });
+
+    test('404（削除済み）は控えで隠さない', () async {
+      final offline = FakeOfflineMetadataGateway(
+        volumes: {340: volumeFixture()},
+      );
+      final fixture = build(
+        readVolumeError: const NotFoundException(),
+        offline: offline,
+      );
+
+      await expectLater(
+        fixture.container.read(viewerControllerProvider(340).future),
+        throwsA(isA<NotFoundException>()),
+      );
+    });
+
+    test('取得できたら端末にも控える（次に圏外で開けるように）', () async {
+      final offline = FakeOfflineMetadataGateway();
+      final fixture = build(offline: offline);
+
+      await fixture.container.read(viewerControllerProvider(340).future);
+
+      expect(offline.savedVolumes, [340]);
     });
   });
 }

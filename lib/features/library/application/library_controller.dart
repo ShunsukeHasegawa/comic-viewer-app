@@ -1,11 +1,16 @@
+import 'dart:async';
+
 import 'package:freezed_annotation/freezed_annotation.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
+import '../../../core/device/connectivity_monitor.dart';
 import '../../../core/network/api_exception.dart';
 import '../../../data/api/taxonomy_api.dart';
 import '../../../data/api/user_api.dart';
 import '../../../domain/models/book.dart';
 import '../../../domain/models/reading_book.dart';
+import '../../downloads/application/downloaded_lookup.dart';
+import '../../offline/application/offline_metadata_gateway.dart';
 import '../../progress/data/progress_store.dart';
 import '../../progress/domain/reading_progress.dart';
 import '../data/library_repository.dart';
@@ -45,6 +50,13 @@ Duration? noAutoRetry(int retryCount, Object error) => null;
 class LibraryController extends _$LibraryController {
   @override
   Future<LibraryData> build() {
+    // ネットワーク復帰で自動的に最新化する（#12 の監視を使い回す）。
+    // 一覧を表示している間だけ購読する（autoDispose）。
+    final subscription = ref
+        .read(connectivityMonitorProvider)
+        .onRestored
+        .listen((_) => unawaited(refreshIfStale()));
+    ref.onDispose(subscription.cancel);
     return _load();
   }
 
@@ -58,6 +70,19 @@ class LibraryController extends _$LibraryController {
     state = next;
   }
 
+  /// 圏外の内容を表示しているときだけ取り直す（ネットワーク復帰時）。
+  ///
+  /// `If-None-Match` は送る（変わっていなければ 304 で済み、自宅サーバーに
+  /// 一覧の JSON を作り直させない）。最新を表示しているなら何もしない。
+  Future<void> refreshIfStale() async {
+    if (!ref.mounted) return;
+    final current = state.value;
+    if (current != null && !current.isStale) return;
+    final next = await AsyncValue.guard(_load);
+    if (!ref.mounted) return;
+    state = next;
+  }
+
   Future<LibraryData> _load({bool forceRefresh = false}) async {
     // await を挟んだ後に ref を触らないよう、依存はここで解決しておく
     // （読み込み中に画面が破棄されても例外にしない）。
@@ -65,25 +90,40 @@ class LibraryController extends _$LibraryController {
     final userApi = ref.read(userApiProvider);
     final taxonomyApi = ref.read(taxonomyApiProvider);
     final progressStore = ref.read(progressStoreProvider);
+    final offline = ref.read(offlineMetadataGatewayProvider);
     final previous = state.value;
 
     final result = await repository.loadBooks(forceRefresh: forceRefresh);
 
     // 「続きを読む」と絞り込み用のカテゴリ / タグは取れなくても一覧は出す。
     // 取れなかった場合は**前回の内容を残す**（チップが消えて絞り込みを
-    // 解除できなくなるのを防ぐ）。
+    // 解除できなくなるのを防ぐ）。カテゴリ / タグは端末にも控えてあるので、
+    // 再起動直後の圏外でも絞り込みチップを出せる（#11）。
     final reading = await _tolerate(
       userApi.fetchReading,
       previous?.reading ?? const <ReadingBook>[],
     );
-    final categories = await _tolerate(
-      taxonomyApi.fetchCategories,
-      previous?.categories ?? const <Taxonomy>[],
+    final categories = await _taxonomy(
+      fetch: taxonomyApi.fetchCategories,
+      read: offline.readCategories,
+      write: offline.saveCategories,
+      previous: previous?.categories,
     );
-    final tags = await _tolerate(
-      taxonomyApi.fetchTags,
-      previous?.tags ?? const <Taxonomy>[],
+    final tags = await _taxonomy(
+      fetch: taxonomyApi.fetchTags,
+      read: offline.readTags,
+      write: offline.saveTags,
+      previous: previous?.tags,
     );
+
+    // ダウンロードが消えたタイトル / 巻の控えを片付ける。一覧の読み込みは
+    // 起動時と明示的な更新で必ず通るので、掃除の契機としてここに置く。
+    // 失敗しても一覧は出す（次の読み込みでやり直す）。
+    try {
+      await offline.prune();
+    } on Object {
+      // 何もしない。
+    }
 
     // オフラインで読み進めた巻は、サーバーの値のままだと読む前のページを指す。
     // 未送信のローカル進捗があればそれを優先する（#12）。
@@ -114,9 +154,41 @@ class LibraryController extends _$LibraryController {
     }
     state = AsyncValue.data(current.copyWith(favoriteIds: favorites));
     // オフライン用のキャッシュにも反映する（次に開いたときに消えないように）。
-    ref
-        .read(libraryRepositoryProvider)
-        .updateCachedFavorite(bookId: bookId, isFavorite: isFavorite);
+    // 表示は済んでいるので待たない。失敗しても表示は正しい（次の取得で直る）。
+    unawaited(
+      ref
+          .read(libraryRepositoryProvider)
+          .updateCachedFavorite(bookId: bookId, isFavorite: isFavorite)
+          .catchError((Object _) {}),
+    );
+  }
+
+  /// カテゴリ / タグを取得する。取れなければ「前回の内容 → 端末の控え」の順で代替。
+  Future<List<Taxonomy>> _taxonomy({
+    required Future<List<Taxonomy>> Function() fetch,
+    required Future<List<Taxonomy>?> Function() read,
+    required Future<void> Function(List<Taxonomy>) write,
+    required List<Taxonomy>? previous,
+  }) async {
+    try {
+      final items = await fetch();
+      // 控えの書き込みに失敗しても絞り込みは出せる（次の取得で書き直される）。
+      try {
+        await write(items);
+      } on Object {
+        // 何もしない。
+      }
+      return items;
+    } on UnauthorizedException {
+      rethrow;
+    } on ApiException {
+      if (previous != null && previous.isNotEmpty) return previous;
+      try {
+        return await read() ?? const [];
+      } on Object {
+        return const [];
+      }
+    }
   }
 
   /// 端末に貯めた進捗。読めなくても一覧は出す（表示の補正にしか使わない）。
@@ -165,6 +237,15 @@ class LibraryFilterController extends _$LibraryFilterController {
   void toggleComplete() =>
       state = state.copyWith(onlyComplete: !state.onlyComplete);
 
+  /// ダウンロード済みのみ表示を切り替える（#11）。
+  ///
+  /// [isOffline] は「いま既定で ON になっているか」を決めるため必要。
+  /// 未指定（`null`）のままだと、圏外で ON に見えているものをもう一度押しても
+  /// ON のままになってしまう。
+  void toggleDownloaded({required bool isOffline}) => state = state.copyWith(
+    onlyDownloaded: !state.onlyDownloadedWhen(isOffline: isOffline),
+  );
+
   /// 検索語以外の絞り込みを解除する。
   void clearFilters() =>
       state = LibraryFilter(query: state.query, sort: state.sort);
@@ -190,10 +271,22 @@ List<Book> visibleBooks(Ref ref) {
   if (data == null) return const [];
 
   final filter = ref.watch(libraryFilterControllerProvider);
+  // サーバーに確認できていない = オフライン。OS の接続状態ではなく実際の通信
+  // 結果で判断する（接続があっても自宅サーバーに届かないことがある）。
+  final isOffline = data.isStale;
+
+  // ダウンロード状態を見るのは絞り込みに使うときだけ。常に watch すると、
+  // 取得中の進捗が更新されるたびに一覧全体の絞り込みと並び替えが走る。
+  final downloadedIds = filter.onlyDownloadedWhen(isOffline: isOffline)
+      ? ref.watch(downloadedBookIdsProvider)
+      : const <int>{};
+
   return applyLibraryFilter(
     candidates: data.searchIndex.search(filter.query),
     filter: filter,
     favoriteIds: data.favoriteIds,
     unreadIds: data.unreadIds,
+    downloadedIds: downloadedIds,
+    isOffline: isOffline,
   );
 }

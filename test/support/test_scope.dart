@@ -14,6 +14,8 @@ import 'package:comic_laz/features/auth/data/auth_store.dart';
 import 'package:comic_laz/features/auth/domain/auth_state.dart';
 import 'package:comic_laz/features/downloads/application/download_queue.dart';
 import 'package:comic_laz/features/downloads/domain/volume_download.dart';
+import 'package:comic_laz/features/library/data/library_repository.dart';
+import 'package:comic_laz/features/offline/application/offline_metadata_gateway.dart';
 import 'package:comic_laz/features/progress/data/progress_store.dart';
 import 'package:comic_laz/features/viewer/presentation/widgets/viewer_page_image.dart';
 import 'package:flutter/widgets.dart';
@@ -43,6 +45,8 @@ List<Override> testOverrides({
   DownloadQueue Function()? downloadQueue,
   ProgressStore? progressStore,
   ConnectivityMonitor? connectivityMonitor,
+  OfflineMetadataGateway? offlineMetadata,
+  LibraryCacheStore? libraryCache,
   String apiBaseUrl = 'http://localhost:8000',
 }) {
   return [
@@ -89,6 +93,15 @@ List<Override> testOverrides({
     connectivityMonitorProvider.overrideWithValue(
       connectivityMonitor ?? FakeConnectivityMonitor(),
     ),
+    // オフライン用のメタ情報は drift + ダウンロード領域を触るので、既定は
+    // 「何も控えていない」実装（#11 の分岐を試すテストだけ差し替える）。
+    offlineMetadataGatewayProvider.overrideWithValue(
+      offlineMetadata ?? const NoOfflineMetadataGateway(),
+    ),
+    // 一覧キャッシュの永続化も drift を触る。既定はプロセス内だけに持つ。
+    libraryCacheStoreProvider.overrideWithValue(
+      libraryCache ?? InMemoryLibraryCacheStore(),
+    ),
   ];
 }
 
@@ -115,21 +128,30 @@ ProviderContainer createContainer({
   DownloadQueue Function()? downloadQueue,
   ProgressStore? progressStore,
   ConnectivityMonitor? connectivityMonitor,
+  OfflineMetadataGateway? offlineMetadata,
+  LibraryCacheStore? libraryCache,
+  List<Override> overrides = const [],
 }) {
   return ProviderContainer(
-    overrides: testOverrides(
-      authStore: authStore,
-      authApi: authApi,
-      deviceNameResolver: deviceNameResolver,
-      purgers: purgers,
-      booksApi: booksApi,
-      userApi: userApi,
-      taxonomyApi: taxonomyApi,
-      downloads: downloads,
-      downloadQueue: downloadQueue,
-      progressStore: progressStore,
-      connectivityMonitor: connectivityMonitor,
-    ),
+    overrides: [
+      ...testOverrides(
+        authStore: authStore,
+        authApi: authApi,
+        deviceNameResolver: deviceNameResolver,
+        purgers: purgers,
+        booksApi: booksApi,
+        userApi: userApi,
+        taxonomyApi: taxonomyApi,
+        downloads: downloads,
+        downloadQueue: downloadQueue,
+        progressStore: progressStore,
+        connectivityMonitor: connectivityMonitor,
+        offlineMetadata: offlineMetadata,
+        libraryCache: libraryCache,
+      ),
+      // 後に並べた方が勝つので、個別の差し替えはここへ足す。
+      ...overrides,
+    ],
   );
 }
 

@@ -83,6 +83,19 @@ sealed class ApiException implements Exception {
   /// ユーザーに見せられる日本語メッセージ。
   final String message;
 
+  /// 通信環境やサーバーの一時的な問題か。
+  ///
+  /// `true` なら「手元にある内容で代替してよい」（圏外表示 / オフライン再生）。
+  /// 認証エラーや 404 をここに含めてはいけない。ログイン画面へ戻す / 削除済みと
+  /// 分かっている状況で古い内容を見せ続けることになる。
+  bool get isTransient => switch (this) {
+    NetworkException() => true,
+    ApiTimeoutException() => true,
+    ServerException() => true,
+    TooManyRequestsException() => true,
+    _ => false,
+  };
+
   @override
   String toString() => '$runtimeType: $message';
 }

@@ -7,6 +7,7 @@ import 'package:comic_laz/core/media/media_urls.dart';
 import 'package:comic_laz/core/network/api_exception.dart';
 import 'package:comic_laz/core/network/dio_provider.dart';
 import 'package:comic_laz/core/storage/app_database.dart';
+import 'package:comic_laz/features/downloads/data/downloaded_page_source.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -42,6 +43,7 @@ build({
   Future<ResponseBody> Function(RequestOptions options)? handler,
   String? token = 'stored-token',
   ImageCacheStore Function(CacheHarness harness)? store,
+  DownloadedPageSource? localPages,
 }) {
   final harness = CacheHarness.create();
   final container = ProviderContainer(
@@ -66,6 +68,7 @@ build({
     loader: ComicImageLoader(
       dio: dio,
       store: store?.call(harness) ?? harness.store,
+      localPages: localPages ?? const NoDownloadedPageSource(),
     ),
     harness: harness,
     adapter: adapter,
@@ -73,7 +76,107 @@ build({
   );
 }
 
+/// ダウンロード済みのページをテストから与える。
+class _FakeLocalPages implements DownloadedPageSource {
+  _FakeLocalPages({this.bytes, this.filesVersion = 1, this.error});
+
+  /// 返すバイト列（`null` は「端末に無い」）。
+  Uint8List? bytes;
+
+  /// この世代の要求にだけ応える（食い違いは「更新あり」なので null）。
+  int filesVersion;
+
+  /// 読み出しで投げる例外（ZIP が壊れている / ディスクが読めない）。
+  Object? error;
+
+  final calls = <({int volumeId, int page, int filesVersion})>[];
+
+  @override
+  Future<Uint8List?> readPage({
+    required int volumeId,
+    required int page,
+    required int filesVersion,
+  }) async {
+    calls.add((volumeId: volumeId, page: page, filesVersion: filesVersion));
+    if (error case final error?) throw error;
+    return filesVersion == this.filesVersion ? bytes : null;
+  }
+}
+
 void main() {
+  // 解決順は「ダウンロード済みローカル → 一時キャッシュ → ネットワーク」（#11）。
+  group('ダウンロード済みローカル優先', () {
+    test('ダウンロード済みならネットワークもキャッシュも見ない（機内モード）', () async {
+      final local = _FakeLocalPages(bytes: imageBytes(16, fill: 9));
+      final fixture = build(localPages: local);
+      final request = ComicImageRequest.page(
+        fixture.urls,
+        volumeId: 340,
+        page: 2,
+        filesVersion: 1,
+      );
+
+      final bytes = await fixture.loader.load(request);
+
+      expect(bytes, imageBytes(16, fill: 9));
+      expect(fixture.adapter.requests, isEmpty, reason: '圏外でも表示できること');
+      expect(local.calls.single, (volumeId: 340, page: 2, filesVersion: 1));
+      expect(
+        await fixture.harness.store.read(request.cacheKey),
+        isNull,
+        reason: 'ZIP から読めるページを一時キャッシュに二重持ちしない',
+      );
+    });
+
+    test('世代が違えばローカルを使わずネットワークへ（更新あり）', () async {
+      final local = _FakeLocalPages(
+        bytes: imageBytes(16, fill: 9),
+        filesVersion: 100,
+      );
+      final fixture = build(localPages: local);
+
+      final bytes = await fixture.loader.load(
+        ComicImageRequest.page(
+          fixture.urls,
+          volumeId: 340,
+          page: 1,
+          filesVersion: 200,
+        ),
+      );
+
+      expect(bytes, imageBytes(32));
+      expect(fixture.adapter.requests, hasLength(1));
+    });
+
+    test('ローカルが読めなくてもキャッシュ / ネットワークへ落ちる', () async {
+      final local = _FakeLocalPages(error: StateError('ZIP が壊れている'));
+      final fixture = build(localPages: local);
+
+      final bytes = await fixture.loader.load(
+        ComicImageRequest.page(
+          fixture.urls,
+          volumeId: 340,
+          page: 1,
+          filesVersion: 1,
+        ),
+      );
+
+      expect(bytes, imageBytes(32));
+    });
+
+    test('サムネイルはローカル（ZIP）を見に行かない', () async {
+      final local = _FakeLocalPages(bytes: imageBytes(16, fill: 9));
+      final fixture = build(localPages: local);
+
+      await fixture.loader.load(
+        ComicImageRequest.thumbnail(fixture.urls, '/books/thumbnail/340?m=1')!,
+      );
+
+      expect(local.calls, isEmpty, reason: 'サムネイルは ZIP に入っていない');
+      expect(fixture.adapter.requests, hasLength(1));
+    });
+  });
+
   group('取得の経路', () {
     test('キャッシュに無ければネットワークから取り、キャッシュに残す', () async {
       final fixture = build();

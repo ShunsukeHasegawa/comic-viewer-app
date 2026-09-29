@@ -12,6 +12,7 @@ class VolumeEndOverlay extends StatelessWidget {
     required this.hasNextVolume,
     required this.onNextVolume,
     required this.onClose,
+    this.canOpenNextVolume = true,
     super.key,
   });
 
@@ -19,6 +20,11 @@ class VolumeEndOverlay extends StatelessWidget {
 
   /// 次の巻が存在するか（遷移中でも表示は変えない）。
   final bool hasNextVolume;
+
+  /// 次の巻を開けるか（圏外で未ダウンロードなら開けない。#11）。
+  ///
+  /// 「次の巻が無い」と区別する。存在はするので、ダウンロードすれば読める。
+  final bool canOpenNextVolume;
 
   /// 次の巻へ。遷移中は `null`（ボタンだけ無効になる）。
   final VoidCallback? onNextVolume;
@@ -61,8 +67,14 @@ class VolumeEndOverlay extends StatelessWidget {
                 const SizedBox(height: 16),
                 FilledButton.icon(
                   onPressed: onNextVolume,
-                  icon: const Icon(Icons.skip_next),
-                  label: const Text('次の巻を読む'),
+                  icon: Icon(
+                    canOpenNextVolume
+                        ? Icons.skip_next
+                        : Icons.cloud_off_outlined,
+                  ),
+                  label: Text(
+                    canOpenNextVolume ? '次の巻を読む' : 'オフラインでは次の巻を読めません',
+                  ),
                 ),
               ] else
                 Text(

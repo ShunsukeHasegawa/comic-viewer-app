@@ -317,4 +317,9 @@ class StubDownloadQueue extends DownloadQueue {
 
   @override
   Future<void> purgeAll() async => initial.clear();
+
+  /// ダウンロードの状態変化をテストから流す（完了を契機にする導線の検証用）。
+  void emit(VolumeDownload download) {
+    state = AsyncData({...?state.value, download.volumeId: download});
+  }
 }

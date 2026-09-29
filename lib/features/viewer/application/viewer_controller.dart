@@ -5,11 +5,13 @@ import 'package:freezed_annotation/freezed_annotation.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../../../core/cache/image_cache_store.dart';
+import '../../../core/network/api_exception.dart';
 import '../../../data/api/books_api.dart';
 import '../../../domain/models/read_volume.dart';
 import '../../history/application/history_controller.dart';
 import '../../library/application/library_controller.dart';
 import '../../mypage/application/stats_controller.dart';
+import '../../offline/application/offline_metadata_gateway.dart';
 import '../../title/application/book_detail_controller.dart';
 import '../data/progress_recorder.dart';
 
@@ -27,6 +29,11 @@ abstract class ViewerState with _$ViewerState {
 
     /// ヘッダ / シークバーを表示しているか。
     @Default(false) bool isMenuVisible,
+
+    /// サーバーに確認できず、端末の控えで開いている（#11）。
+    ///
+    /// この間に次巻へ進めるのは、次巻もダウンロード済みのときだけ。
+    @Default(false) bool isStale,
   }) = _ViewerState;
 
   const ViewerState._();
@@ -71,15 +78,54 @@ class ViewerController extends _$ViewerController {
     // 画面を離れるときに取りこぼさない（dispose 後は state を読めないので
     // `_pending` に持たせた値で送る）。
     ref.onDispose(flushProgress);
+    return _open();
+  }
 
-    final volume = await ref.read(booksApiProvider).fetchReadVolume(volumeId);
-    final startPage = await _resolveStartPage(volume);
+  /// 巻を開く（オンラインなら取得、圏外なら端末の控え）。
+  Future<ViewerState> _open() async {
+    final loaded = await _loadVolume();
+    final startPage = await _resolveStartPage(loaded.volume);
 
-    _evictStaleImageCache(volume);
+    _evictStaleImageCache(loaded.volume);
 
-    final next = ViewerState(volume: volume, currentPage: startPage);
+    final next = ViewerState(
+      volume: loaded.volume,
+      currentPage: startPage,
+      isStale: loaded.isStale,
+    );
     _updatePending(next);
     return next;
+  }
+
+  /// 巻情報を手に入れる。
+  ///
+  /// 通信できたときは端末にも控える（ダウンロード済みの巻だけ。#11）。
+  /// 圏外では控えを使い、それも無ければ例外をそのまま投げる
+  /// （ダウンロードしていない巻はオフラインで開けない）。
+  Future<({ReadVolume volume, bool isStale})> _loadVolume() async {
+    final api = ref.read(booksApiProvider);
+    final offline = ref.read(offlineMetadataGatewayProvider);
+
+    try {
+      final volume = await api.fetchReadVolume(volumeId);
+      await _tolerate(() => offline.saveVolume(volume));
+      return (volume: volume, isStale: false);
+    } on ApiException catch (error) {
+      // 404（削除済み）や認証エラーは隠さない。
+      if (!error.isTransient) rethrow;
+      final stored = await _tolerate(() => offline.readVolume(volumeId));
+      if (stored == null) rethrow;
+      return (volume: stored, isStale: true);
+    }
+  }
+
+  /// 端末内の読み書きは best-effort（読書を止めない）。
+  Future<T?> _tolerate<T>(Future<T> Function() task) async {
+    try {
+      return await task();
+    } on Object {
+      return null;
+    }
   }
 
   /// 開始ページを決める。
@@ -190,15 +236,7 @@ class ViewerController extends _$ViewerController {
 
   /// 読み込みの再試行。
   Future<void> reload() async {
-    final api = ref.read(booksApiProvider);
-    final next = await AsyncValue.guard(() async {
-      final volume = await api.fetchReadVolume(volumeId);
-      final startPage = await _resolveStartPage(volume);
-      final state = ViewerState(volume: volume, currentPage: startPage);
-      _updatePending(state);
-      _evictStaleImageCache(volume);
-      return state;
-    });
+    final next = await AsyncValue.guard(_open);
     if (!ref.mounted) return;
     state = next;
   }

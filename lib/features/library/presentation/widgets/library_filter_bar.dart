@@ -9,11 +9,15 @@ class LibraryFilterBar extends ConsumerWidget {
   const LibraryFilterBar({
     required this.categories,
     required this.tags,
+    this.isOffline = false,
     super.key,
   });
 
   final List<Taxonomy> categories;
   final List<Taxonomy> tags;
+
+  /// サーバーに確認できていない（圏外）。ダウンロード済みの既定 ON を決める。
+  final bool isOffline;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -26,6 +30,14 @@ class LibraryFilterBar extends ConsumerWidget {
       child: Row(
         spacing: 8,
         children: [
+          // オフラインでは既定で ON（読めるものだけを出す。#11）。
+          FilterChip(
+            label: const Text('ダウンロード済み'),
+            avatar: const Icon(Icons.offline_pin_outlined, size: 18),
+            selected: filter.onlyDownloadedWhen(isOffline: isOffline),
+            onSelected: (_) =>
+                controller.toggleDownloaded(isOffline: isOffline),
+          ),
           FilterChip(
             label: const Text('お気に入り'),
             avatar: const Icon(Icons.favorite_outline, size: 18),

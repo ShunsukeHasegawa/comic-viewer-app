@@ -53,8 +53,8 @@ class ReadingProgress {
 /// 指してしまう（タップすると戻ってしまう）。送信できていない行だけを
 /// 手元の値で上書きする。
 ///
-/// 一覧そのもの（タイトル / サムネイル）はサーバー由来なので、オフライン起動で
-/// 一覧が空のときは何も出せない。一覧の永続キャッシュは #11 で入れる。
+/// 「続きを読む」そのもの（`/api/v2/user/reading`）は控えていないので、圏外では
+/// 前回表示した内容が残っている場合だけ出る（一覧 / 詳細の永続化は #11）。
 List<ReadingBook> applyLocalProgress(
   List<ReadingBook> reading,
   Map<int, ReadingProgress> local,

@@ -1,8 +1,11 @@
+import 'package:comic_laz/core/device/connectivity_monitor.dart';
 import 'package:comic_laz/core/network/api_exception.dart';
 import 'package:comic_laz/core/widgets/error_view.dart';
 import 'package:comic_laz/domain/models/book.dart';
 import 'package:comic_laz/domain/models/reading_book.dart';
+import 'package:comic_laz/features/downloads/domain/volume_download.dart';
 import 'package:comic_laz/features/library/application/library_controller.dart';
+import 'package:comic_laz/features/library/data/library_repository.dart';
 import 'package:comic_laz/features/library/presentation/library_screen.dart';
 import 'package:comic_laz/features/library/presentation/widgets/book_tiles.dart';
 import 'package:comic_laz/features/library/presentation/widgets/continue_reading_carousel.dart';
@@ -11,6 +14,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../support/api_fakes.dart';
+import '../../support/offline_fakes.dart';
+import '../../support/progress_fakes.dart';
 import '../../support/test_scope.dart';
 
 final sampleBooks = [
@@ -40,11 +45,19 @@ Future<ProviderContainer> pumpLibrary(
   FakeBooksApi? booksApi,
   FakeUserApi? userApi,
   FakeTaxonomyApi? taxonomyApi,
+  Map<int, VolumeDownload>? downloads,
+  FakeOfflineMetadataGateway? offline,
+  ConnectivityMonitor? connectivityMonitor,
+  LibraryCacheStore? libraryCache,
 }) async {
   final container = createContainer(
     booksApi: booksApi ?? FakeBooksApi(books: sampleBooks),
     userApi: userApi ?? FakeUserApi(),
     taxonomyApi: taxonomyApi ?? FakeTaxonomyApi(),
+    downloads: downloads,
+    offlineMetadata: offline,
+    connectivityMonitor: connectivityMonitor,
+    libraryCache: libraryCache,
   );
   addTearDown(container.dispose);
 
@@ -217,16 +230,159 @@ void main() {
     expect(find.text('続きを読む'), findsNothing);
   });
 
-  testWidgets('オフライン時はキャッシュを出しつつバナーで伝える', (tester) async {
-    final api = FakeBooksApi(books: sampleBooks, etag: '"v1"');
-    final container = await pumpLibrary(tester, booksApi: api);
+  group('オフライン（#11）', () {
+    /// 1 冊だけダウンロード済み（book 1）にして圏外にする。
+    Future<ProviderContainer> goOffline(WidgetTester tester) async {
+      final api = FakeBooksApi(books: sampleBooks, etag: '"v1"');
+      final container = await pumpLibrary(
+        tester,
+        booksApi: api,
+        downloads: {
+          340: const VolumeDownload(
+            volumeId: 340,
+            bookId: 1,
+            filesVersion: 1,
+            status: VolumeDownloadStatus.completed,
+          ),
+        },
+      );
 
-    api.error = const NetworkException();
-    await container.read(libraryControllerProvider.notifier).refresh();
-    await tester.pumpAndSettle();
+      api.error = const NetworkException();
+      await container.read(libraryControllerProvider.notifier).refresh();
+      await tester.pumpAndSettle();
+      return container;
+    }
 
-    expect(find.textContaining('オフラインです'), findsOneWidget);
-    expect(find.byType(BookGridTile), findsNWidgets(2));
+    testWidgets('バナーを出し、既定でダウンロード済みのみ表示する', (tester) async {
+      await goOffline(tester);
+
+      expect(find.textContaining('オフラインです'), findsOneWidget);
+      expect(
+        find.byType(BookGridTile),
+        findsOneWidget,
+        reason: '読めないタイトルを並べても開けないだけ',
+      );
+      expect(find.text('進撃の巨人'), findsOneWidget);
+      expect(find.text('1 件'), findsOneWidget);
+      expect(
+        tester
+            .widget<FilterChip>(find.widgetWithText(FilterChip, 'ダウンロード済み'))
+            .selected,
+        isTrue,
+      );
+    });
+
+    testWidgets('トグルを切れば圏外でも全部見られる（明示操作は尊重する）', (tester) async {
+      await goOffline(tester);
+
+      await tester.tap(find.widgetWithText(FilterChip, 'ダウンロード済み'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(BookGridTile), findsNWidgets(2));
+    });
+
+    testWidgets('ダウンロードが 1 つも無ければ理由と逃げ道を出す', (tester) async {
+      final api = FakeBooksApi(books: sampleBooks, etag: '"v1"');
+      final container = await pumpLibrary(tester, booksApi: api);
+      api.error = const NetworkException();
+      await container.read(libraryControllerProvider.notifier).refresh();
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('ダウンロード済みのタイトルがありません'), findsOneWidget);
+
+      await tester.tap(find.widgetWithText(OutlinedButton, 'すべて表示'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(BookGridTile), findsNWidgets(2));
+    });
+
+    testWidgets('ネットワーク復帰で自動的に最新化する', (tester) async {
+      final monitor = FakeConnectivityMonitor();
+      final api = FakeBooksApi(books: sampleBooks, etag: '"v1"');
+      final container = await pumpLibrary(
+        tester,
+        booksApi: api,
+        connectivityMonitor: monitor,
+      );
+      api.error = const NetworkException();
+      await container.read(libraryControllerProvider.notifier).refresh();
+      await tester.pumpAndSettle();
+      expect(find.textContaining('オフラインです'), findsOneWidget);
+
+      // 復帰: 新しい一覧が取れる
+      api
+        ..error = null
+        ..books = [...sampleBooks, testBook(id: 3, title: '新しい本')];
+      monitor.restore();
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('オフラインです'), findsNothing);
+      expect(find.byType(BookGridTile), findsNWidgets(3));
+      expect(
+        api.ifNoneMatchCalls.last,
+        '"v1"',
+        reason: '復帰時は ETag で確認する（変わっていなければ 304 で済む）',
+      );
+    });
+
+    testWidgets('最新を表示中なら復帰通知で取りに行かない', (tester) async {
+      final monitor = FakeConnectivityMonitor();
+      final api = FakeBooksApi(books: sampleBooks, etag: '"v1"');
+      await pumpLibrary(tester, booksApi: api, connectivityMonitor: monitor);
+      final before = api.fetchBooksCount;
+
+      monitor.restore();
+      await tester.pumpAndSettle();
+
+      expect(api.fetchBooksCount, before, reason: '自宅サーバーを無駄に叩かない');
+    });
+
+    // 再起動直後の圏外（プロセス内に前回の内容が無い）を模す。一覧は端末の
+    // キャッシュから、カテゴリ / タグは端末の控えから出せること。
+    testWidgets('再起動後の圏外でも一覧と絞り込みチップが出る', (tester) async {
+      final cache = InMemoryLibraryCacheStore();
+      await cache.write(
+        LibrarySnapshot(
+          books: sampleBooks,
+          etag: '"v1"',
+          fetchedAt: DateTime.utc(2026, 9, 20),
+          userStatus: const UserStatus(favorites: [1]),
+        ),
+      );
+      final offline = FakeOfflineMetadataGateway(
+        categories: const [Taxonomy(id: 1, name: '少年')],
+      );
+
+      await pumpLibrary(
+        tester,
+        booksApi: FakeBooksApi(error: const NetworkException()),
+        taxonomyApi: FakeTaxonomyApi(error: const NetworkException()),
+        offline: offline,
+        libraryCache: cache,
+        downloads: {
+          340: const VolumeDownload(
+            volumeId: 340,
+            bookId: 1,
+            filesVersion: 1,
+            status: VolumeDownloadStatus.completed,
+          ),
+        },
+      );
+
+      expect(find.text('進撃の巨人'), findsOneWidget, reason: '端末のキャッシュから出す');
+      expect(
+        find.widgetWithText(FilterChip, '少年'),
+        findsOneWidget,
+        reason: 'チップが無いと絞り込みを解除できない',
+      );
+    });
+
+    testWidgets('掃除の契機を通す（ダウンロードを消したタイトルの控えを残さない）', (tester) async {
+      final offline = FakeOfflineMetadataGateway();
+      await pumpLibrary(tester, offline: offline);
+
+      expect(offline.pruneCount, 1);
+    });
   });
 
   testWidgets('手元に何も無い状態の失敗はエラー表示 + 再試行', (tester) async {
@@ -307,6 +463,8 @@ void main() {
     container
         .read(libraryControllerProvider.notifier)
         .setFavorite(bookId: 1, isFavorite: true);
+    // キャッシュへの書き込みは表示を待たせないよう非同期（#11 で永続化したため）。
+    await tester.pumpAndSettle();
 
     // 圏外で開き直してもお気に入りが残る
     api.error = const NetworkException();

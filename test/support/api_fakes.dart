@@ -22,6 +22,8 @@ class FakeBooksApi implements BooksApi {
     this.readVolume,
     this.error,
     this.userStatusError,
+    this.bookDetailError,
+    this.readVolumeError,
   });
 
   List<Book> books;
@@ -35,6 +37,12 @@ class FakeBooksApi implements BooksApi {
 
   /// `fetchUserStatus` で投げる例外。
   ApiException? userStatusError;
+
+  /// `fetchBookDetail` で投げる例外（圏外の再現）。
+  ApiException? bookDetailError;
+
+  /// `fetchReadVolume` で投げる例外（圏外の再現）。
+  ApiException? readVolumeError;
 
   /// `fetchBooks` に渡された `If-None-Match`（`null` は未指定）。
   final ifNoneMatchCalls = <String?>[];
@@ -66,6 +74,7 @@ class FakeBooksApi implements BooksApi {
 
   @override
   Future<BookDetail> fetchBookDetail(int bookId) async {
+    if (bookDetailError case final error?) throw error;
     final detail = bookDetail;
     if (detail == null) throw const NotFoundException();
     return detail;
@@ -73,6 +82,7 @@ class FakeBooksApi implements BooksApi {
 
   @override
   Future<ReadVolume> fetchReadVolume(int volumeId) async {
+    if (readVolumeError case final error?) throw error;
     final volume = readVolume;
     if (volume == null) throw const NotFoundException();
     return volume;

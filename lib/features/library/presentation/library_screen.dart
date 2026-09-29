@@ -58,6 +58,9 @@ class _LibraryBody extends ConsumerWidget {
     final books = ref.watch(visibleBooksProvider);
     final filter = ref.watch(libraryFilterControllerProvider);
     final viewMode = ref.watch(libraryViewModeControllerProvider);
+    // 圏外では「ダウンロード済みのみ」が既定で ON になる（#11）。空表示の文言と
+    // 逃げ道（すべて表示）をそれに合わせる。
+    final onlyDownloaded = filter.onlyDownloadedWhen(isOffline: data.isStale);
 
     return CustomScrollView(
       // 件数が少なくてもプルリフレッシュできるようにする。
@@ -69,23 +72,37 @@ class _LibraryBody extends ConsumerWidget {
             child: ContinueReadingCarousel(items: data.reading),
           ),
         SliverToBoxAdapter(
-          child: LibraryFilterBar(categories: data.categories, tags: data.tags),
+          child: LibraryFilterBar(
+            categories: data.categories,
+            tags: data.tags,
+            isOffline: data.isStale,
+          ),
         ),
         SliverToBoxAdapter(child: _ResultCount(count: books.length)),
         if (books.isEmpty)
           SliverFillRemaining(
             hasScrollBody: false,
-            child: EmptyView(
-              message: data.books.isEmpty
-                  ? '表示できる書籍がありません。'
-                  : '条件に一致する書籍がありません。',
-              actionLabel: filter.hasActiveFilters ? '絞り込みを解除' : null,
-              onAction: filter.hasActiveFilters
-                  ? ref
-                        .read(libraryFilterControllerProvider.notifier)
-                        .clearFilters
-                  : null,
-            ),
+            child: switch ((data.books.isEmpty, onlyDownloaded)) {
+              (true, _) => const EmptyView(message: '表示できる書籍がありません。'),
+              // 絞り込みを掛けていないのに 0 件 = ダウンロード済みが無い。
+              // 「条件に一致しません」だけでは理由も逃げ道も分からない。
+              (false, true) when !filter.hasActiveFilters => EmptyView(
+                message: 'ダウンロード済みのタイトルがありません。',
+                actionLabel: 'すべて表示',
+                onAction: () => ref
+                    .read(libraryFilterControllerProvider.notifier)
+                    .toggleDownloaded(isOffline: data.isStale),
+              ),
+              (false, _) => EmptyView(
+                message: '条件に一致する書籍がありません。',
+                actionLabel: filter.hasActiveFilters ? '絞り込みを解除' : null,
+                onAction: filter.hasActiveFilters
+                    ? ref
+                          .read(libraryFilterControllerProvider.notifier)
+                          .clearFilters
+                    : null,
+              ),
+            },
           )
         else if (viewMode == LibraryViewMode.grid)
           _BookGrid(books: books, data: data)
@@ -279,7 +296,8 @@ class _OfflineBanner extends StatelessWidget {
           const SizedBox(width: 8),
           Expanded(
             child: Text(
-              'オフラインです。前回取得した一覧を表示しています。',
+              'オフラインです。前回取得した一覧を表示しています'
+              '（ダウンロード済みのタイトルだけ読めます）。',
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ),

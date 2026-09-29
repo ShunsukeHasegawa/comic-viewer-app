@@ -162,6 +162,57 @@ void main() {
     });
   });
 
+  // ダウンロード済みタイトルのサムネイルは、オフラインで一覧 / 詳細を出すために
+  // 必須なので LRU も保持期間も適用しない（#11）。
+  group('保護印', () {
+    test('保持期間を過ぎても保護した画像は消さない', () async {
+      final harness = CacheHarness.create();
+      await harness.settingsStore.write(
+        const CacheSettings(retention: CacheRetention.days7),
+      );
+      await harness.write(
+        't/books/thumbnail/340/7',
+        bytes: 100,
+        kind: CachedImageKind.thumbnail,
+      );
+      await harness.write(
+        't/books/thumbnail/999/1',
+        bytes: 100,
+        kind: CachedImageKind.thumbnail,
+      );
+      await harness.store.pin(bookId: 12, keys: ['t/books/thumbnail/340/7']);
+
+      harness.clock.advance(const Duration(days: 8));
+      await harness.store.evictIfNeeded();
+
+      expect(await harness.keysByLastUsed(), ['t/books/thumbnail/340/7']);
+      expect(harness.hasFile('t/books/thumbnail/340/7'), isTrue);
+    });
+
+    test('ダウンロードが無くなったタイトルの印は外れる', () async {
+      final harness = CacheHarness.create();
+      await harness.store.pin(bookId: 12, keys: ['t/a/1']);
+      await harness.store.pin(bookId: 34, keys: ['t/b/1']);
+
+      await harness.store.retainPins({34});
+
+      expect(await harness.store.pinnedKeys(), {'t/b/1'});
+    });
+
+    test('ユーザーが「キャッシュを削除」を選んだときは保護印つきでも消す', () async {
+      final harness = CacheHarness.create();
+      await harness.write('t/a/1', bytes: 100, kind: CachedImageKind.thumbnail);
+      await harness.store.pin(bookId: 12, keys: ['t/a/1']);
+
+      await harness.store.clear();
+
+      expect(await harness.store.usage(), CacheUsage.empty);
+      expect(await harness.store.pinnedKeys(), {
+        't/a/1',
+      }, reason: '印は残す（オンラインで取り直した分から再び守られる）');
+    });
+  });
+
   group('保持期間', () {
     test('最後に使ってから期間を過ぎたものを削除する', () async {
       final harness = CacheHarness.create();

@@ -1,25 +1,86 @@
+import 'dart:async';
+
+import 'package:freezed_annotation/freezed_annotation.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
+import '../../../core/network/api_exception.dart';
 import '../../../data/api/books_api.dart';
 import '../../../domain/models/book_detail.dart';
+import '../../downloads/application/downloaded_lookup.dart';
 import '../../library/application/library_controller.dart';
+import '../../offline/application/offline_metadata_gateway.dart';
 
+part 'book_detail_controller.freezed.dart';
 part 'book_detail_controller.g.dart';
+
+/// タイトル詳細画面の表示データ。
+@freezed
+abstract class BookDetailData with _$BookDetailData {
+  const factory BookDetailData({
+    required BookDetail detail,
+
+    /// サーバーに確認できず、端末に控えてある内容を表示している（#11）。
+    ///
+    /// この間は未ダウンロードの巻を開けないので、画面側は無効表示にする。
+    @Default(false) bool isStale,
+  }) = _BookDetailData;
+}
 
 /// タイトル詳細の読み込みとお気に入り操作。
 @Riverpod(retry: noAutoRetry)
 class BookDetailController extends _$BookDetailController {
   @override
-  Future<BookDetail> build(int bookId) {
-    return ref.read(booksApiProvider).fetchBookDetail(bookId);
+  Future<BookDetailData> build(int bookId) {
+    // ダウンロードが完了した時点の詳細を控える（#11）。
+    // 「詳細を開く → ダウンロード」の順で操作されるので、取得時点ではまだ
+    // ダウンロード済みではない。完了を待って控えないと、圏外で詳細が開けない。
+    ref.listen(downloadedBookIdsProvider, (previous, next) {
+      if (!next.contains(bookId)) return;
+      if (previous != null && previous.contains(bookId)) return;
+      _saveForOffline();
+    });
+    return _load();
   }
 
   /// 再読み込み（プルリフレッシュ / 再試行）。
   Future<void> refresh() async {
-    final api = ref.read(booksApiProvider);
-    final next = await AsyncValue.guard(() => api.fetchBookDetail(bookId));
+    final next = await AsyncValue.guard(_load);
     if (!ref.mounted) return;
     state = next;
+  }
+
+  /// 取得する。圏外では端末に控えた詳細を `isStale` つきで返す。
+  ///
+  /// 控えも無ければ例外をそのまま投げる（「オフラインでは開けない」ことを
+  /// エラー表示で伝える。黙って空の詳細を見せない）。
+  Future<BookDetailData> _load() async {
+    final api = ref.read(booksApiProvider);
+    final offline = ref.read(offlineMetadataGatewayProvider);
+
+    try {
+      final detail = await api.fetchBookDetail(bookId);
+      await _tolerate(() => offline.saveBookDetail(detail));
+      return BookDetailData(detail: detail);
+    } on ApiException catch (error) {
+      if (!error.isTransient) rethrow;
+      final stored = await _tolerate(() => offline.readBookDetail(bookId));
+      if (stored == null) rethrow;
+      return BookDetailData(detail: stored, isStale: true);
+    }
+  }
+
+  /// いま表示している詳細を控える（ダウンロード完了時）。
+  void _saveForOffline() {
+    final current = state.value;
+    // 圏外で復元した内容を書き戻しても実害は無いが、意味も無いので触らない。
+    if (current == null || current.isStale) return;
+    unawaited(
+      _tolerate(
+        () => ref
+            .read(offlineMetadataGatewayProvider)
+            .saveBookDetail(current.detail),
+      ),
+    );
   }
 
   /// お気に入りを切り替える。
@@ -30,10 +91,12 @@ class BookDetailController extends _$BookDetailController {
     final current = state.value;
     if (current == null) return;
 
-    final next = !current.isFavorite;
+    final next = !current.detail.isFavorite;
     final api = ref.read(booksApiProvider);
 
-    state = AsyncValue.data(current.copyWith(isFavorite: next));
+    state = AsyncValue.data(
+      current.copyWith(detail: current.detail.copyWith(isFavorite: next)),
+    );
     try {
       if (next) {
         await api.addFavorite(bookId);
@@ -48,7 +111,6 @@ class BookDetailController extends _$BookDetailController {
     }
 
     if (!ref.mounted) return;
-    if (!ref.mounted) return;
     _syncLibrary(isFavorite: next);
   }
 
@@ -61,6 +123,15 @@ class BookDetailController extends _$BookDetailController {
     ref
         .read(libraryControllerProvider.notifier)
         .setFavorite(bookId: bookId, isFavorite: isFavorite);
+  }
+
+  /// 端末内の読み書きは best-effort（詳細の表示を止めない）。
+  Future<T?> _tolerate<T>(Future<T> Function() task) async {
+    try {
+      return await task();
+    } on Object {
+      return null;
+    }
   }
 }
 

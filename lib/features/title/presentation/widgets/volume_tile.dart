@@ -23,8 +23,8 @@ class VolumeTile extends ConsumerWidget {
 
   final BookVolume volume;
 
-  /// タップでビューアを開く。
-  final VoidCallback onOpen;
+  /// タップでビューアを開く。`null` は開けない（圏外で未ダウンロードの巻。#11）。
+  final VoidCallback? onOpen;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -36,6 +36,8 @@ class VolumeTile extends ConsumerWidget {
 
     return ListTile(
       onTap: onOpen,
+      // 開けない行は文字も薄くする（タップしても何も起きない理由を見せる）。
+      enabled: onOpen != null,
       leading: SizedBox(
         width: 40,
         child: ClipRRect(
@@ -60,6 +62,7 @@ class VolumeTile extends ConsumerWidget {
                 '未読',
               if (volume.archiveBytes case final bytes?) formatBytes(bytes),
               downloadLabelOf(volume, download),
+              if (onOpen == null) 'オフラインでは読めません',
             ].join('・'),
             style: theme.textTheme.bodySmall,
           ),

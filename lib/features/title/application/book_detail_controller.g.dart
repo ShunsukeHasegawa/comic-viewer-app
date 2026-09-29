@@ -15,7 +15,7 @@ final bookDetailControllerProvider = BookDetailControllerFamily._();
 
 /// タイトル詳細の読み込みとお気に入り操作。
 final class BookDetailControllerProvider
-    extends $AsyncNotifierProvider<BookDetailController, BookDetail> {
+    extends $AsyncNotifierProvider<BookDetailController, BookDetailData> {
   /// タイトル詳細の読み込みとお気に入り操作。
   BookDetailControllerProvider._({
     required BookDetailControllerFamily super.from,
@@ -54,7 +54,7 @@ final class BookDetailControllerProvider
 }
 
 String _$bookDetailControllerHash() =>
-    r'b2cb0740cd48efca77920280d36423da51b17d02';
+    r'97657ac36ea7f566db2d727458ac388c97044113';
 
 /// タイトル詳細の読み込みとお気に入り操作。
 
@@ -62,9 +62,9 @@ final class BookDetailControllerFamily extends $Family
     with
         $ClassFamilyOverride<
           BookDetailController,
-          AsyncValue<BookDetail>,
-          BookDetail,
-          FutureOr<BookDetail>,
+          AsyncValue<BookDetailData>,
+          BookDetailData,
+          FutureOr<BookDetailData>,
           int
         > {
   BookDetailControllerFamily._()
@@ -87,20 +87,20 @@ final class BookDetailControllerFamily extends $Family
 
 /// タイトル詳細の読み込みとお気に入り操作。
 
-abstract class _$BookDetailController extends $AsyncNotifier<BookDetail> {
+abstract class _$BookDetailController extends $AsyncNotifier<BookDetailData> {
   late final _$args = ref.$arg as int;
   int get bookId => _$args;
 
-  FutureOr<BookDetail> build(int bookId);
+  FutureOr<BookDetailData> build(int bookId);
   @$mustCallSuper
   @override
   WhenComplete runBuild() {
-    final ref = this.ref as $Ref<AsyncValue<BookDetail>, BookDetail>;
+    final ref = this.ref as $Ref<AsyncValue<BookDetailData>, BookDetailData>;
     final element =
         ref.element
             as $ClassProviderElement<
-              AnyNotifier<AsyncValue<BookDetail>, BookDetail>,
-              AsyncValue<BookDetail>,
+              AnyNotifier<AsyncValue<BookDetailData>, BookDetailData>,
+              AsyncValue<BookDetailData>,
               Object?,
               Object?
             >;

@@ -8,6 +8,7 @@ import '../../../core/media/media_urls.dart';
 import '../../../core/router/app_routes.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/widgets/error_view.dart';
+import '../../downloads/application/downloaded_lookup.dart';
 import '../application/page_prefetcher.dart';
 import '../application/viewer_controller.dart';
 import 'widgets/viewer_chrome.dart';
@@ -138,6 +139,18 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     router?.go(AppRoutes.library);
   }
 
+  /// 次の巻へ進めるか。
+  ///
+  /// 圏外（端末の控えで開いている）ときは、次巻もダウンロード済みでなければ
+  /// 開いても真っ白になる。遷移してからエラー画面を見せるより、巻末の時点で
+  /// 「読めない」と分かる方がよい（#11）。
+  bool _canOpenNextVolume(ViewerState state) {
+    final nextVolumeId = state.volume.nextVolumeId;
+    if (nextVolumeId == null) return false;
+    if (!state.isStale) return true;
+    return ref.watch(downloadedVolumeIdsProvider).contains(nextVolumeId);
+  }
+
   Future<void> _moveToNextVolume() async {
     if (_movingToNextVolume) return;
     setState(() => _movingToNextVolume = true);
@@ -193,6 +206,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
           onClose: _close,
           isMovingToNextVolume: _movingToNextVolume,
           onNextVolume: _moveToNextVolume,
+          canOpenNextVolume: _canOpenNextVolume(state),
           controller: _controller,
         ),
       },
@@ -207,6 +221,7 @@ class _ViewerBody extends StatelessWidget {
     required this.onClose,
     required this.isMovingToNextVolume,
     required this.onNextVolume,
+    required this.canOpenNextVolume,
     required this.controller,
   });
 
@@ -217,6 +232,10 @@ class _ViewerBody extends StatelessWidget {
   /// 次巻への遷移中（ボタンだけ無効にし、表示内容は変えない）。
   final bool isMovingToNextVolume;
   final Future<void> Function() onNextVolume;
+
+  /// 次巻を開けるか（圏外で未ダウンロードなら開けない）。
+  final bool canOpenNextVolume;
+
   final ViewerController controller;
 
   @override
@@ -247,7 +266,8 @@ class _ViewerBody extends StatelessWidget {
               return VolumeEndOverlay(
                 volume: state.volume,
                 hasNextVolume: state.hasNextVolume,
-                onNextVolume: state.hasNextVolume && !isMovingToNextVolume
+                canOpenNextVolume: canOpenNextVolume,
+                onNextVolume: canOpenNextVolume && !isMovingToNextVolume
                     ? () => onNextVolume()
                     : null,
                 onClose: () => onClose(),

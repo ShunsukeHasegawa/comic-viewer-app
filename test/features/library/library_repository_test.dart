@@ -30,7 +30,7 @@ void main() {
     expect(result.userStatus.unreads, [1]);
     expect(result.isStale, isFalse);
     expect(api.ifNoneMatchCalls, [null]);
-    expect(cache.read()?.etag, '"v1"');
+    expect((await cache.read())?.etag, '"v1"');
   });
 
   test('2 回目は If-None-Match を送る', () async {
@@ -109,12 +109,12 @@ void main() {
     expect(result.userStatus.favorites, [2]);
   });
 
-  test('purge するとキャッシュが消える（ログアウト）', () async {
+  test('お気に入りの変更はキャッシュにも反映する（オフラインで消えない）', () async {
     await repository.loadBooks();
-    expect(cache.read(), isNotNull);
 
-    await LibraryCachePurger(cache).purgeSessionData();
+    await repository.updateCachedFavorite(bookId: 1, isFavorite: true);
 
-    expect(cache.read(), isNull);
+    final cached = await cache.read();
+    expect(cached?.userStatus?.favorites, containsAll([1, 2]));
   });
 }

@@ -1,7 +1,7 @@
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../../features/downloads/data/downloaded_volume_purger.dart';
-import '../../features/library/data/library_repository.dart';
+import '../../features/offline/data/offline_metadata_purger.dart';
 import '../../features/progress/data/progress_purger.dart';
 import '../cache/image_cache_purger.dart';
 
@@ -23,7 +23,8 @@ abstract interface class SessionDataPurger {
 /// 端末内にユーザー固有のデータを持つ機能は、ここに実装を足す。
 @Riverpod(keepAlive: true)
 List<SessionDataPurger> sessionDataPurgers(Ref ref) => [
-  ref.watch(libraryCachePurgerProvider),
+  // オフライン用のメタ情報（一覧 / 詳細 / 巻情報 / サムネイルの保護印。#11）。
+  ref.watch(offlineMetadataPurgerProvider),
   ref.watch(imageCachePurgerProvider),
   ref.watch(downloadedVolumePurgerProvider),
   ref.watch(progressPurgerProvider),

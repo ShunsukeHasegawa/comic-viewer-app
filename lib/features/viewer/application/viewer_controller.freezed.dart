@@ -17,7 +17,10 @@ mixin _$ViewerState {
 
  ReadVolume get volume;/// 表示中のページ（1 始まり）。`volume.files.length + 1` は巻末オーバーレイ。
  int get currentPage;/// ヘッダ / シークバーを表示しているか。
- bool get isMenuVisible;
+ bool get isMenuVisible;/// サーバーに確認できず、端末の控えで開いている（#11）。
+///
+/// この間に次巻へ進めるのは、次巻もダウンロード済みのときだけ。
+ bool get isStale;
 /// Create a copy of ViewerState
 /// with the given fields replaced by the non-null parameter values.
 @JsonKey(includeFromJson: false, includeToJson: false)
@@ -29,20 +32,20 @@ $ViewerStateCopyWith<ViewerState> get copyWith => _$ViewerStateCopyWithImpl<View
 @override
 bool operator ==(Object other) {
   final _this = this as ViewerState;
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ViewerState&&(identical(other.volume, _this.volume) || other.volume == _this.volume)&&(identical(other.currentPage, _this.currentPage) || other.currentPage == _this.currentPage)&&(identical(other.isMenuVisible, _this.isMenuVisible) || other.isMenuVisible == _this.isMenuVisible));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is ViewerState&&(identical(other.volume, _this.volume) || other.volume == _this.volume)&&(identical(other.currentPage, _this.currentPage) || other.currentPage == _this.currentPage)&&(identical(other.isMenuVisible, _this.isMenuVisible) || other.isMenuVisible == _this.isMenuVisible)&&(identical(other.isStale, _this.isStale) || other.isStale == _this.isStale));
 }
 
 
 @override
 int get hashCode {
   final _this = this as ViewerState;
-  return Object.hash(runtimeType,_this.volume,_this.currentPage,_this.isMenuVisible);
+  return Object.hash(runtimeType,_this.volume,_this.currentPage,_this.isMenuVisible,_this.isStale);
 }
 
 @override
 String toString() {
   final _this = this as ViewerState;
-  return 'ViewerState(volume: ${_this.volume}, currentPage: ${_this.currentPage}, isMenuVisible: ${_this.isMenuVisible})';
+  return 'ViewerState(volume: ${_this.volume}, currentPage: ${_this.currentPage}, isMenuVisible: ${_this.isMenuVisible}, isStale: ${_this.isStale})';
 }
 
 
@@ -53,7 +56,7 @@ abstract mixin class $ViewerStateCopyWith<$Res>  {
   factory $ViewerStateCopyWith(ViewerState value, $Res Function(ViewerState) _then) = _$ViewerStateCopyWithImpl;
 @useResult
 $Res call({
- ReadVolume volume, int currentPage, bool isMenuVisible
+ ReadVolume volume, int currentPage, bool isMenuVisible, bool isStale
 });
 
 
@@ -70,11 +73,12 @@ class _$ViewerStateCopyWithImpl<$Res>
 
 /// Create a copy of ViewerState
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? volume = null,Object? currentPage = null,Object? isMenuVisible = null,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? volume = null,Object? currentPage = null,Object? isMenuVisible = null,Object? isStale = null,}) {
   return _then(ViewerState(
 volume: null == volume ? _self.volume : volume // ignore: cast_nullable_to_non_nullable
 as ReadVolume,currentPage: null == currentPage ? _self.currentPage : currentPage // ignore: cast_nullable_to_non_nullable
 as int,isMenuVisible: null == isMenuVisible ? _self.isMenuVisible : isMenuVisible // ignore: cast_nullable_to_non_nullable
+as bool,isStale: null == isStale ? _self.isStale : isStale // ignore: cast_nullable_to_non_nullable
 as bool,
   ));
 }
@@ -169,10 +173,10 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( ReadVolume volume,  int currentPage,  bool isMenuVisible)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( ReadVolume volume,  int currentPage,  bool isMenuVisible,  bool isStale)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _ViewerState() when $default != null:
-return $default(_that.volume,_that.currentPage,_that.isMenuVisible);case _:
+return $default(_that.volume,_that.currentPage,_that.isMenuVisible,_that.isStale);case _:
   return orElse();
 
 }
@@ -190,10 +194,10 @@ return $default(_that.volume,_that.currentPage,_that.isMenuVisible);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( ReadVolume volume,  int currentPage,  bool isMenuVisible)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( ReadVolume volume,  int currentPage,  bool isMenuVisible,  bool isStale)  $default,) {final _that = this;
 switch (_that) {
 case _ViewerState():
-return $default(_that.volume,_that.currentPage,_that.isMenuVisible);case _:
+return $default(_that.volume,_that.currentPage,_that.isMenuVisible,_that.isStale);case _:
   throw StateError('Unexpected subclass');
 
 }
@@ -210,10 +214,10 @@ return $default(_that.volume,_that.currentPage,_that.isMenuVisible);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( ReadVolume volume,  int currentPage,  bool isMenuVisible)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( ReadVolume volume,  int currentPage,  bool isMenuVisible,  bool isStale)?  $default,) {final _that = this;
 switch (_that) {
 case _ViewerState() when $default != null:
-return $default(_that.volume,_that.currentPage,_that.isMenuVisible);case _:
+return $default(_that.volume,_that.currentPage,_that.isMenuVisible,_that.isStale);case _:
   return null;
 
 }
@@ -225,7 +229,7 @@ return $default(_that.volume,_that.currentPage,_that.isMenuVisible);case _:
 
 
 class _ViewerState extends ViewerState {
-  const _ViewerState({required this.volume, required this.currentPage, this.isMenuVisible = false}): super._();
+  const _ViewerState({required this.volume, required this.currentPage, this.isMenuVisible = false, this.isStale = false}): super._();
   
 
 @override final  ReadVolume volume;
@@ -233,6 +237,10 @@ class _ViewerState extends ViewerState {
 @override final  int currentPage;
 /// ヘッダ / シークバーを表示しているか。
 @override@JsonKey() final  bool isMenuVisible;
+/// サーバーに確認できず、端末の控えで開いている（#11）。
+///
+/// この間に次巻へ進めるのは、次巻もダウンロード済みのときだけ。
+@override@JsonKey() final  bool isStale;
 
 /// Create a copy of ViewerState
 /// with the given fields replaced by the non-null parameter values.
@@ -244,18 +252,18 @@ _$ViewerStateCopyWith<_ViewerState> get copyWith => __$ViewerStateCopyWithImpl<_
 
 @override
 bool operator ==(Object other) {
-    return identical(this, other) || (other.runtimeType == runtimeType&&other is _ViewerState&&(identical(other.volume, volume) || other.volume == volume)&&(identical(other.currentPage, currentPage) || other.currentPage == currentPage)&&(identical(other.isMenuVisible, isMenuVisible) || other.isMenuVisible == isMenuVisible));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is _ViewerState&&(identical(other.volume, volume) || other.volume == volume)&&(identical(other.currentPage, currentPage) || other.currentPage == currentPage)&&(identical(other.isMenuVisible, isMenuVisible) || other.isMenuVisible == isMenuVisible)&&(identical(other.isStale, isStale) || other.isStale == isStale));
 }
 
 
 @override
 int get hashCode {
-    return Object.hash(runtimeType,volume,currentPage,isMenuVisible);
+    return Object.hash(runtimeType,volume,currentPage,isMenuVisible,isStale);
 }
 
 @override
 String toString() {
-    return 'ViewerState(volume: $volume, currentPage: $currentPage, isMenuVisible: $isMenuVisible)';
+    return 'ViewerState(volume: $volume, currentPage: $currentPage, isMenuVisible: $isMenuVisible, isStale: $isStale)';
 }
 
 
@@ -266,7 +274,7 @@ abstract mixin class _$ViewerStateCopyWith<$Res> implements $ViewerStateCopyWith
   factory _$ViewerStateCopyWith(_ViewerState value, $Res Function(_ViewerState) _then) = __$ViewerStateCopyWithImpl;
 @override @useResult
 $Res call({
- ReadVolume volume, int currentPage, bool isMenuVisible
+ ReadVolume volume, int currentPage, bool isMenuVisible, bool isStale
 });
 
 
@@ -283,11 +291,12 @@ class __$ViewerStateCopyWithImpl<$Res>
 
 /// Create a copy of ViewerState
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? volume = null,Object? currentPage = null,Object? isMenuVisible = null,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? volume = null,Object? currentPage = null,Object? isMenuVisible = null,Object? isStale = null,}) {
   return _then(_ViewerState(
 volume: null == volume ? _self.volume : volume // ignore: cast_nullable_to_non_nullable
 as ReadVolume,currentPage: null == currentPage ? _self.currentPage : currentPage // ignore: cast_nullable_to_non_nullable
 as int,isMenuVisible: null == isMenuVisible ? _self.isMenuVisible : isMenuVisible // ignore: cast_nullable_to_non_nullable
+as bool,isStale: null == isStale ? _self.isStale : isStale // ignore: cast_nullable_to_non_nullable
 as bool,
   ));
 }

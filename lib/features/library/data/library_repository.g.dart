@@ -54,7 +54,7 @@ final class LibraryCacheStoreProvider
   }
 }
 
-String _$libraryCacheStoreHash() => r'1b5a48d75a09d7945b5295bc547ac656e07bddf3';
+String _$libraryCacheStoreHash() => r'ffc8f9efde74c65b524bfc4700d504d66de3c46d';
 
 @ProviderFor(libraryRepository)
 final libraryRepositoryProvider = LibraryRepositoryProvider._();
@@ -102,51 +102,3 @@ final class LibraryRepositoryProvider
 }
 
 String _$libraryRepositoryHash() => r'2a6f5b82c8de4c59a4cf2661176497db2d656418';
-
-@ProviderFor(libraryCachePurger)
-final libraryCachePurgerProvider = LibraryCachePurgerProvider._();
-
-final class LibraryCachePurgerProvider
-    extends
-        $FunctionalProvider<
-          SessionDataPurger,
-          SessionDataPurger,
-          SessionDataPurger
-        >
-    with $Provider<SessionDataPurger> {
-  LibraryCachePurgerProvider._()
-    : super(
-        from: null,
-        argument: null,
-        retry: null,
-        name: r'libraryCachePurgerProvider',
-        isAutoDispose: false,
-        dependencies: null,
-        $allTransitiveDependencies: null,
-      );
-
-  @override
-  String debugGetCreateSourceHash() => _$libraryCachePurgerHash();
-
-  @$internal
-  @override
-  $ProviderElement<SessionDataPurger> $createElement(
-    $ProviderPointer pointer,
-  ) => $ProviderElement(pointer);
-
-  @override
-  SessionDataPurger create(Ref ref) {
-    return libraryCachePurger(ref);
-  }
-
-  /// {@macro riverpod.override_with_value}
-  Override overrideWithValue(SessionDataPurger value) {
-    return $ProviderOverride(
-      origin: this,
-      providerOverride: $SyncValueProvider<SessionDataPurger>(value),
-    );
-  }
-}
-
-String _$libraryCachePurgerHash() =>
-    r'83733c76d95e21ed7341859e1dafa7cba2df8614';

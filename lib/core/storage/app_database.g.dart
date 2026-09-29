@@ -1764,6 +1764,534 @@ class ReadingProgressesCompanion extends UpdateCompanion<ReadingProgressRow> {
   }
 }
 
+class $OfflineMetadataEntriesTable extends OfflineMetadataEntries
+    with TableInfo<$OfflineMetadataEntriesTable, OfflineMetadataRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $OfflineMetadataEntriesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _keyMeta = const VerificationMeta('key');
+  @override
+  late final GeneratedColumn<String> key = GeneratedColumn<String>(
+    'key',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _payloadMeta = const VerificationMeta(
+    'payload',
+  );
+  @override
+  late final GeneratedColumn<String> payload = GeneratedColumn<String>(
+    'payload',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _etagMeta = const VerificationMeta('etag');
+  @override
+  late final GeneratedColumn<String> etag = GeneratedColumn<String>(
+    'etag',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _fetchedAtMeta = const VerificationMeta(
+    'fetchedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> fetchedAt = GeneratedColumn<DateTime>(
+    'fetched_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [key, payload, etag, fetchedAt];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'offline_metadata';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<OfflineMetadataRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('key')) {
+      context.handle(
+        _keyMeta,
+        key.isAcceptableOrUnknown(data['key']!, _keyMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_keyMeta);
+    }
+    if (data.containsKey('payload')) {
+      context.handle(
+        _payloadMeta,
+        payload.isAcceptableOrUnknown(data['payload']!, _payloadMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_payloadMeta);
+    }
+    if (data.containsKey('etag')) {
+      context.handle(
+        _etagMeta,
+        etag.isAcceptableOrUnknown(data['etag']!, _etagMeta),
+      );
+    }
+    if (data.containsKey('fetched_at')) {
+      context.handle(
+        _fetchedAtMeta,
+        fetchedAt.isAcceptableOrUnknown(data['fetched_at']!, _fetchedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_fetchedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {key};
+  @override
+  OfflineMetadataRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return OfflineMetadataRow(
+      key: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}key'],
+      )!,
+      payload: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}payload'],
+      )!,
+      etag: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}etag'],
+      ),
+      fetchedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}fetched_at'],
+      )!,
+    );
+  }
+
+  @override
+  $OfflineMetadataEntriesTable createAlias(String alias) {
+    return $OfflineMetadataEntriesTable(attachedDatabase, alias);
+  }
+}
+
+class OfflineMetadataRow extends DataClass
+    implements Insertable<OfflineMetadataRow> {
+  /// `books` / `categories` / `tags` / `book/{bookId}` / `volume/{volumeId}`。
+  final String key;
+
+  /// モデルの `toJson()` をそのまま入れた JSON。
+  final String payload;
+
+  /// 次回の `If-None-Match` に使う（一覧のみ）。
+  final String? etag;
+  final DateTime fetchedAt;
+  const OfflineMetadataRow({
+    required this.key,
+    required this.payload,
+    this.etag,
+    required this.fetchedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['key'] = Variable<String>(key);
+    map['payload'] = Variable<String>(payload);
+    if (!nullToAbsent || etag != null) {
+      map['etag'] = Variable<String>(etag);
+    }
+    map['fetched_at'] = Variable<DateTime>(fetchedAt);
+    return map;
+  }
+
+  OfflineMetadataEntriesCompanion toCompanion(bool nullToAbsent) {
+    return OfflineMetadataEntriesCompanion(
+      key: Value(key),
+      payload: Value(payload),
+      etag: etag == null && nullToAbsent ? const Value.absent() : Value(etag),
+      fetchedAt: Value(fetchedAt),
+    );
+  }
+
+  factory OfflineMetadataRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return OfflineMetadataRow(
+      key: serializer.fromJson<String>(json['key']),
+      payload: serializer.fromJson<String>(json['payload']),
+      etag: serializer.fromJson<String?>(json['etag']),
+      fetchedAt: serializer.fromJson<DateTime>(json['fetchedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'key': serializer.toJson<String>(key),
+      'payload': serializer.toJson<String>(payload),
+      'etag': serializer.toJson<String?>(etag),
+      'fetchedAt': serializer.toJson<DateTime>(fetchedAt),
+    };
+  }
+
+  OfflineMetadataRow copyWith({
+    String? key,
+    String? payload,
+    Value<String?> etag = const Value.absent(),
+    DateTime? fetchedAt,
+  }) => OfflineMetadataRow(
+    key: key ?? this.key,
+    payload: payload ?? this.payload,
+    etag: etag.present ? etag.value : this.etag,
+    fetchedAt: fetchedAt ?? this.fetchedAt,
+  );
+  OfflineMetadataRow copyWithCompanion(OfflineMetadataEntriesCompanion data) {
+    return OfflineMetadataRow(
+      key: data.key.present ? data.key.value : this.key,
+      payload: data.payload.present ? data.payload.value : this.payload,
+      etag: data.etag.present ? data.etag.value : this.etag,
+      fetchedAt: data.fetchedAt.present ? data.fetchedAt.value : this.fetchedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('OfflineMetadataRow(')
+          ..write('key: $key, ')
+          ..write('payload: $payload, ')
+          ..write('etag: $etag, ')
+          ..write('fetchedAt: $fetchedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(key, payload, etag, fetchedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is OfflineMetadataRow &&
+          other.key == this.key &&
+          other.payload == this.payload &&
+          other.etag == this.etag &&
+          other.fetchedAt == this.fetchedAt);
+}
+
+class OfflineMetadataEntriesCompanion
+    extends UpdateCompanion<OfflineMetadataRow> {
+  final Value<String> key;
+  final Value<String> payload;
+  final Value<String?> etag;
+  final Value<DateTime> fetchedAt;
+  final Value<int> rowid;
+  const OfflineMetadataEntriesCompanion({
+    this.key = const Value.absent(),
+    this.payload = const Value.absent(),
+    this.etag = const Value.absent(),
+    this.fetchedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  OfflineMetadataEntriesCompanion.insert({
+    required String key,
+    required String payload,
+    this.etag = const Value.absent(),
+    required DateTime fetchedAt,
+    this.rowid = const Value.absent(),
+  }) : key = Value(key),
+       payload = Value(payload),
+       fetchedAt = Value(fetchedAt);
+  static Insertable<OfflineMetadataRow> custom({
+    Expression<String>? key,
+    Expression<String>? payload,
+    Expression<String>? etag,
+    Expression<DateTime>? fetchedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (key != null) 'key': key,
+      if (payload != null) 'payload': payload,
+      if (etag != null) 'etag': etag,
+      if (fetchedAt != null) 'fetched_at': fetchedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  OfflineMetadataEntriesCompanion copyWith({
+    Value<String>? key,
+    Value<String>? payload,
+    Value<String?>? etag,
+    Value<DateTime>? fetchedAt,
+    Value<int>? rowid,
+  }) {
+    return OfflineMetadataEntriesCompanion(
+      key: key ?? this.key,
+      payload: payload ?? this.payload,
+      etag: etag ?? this.etag,
+      fetchedAt: fetchedAt ?? this.fetchedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (key.present) {
+      map['key'] = Variable<String>(key.value);
+    }
+    if (payload.present) {
+      map['payload'] = Variable<String>(payload.value);
+    }
+    if (etag.present) {
+      map['etag'] = Variable<String>(etag.value);
+    }
+    if (fetchedAt.present) {
+      map['fetched_at'] = Variable<DateTime>(fetchedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('OfflineMetadataEntriesCompanion(')
+          ..write('key: $key, ')
+          ..write('payload: $payload, ')
+          ..write('etag: $etag, ')
+          ..write('fetchedAt: $fetchedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $PinnedImagesTable extends PinnedImages
+    with TableInfo<$PinnedImagesTable, PinnedImageRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $PinnedImagesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _keyMeta = const VerificationMeta('key');
+  @override
+  late final GeneratedColumn<String> key = GeneratedColumn<String>(
+    'key',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _bookIdMeta = const VerificationMeta('bookId');
+  @override
+  late final GeneratedColumn<int> bookId = GeneratedColumn<int>(
+    'book_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [key, bookId];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'pinned_images';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<PinnedImageRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('key')) {
+      context.handle(
+        _keyMeta,
+        key.isAcceptableOrUnknown(data['key']!, _keyMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_keyMeta);
+    }
+    if (data.containsKey('book_id')) {
+      context.handle(
+        _bookIdMeta,
+        bookId.isAcceptableOrUnknown(data['book_id']!, _bookIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_bookIdMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {key};
+  @override
+  PinnedImageRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return PinnedImageRow(
+      key: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}key'],
+      )!,
+      bookId: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}book_id'],
+      )!,
+    );
+  }
+
+  @override
+  $PinnedImagesTable createAlias(String alias) {
+    return $PinnedImagesTable(attachedDatabase, alias);
+  }
+}
+
+class PinnedImageRow extends DataClass implements Insertable<PinnedImageRow> {
+  /// キャッシュキー（`MediaUrls.thumbnailCacheKey`）。
+  final String key;
+
+  /// どのタイトルのために保護しているか（ダウンロードを消したら印も消す）。
+  final int bookId;
+  const PinnedImageRow({required this.key, required this.bookId});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['key'] = Variable<String>(key);
+    map['book_id'] = Variable<int>(bookId);
+    return map;
+  }
+
+  PinnedImagesCompanion toCompanion(bool nullToAbsent) {
+    return PinnedImagesCompanion(key: Value(key), bookId: Value(bookId));
+  }
+
+  factory PinnedImageRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return PinnedImageRow(
+      key: serializer.fromJson<String>(json['key']),
+      bookId: serializer.fromJson<int>(json['bookId']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'key': serializer.toJson<String>(key),
+      'bookId': serializer.toJson<int>(bookId),
+    };
+  }
+
+  PinnedImageRow copyWith({String? key, int? bookId}) =>
+      PinnedImageRow(key: key ?? this.key, bookId: bookId ?? this.bookId);
+  PinnedImageRow copyWithCompanion(PinnedImagesCompanion data) {
+    return PinnedImageRow(
+      key: data.key.present ? data.key.value : this.key,
+      bookId: data.bookId.present ? data.bookId.value : this.bookId,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('PinnedImageRow(')
+          ..write('key: $key, ')
+          ..write('bookId: $bookId')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(key, bookId);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is PinnedImageRow &&
+          other.key == this.key &&
+          other.bookId == this.bookId);
+}
+
+class PinnedImagesCompanion extends UpdateCompanion<PinnedImageRow> {
+  final Value<String> key;
+  final Value<int> bookId;
+  final Value<int> rowid;
+  const PinnedImagesCompanion({
+    this.key = const Value.absent(),
+    this.bookId = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  PinnedImagesCompanion.insert({
+    required String key,
+    required int bookId,
+    this.rowid = const Value.absent(),
+  }) : key = Value(key),
+       bookId = Value(bookId);
+  static Insertable<PinnedImageRow> custom({
+    Expression<String>? key,
+    Expression<int>? bookId,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (key != null) 'key': key,
+      if (bookId != null) 'book_id': bookId,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  PinnedImagesCompanion copyWith({
+    Value<String>? key,
+    Value<int>? bookId,
+    Value<int>? rowid,
+  }) {
+    return PinnedImagesCompanion(
+      key: key ?? this.key,
+      bookId: bookId ?? this.bookId,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (key.present) {
+      map['key'] = Variable<String>(key.value);
+    }
+    if (bookId.present) {
+      map['book_id'] = Variable<int>(bookId.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('PinnedImagesCompanion(')
+          ..write('key: $key, ')
+          ..write('bookId: $bookId, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -1773,6 +2301,9 @@ abstract class _$AppDatabase extends GeneratedDatabase {
       $DownloadedVolumesTable(this);
   late final $ReadingProgressesTable readingProgresses =
       $ReadingProgressesTable(this);
+  late final $OfflineMetadataEntriesTable offlineMetadataEntries =
+      $OfflineMetadataEntriesTable(this);
+  late final $PinnedImagesTable pinnedImages = $PinnedImagesTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -1782,6 +2313,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     settings,
     downloadedVolumes,
     readingProgresses,
+    offlineMetadataEntries,
+    pinnedImages,
   ];
 }
 
@@ -2743,6 +3276,364 @@ typedef $$ReadingProgressesTableProcessedTableManager =
       ReadingProgressRow,
       PrefetchHooks Function()
     >;
+typedef $$OfflineMetadataEntriesTableCreateCompanionBuilder =
+    OfflineMetadataEntriesCompanion Function({
+      required String key,
+      required String payload,
+      Value<String?> etag,
+      required DateTime fetchedAt,
+      Value<int> rowid,
+    });
+typedef $$OfflineMetadataEntriesTableUpdateCompanionBuilder =
+    OfflineMetadataEntriesCompanion Function({
+      Value<String> key,
+      Value<String> payload,
+      Value<String?> etag,
+      Value<DateTime> fetchedAt,
+      Value<int> rowid,
+    });
+
+class $$OfflineMetadataEntriesTableFilterComposer
+    extends Composer<_$AppDatabase, $OfflineMetadataEntriesTable> {
+  $$OfflineMetadataEntriesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get key => $composableBuilder(
+    column: $table.key,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get payload => $composableBuilder(
+    column: $table.payload,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get etag => $composableBuilder(
+    column: $table.etag,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get fetchedAt => $composableBuilder(
+    column: $table.fetchedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$OfflineMetadataEntriesTableOrderingComposer
+    extends Composer<_$AppDatabase, $OfflineMetadataEntriesTable> {
+  $$OfflineMetadataEntriesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get key => $composableBuilder(
+    column: $table.key,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get payload => $composableBuilder(
+    column: $table.payload,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get etag => $composableBuilder(
+    column: $table.etag,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get fetchedAt => $composableBuilder(
+    column: $table.fetchedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$OfflineMetadataEntriesTableAnnotationComposer
+    extends Composer<_$AppDatabase, $OfflineMetadataEntriesTable> {
+  $$OfflineMetadataEntriesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get key =>
+      $composableBuilder(column: $table.key, builder: (column) => column);
+
+  GeneratedColumn<String> get payload =>
+      $composableBuilder(column: $table.payload, builder: (column) => column);
+
+  GeneratedColumn<String> get etag =>
+      $composableBuilder(column: $table.etag, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get fetchedAt =>
+      $composableBuilder(column: $table.fetchedAt, builder: (column) => column);
+}
+
+class $$OfflineMetadataEntriesTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $OfflineMetadataEntriesTable,
+          OfflineMetadataRow,
+          $$OfflineMetadataEntriesTableFilterComposer,
+          $$OfflineMetadataEntriesTableOrderingComposer,
+          $$OfflineMetadataEntriesTableAnnotationComposer,
+          $$OfflineMetadataEntriesTableCreateCompanionBuilder,
+          $$OfflineMetadataEntriesTableUpdateCompanionBuilder,
+          (
+            OfflineMetadataRow,
+            BaseReferences<
+              _$AppDatabase,
+              $OfflineMetadataEntriesTable,
+              OfflineMetadataRow
+            >,
+          ),
+          OfflineMetadataRow,
+          PrefetchHooks Function()
+        > {
+  $$OfflineMetadataEntriesTableTableManager(
+    _$AppDatabase db,
+    $OfflineMetadataEntriesTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$OfflineMetadataEntriesTableFilterComposer(
+                $db: db,
+                $table: table,
+              ),
+          createOrderingComposer: () =>
+              $$OfflineMetadataEntriesTableOrderingComposer(
+                $db: db,
+                $table: table,
+              ),
+          createComputedFieldComposer: () =>
+              $$OfflineMetadataEntriesTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<String> key = const Value.absent(),
+                Value<String> payload = const Value.absent(),
+                Value<String?> etag = const Value.absent(),
+                Value<DateTime> fetchedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => OfflineMetadataEntriesCompanion(
+                key: key,
+                payload: payload,
+                etag: etag,
+                fetchedAt: fetchedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String key,
+                required String payload,
+                Value<String?> etag = const Value.absent(),
+                required DateTime fetchedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => OfflineMetadataEntriesCompanion.insert(
+                key: key,
+                payload: payload,
+                etag: etag,
+                fetchedAt: fetchedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable<$OfflineMetadataEntriesTable, OfflineMetadataRow>(
+                    table,
+                  ),
+                  BaseReferences<
+                    _$AppDatabase,
+                    $OfflineMetadataEntriesTable,
+                    OfflineMetadataRow
+                  >(db, table, e),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$OfflineMetadataEntriesTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $OfflineMetadataEntriesTable,
+      OfflineMetadataRow,
+      $$OfflineMetadataEntriesTableFilterComposer,
+      $$OfflineMetadataEntriesTableOrderingComposer,
+      $$OfflineMetadataEntriesTableAnnotationComposer,
+      $$OfflineMetadataEntriesTableCreateCompanionBuilder,
+      $$OfflineMetadataEntriesTableUpdateCompanionBuilder,
+      (
+        OfflineMetadataRow,
+        BaseReferences<
+          _$AppDatabase,
+          $OfflineMetadataEntriesTable,
+          OfflineMetadataRow
+        >,
+      ),
+      OfflineMetadataRow,
+      PrefetchHooks Function()
+    >;
+typedef $$PinnedImagesTableCreateCompanionBuilder =
+    PinnedImagesCompanion Function({
+      required String key,
+      required int bookId,
+      Value<int> rowid,
+    });
+typedef $$PinnedImagesTableUpdateCompanionBuilder =
+    PinnedImagesCompanion Function({
+      Value<String> key,
+      Value<int> bookId,
+      Value<int> rowid,
+    });
+
+class $$PinnedImagesTableFilterComposer
+    extends Composer<_$AppDatabase, $PinnedImagesTable> {
+  $$PinnedImagesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get key => $composableBuilder(
+    column: $table.key,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get bookId => $composableBuilder(
+    column: $table.bookId,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$PinnedImagesTableOrderingComposer
+    extends Composer<_$AppDatabase, $PinnedImagesTable> {
+  $$PinnedImagesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get key => $composableBuilder(
+    column: $table.key,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get bookId => $composableBuilder(
+    column: $table.bookId,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$PinnedImagesTableAnnotationComposer
+    extends Composer<_$AppDatabase, $PinnedImagesTable> {
+  $$PinnedImagesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get key =>
+      $composableBuilder(column: $table.key, builder: (column) => column);
+
+  GeneratedColumn<int> get bookId =>
+      $composableBuilder(column: $table.bookId, builder: (column) => column);
+}
+
+class $$PinnedImagesTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $PinnedImagesTable,
+          PinnedImageRow,
+          $$PinnedImagesTableFilterComposer,
+          $$PinnedImagesTableOrderingComposer,
+          $$PinnedImagesTableAnnotationComposer,
+          $$PinnedImagesTableCreateCompanionBuilder,
+          $$PinnedImagesTableUpdateCompanionBuilder,
+          (
+            PinnedImageRow,
+            BaseReferences<_$AppDatabase, $PinnedImagesTable, PinnedImageRow>,
+          ),
+          PinnedImageRow,
+          PrefetchHooks Function()
+        > {
+  $$PinnedImagesTableTableManager(_$AppDatabase db, $PinnedImagesTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$PinnedImagesTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$PinnedImagesTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$PinnedImagesTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback: ({
+            Value<String> key = const Value.absent(),
+            Value<int> bookId = const Value.absent(),
+            Value<int> rowid = const Value.absent(),
+          }) => PinnedImagesCompanion(key: key, bookId: bookId, rowid: rowid),
+          createCompanionCallback:
+              ({
+                required String key,
+                required int bookId,
+                Value<int> rowid = const Value.absent(),
+              }) => PinnedImagesCompanion.insert(
+                key: key,
+                bookId: bookId,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable<$PinnedImagesTable, PinnedImageRow>(table),
+                  BaseReferences<
+                    _$AppDatabase,
+                    $PinnedImagesTable,
+                    PinnedImageRow
+                  >(db, table, e),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$PinnedImagesTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $PinnedImagesTable,
+      PinnedImageRow,
+      $$PinnedImagesTableFilterComposer,
+      $$PinnedImagesTableOrderingComposer,
+      $$PinnedImagesTableAnnotationComposer,
+      $$PinnedImagesTableCreateCompanionBuilder,
+      $$PinnedImagesTableUpdateCompanionBuilder,
+      (
+        PinnedImageRow,
+        BaseReferences<_$AppDatabase, $PinnedImagesTable, PinnedImageRow>,
+      ),
+      PinnedImageRow,
+      PrefetchHooks Function()
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -2755,6 +3646,13 @@ class $AppDatabaseManager {
       $$DownloadedVolumesTableTableManager(_db, _db.downloadedVolumes);
   $$ReadingProgressesTableTableManager get readingProgresses =>
       $$ReadingProgressesTableTableManager(_db, _db.readingProgresses);
+  $$OfflineMetadataEntriesTableTableManager get offlineMetadataEntries =>
+      $$OfflineMetadataEntriesTableTableManager(
+        _db,
+        _db.offlineMetadataEntries,
+      );
+  $$PinnedImagesTableTableManager get pinnedImages =>
+      $$PinnedImagesTableTableManager(_db, _db.pinnedImages);
 }
 
 // **************************************************************************

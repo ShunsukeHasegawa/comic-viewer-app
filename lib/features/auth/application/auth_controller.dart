@@ -5,6 +5,7 @@ import 'package:riverpod_annotation/riverpod_annotation.dart';
 import '../../../core/device/device_name_resolver.dart';
 import '../../../core/network/api_exception.dart';
 import '../../../core/session/session_data_purger.dart';
+import '../../../domain/models/user.dart';
 import '../data/auth_api.dart';
 import '../data/auth_store.dart';
 import '../domain/auth_state.dart';
@@ -76,6 +77,8 @@ class AuthController extends _$AuthController {
     try {
       final user = await ref.read(authApiProvider).fetchCurrentUser();
       if (_isStale(generation)) return;
+      await _purgeIfUserChanged(user);
+      if (_isStale(generation)) return;
       await store.writeUser(user);
       if (_isStale(generation)) return;
       _sessionCleared = false;
@@ -112,6 +115,8 @@ class AuthController extends _$AuthController {
     // トークンと一緒にユーザーが返らないサーバー実装でも動くようにする。
     final user =
         result.user ?? await ref.read(authApiProvider).fetchCurrentUser();
+    if (_isStale(generation)) return;
+    await _purgeIfUserChanged(user);
     if (_isStale(generation)) return;
     await store.writeUser(user);
     if (_isStale(generation)) return;
@@ -176,6 +181,22 @@ class AuthController extends _$AuthController {
     if (!ref.mounted) return;
     _sessionCleared = true;
     state = AuthState.unauthenticated(reason: _endReason);
+  }
+
+  /// 別のユーザー / 別のセーフモード設定になったら端末内のデータを捨てる（#11）。
+  ///
+  /// セーフモードの制御はサーバー側が正なので、`is_unsafe` の巻はそもそも
+  /// 端末に落ちていない。それでも破棄するのは、**前のユーザー / 前の設定で
+  /// 取得した一覧・詳細・サムネイルが端末に残っている**ためで、オフラインでは
+  /// それがそのまま表示されてしまう（キャッシュ経由で見えてしまわないこと）。
+  ///
+  /// 前のユーザーが分からない（初回ログイン / ログアウト済み）ときは何もしない。
+  Future<void> _purgeIfUserChanged(User next) async {
+    final previous = await ref.read(authStoreProvider).readUser();
+    if (previous == null) return;
+    if (previous.id == next.id && previous.safeMode == next.safeMode) return;
+    if (!ref.mounted) return;
+    await _purgeLocalData();
   }
 
   Future<void> _purgeLocalData() async {

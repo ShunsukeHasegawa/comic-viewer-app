@@ -21,7 +21,7 @@ typedef ViewerImageBuilder = Widget Function(
 ///
 /// **読み込み完了まで画像を出さない**（途中まで描かれた JPEG を見せない）。
 /// 取得元の解決順（ダウンロード済みローカル → キャッシュ → ネットワーク）は
-/// `ComicImageLoader` に集約してあり、#11 はそこへ差し込む。
+/// `ComicImageLoader` に集約してある（#11）。ここは描画だけを受け持つ。
 @Riverpod(keepAlive: true)
 ViewerImageBuilder viewerImageBuilder(Ref ref) {
   return (context, request, onRetry) => ComicImage(

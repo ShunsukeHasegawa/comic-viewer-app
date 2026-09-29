@@ -15,8 +15,13 @@ T _$identity<T>(T value) => value;
 /// @nodoc
 mixin _$LibraryFilter {
 
- String get query; Set<int> get categoryIds; Set<int> get tagIds; bool get onlyFavorites; bool get onlyUnread; bool get onlyComplete;/// ダウンロード済みのみ表示（オフライン時は既定で ON。実装は #11）。
- bool get onlyDownloaded; LibrarySort get sort;
+ String get query; Set<int> get categoryIds; Set<int> get tagIds; bool get onlyFavorites; bool get onlyUnread; bool get onlyComplete;/// ダウンロード済みのみ表示。
+///
+/// `null` は**未指定**で、オフライン（サーバーに確認できない）なら ON として
+/// 扱う（#11）。「既定 ON」を状態として書き込まないのは、圏外で開いたあとに
+/// オンラインへ戻ったときに、ユーザーが触っていない絞り込みが残って
+/// 「本が減った」ように見えるのを避けるため。
+ bool? get onlyDownloaded; LibrarySort get sort;
 /// Create a copy of LibraryFilter
 /// with the given fields replaced by the non-null parameter values.
 @JsonKey(includeFromJson: false, includeToJson: false)
@@ -52,7 +57,7 @@ abstract mixin class $LibraryFilterCopyWith<$Res>  {
   factory $LibraryFilterCopyWith(LibraryFilter value, $Res Function(LibraryFilter) _then) = _$LibraryFilterCopyWithImpl;
 @useResult
 $Res call({
- String query, Set<int> categoryIds, Set<int> tagIds, bool onlyFavorites, bool onlyUnread, bool onlyComplete, bool onlyDownloaded, LibrarySort sort
+ String query, Set<int> categoryIds, Set<int> tagIds, bool onlyFavorites, bool onlyUnread, bool onlyComplete, bool? onlyDownloaded, LibrarySort sort
 });
 
 
@@ -69,7 +74,7 @@ class _$LibraryFilterCopyWithImpl<$Res>
 
 /// Create a copy of LibraryFilter
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? query = null,Object? categoryIds = null,Object? tagIds = null,Object? onlyFavorites = null,Object? onlyUnread = null,Object? onlyComplete = null,Object? onlyDownloaded = null,Object? sort = null,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? query = null,Object? categoryIds = null,Object? tagIds = null,Object? onlyFavorites = null,Object? onlyUnread = null,Object? onlyComplete = null,Object? onlyDownloaded = freezed,Object? sort = null,}) {
   return _then(LibraryFilter(
 query: null == query ? _self.query : query // ignore: cast_nullable_to_non_nullable
 as String,categoryIds: null == categoryIds ? _self.categoryIds : categoryIds // ignore: cast_nullable_to_non_nullable
@@ -77,8 +82,8 @@ as Set<int>,tagIds: null == tagIds ? _self.tagIds : tagIds // ignore: cast_nulla
 as Set<int>,onlyFavorites: null == onlyFavorites ? _self.onlyFavorites : onlyFavorites // ignore: cast_nullable_to_non_nullable
 as bool,onlyUnread: null == onlyUnread ? _self.onlyUnread : onlyUnread // ignore: cast_nullable_to_non_nullable
 as bool,onlyComplete: null == onlyComplete ? _self.onlyComplete : onlyComplete // ignore: cast_nullable_to_non_nullable
-as bool,onlyDownloaded: null == onlyDownloaded ? _self.onlyDownloaded : onlyDownloaded // ignore: cast_nullable_to_non_nullable
-as bool,sort: null == sort ? _self.sort : sort // ignore: cast_nullable_to_non_nullable
+as bool,onlyDownloaded: freezed == onlyDownloaded ? _self.onlyDownloaded : onlyDownloaded // ignore: cast_nullable_to_non_nullable
+as bool?,sort: null == sort ? _self.sort : sort // ignore: cast_nullable_to_non_nullable
 as LibrarySort,
   ));
 }
@@ -164,7 +169,7 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( String query,  Set<int> categoryIds,  Set<int> tagIds,  bool onlyFavorites,  bool onlyUnread,  bool onlyComplete,  bool onlyDownloaded,  LibrarySort sort)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( String query,  Set<int> categoryIds,  Set<int> tagIds,  bool onlyFavorites,  bool onlyUnread,  bool onlyComplete,  bool? onlyDownloaded,  LibrarySort sort)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _LibraryFilter() when $default != null:
 return $default(_that.query,_that.categoryIds,_that.tagIds,_that.onlyFavorites,_that.onlyUnread,_that.onlyComplete,_that.onlyDownloaded,_that.sort);case _:
@@ -185,7 +190,7 @@ return $default(_that.query,_that.categoryIds,_that.tagIds,_that.onlyFavorites,_
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( String query,  Set<int> categoryIds,  Set<int> tagIds,  bool onlyFavorites,  bool onlyUnread,  bool onlyComplete,  bool onlyDownloaded,  LibrarySort sort)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( String query,  Set<int> categoryIds,  Set<int> tagIds,  bool onlyFavorites,  bool onlyUnread,  bool onlyComplete,  bool? onlyDownloaded,  LibrarySort sort)  $default,) {final _that = this;
 switch (_that) {
 case _LibraryFilter():
 return $default(_that.query,_that.categoryIds,_that.tagIds,_that.onlyFavorites,_that.onlyUnread,_that.onlyComplete,_that.onlyDownloaded,_that.sort);case _:
@@ -205,7 +210,7 @@ return $default(_that.query,_that.categoryIds,_that.tagIds,_that.onlyFavorites,_
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( String query,  Set<int> categoryIds,  Set<int> tagIds,  bool onlyFavorites,  bool onlyUnread,  bool onlyComplete,  bool onlyDownloaded,  LibrarySort sort)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( String query,  Set<int> categoryIds,  Set<int> tagIds,  bool onlyFavorites,  bool onlyUnread,  bool onlyComplete,  bool? onlyDownloaded,  LibrarySort sort)?  $default,) {final _that = this;
 switch (_that) {
 case _LibraryFilter() when $default != null:
 return $default(_that.query,_that.categoryIds,_that.tagIds,_that.onlyFavorites,_that.onlyUnread,_that.onlyComplete,_that.onlyDownloaded,_that.sort);case _:
@@ -220,7 +225,7 @@ return $default(_that.query,_that.categoryIds,_that.tagIds,_that.onlyFavorites,_
 
 
 class _LibraryFilter extends LibraryFilter {
-  const _LibraryFilter({this.query = '',  Set<int> categoryIds = const {},  Set<int> tagIds = const {}, this.onlyFavorites = false, this.onlyUnread = false, this.onlyComplete = false, this.onlyDownloaded = false, this.sort = LibrarySort.updated}): _categoryIds = categoryIds,_tagIds = tagIds,super._();
+  const _LibraryFilter({this.query = '',  Set<int> categoryIds = const {},  Set<int> tagIds = const {}, this.onlyFavorites = false, this.onlyUnread = false, this.onlyComplete = false, this.onlyDownloaded, this.sort = LibrarySort.updated}): _categoryIds = categoryIds,_tagIds = tagIds,super._();
   
 
 @override@JsonKey() final  String query;
@@ -241,8 +246,13 @@ class _LibraryFilter extends LibraryFilter {
 @override@JsonKey() final  bool onlyFavorites;
 @override@JsonKey() final  bool onlyUnread;
 @override@JsonKey() final  bool onlyComplete;
-/// ダウンロード済みのみ表示（オフライン時は既定で ON。実装は #11）。
-@override@JsonKey() final  bool onlyDownloaded;
+/// ダウンロード済みのみ表示。
+///
+/// `null` は**未指定**で、オフライン（サーバーに確認できない）なら ON として
+/// 扱う（#11）。「既定 ON」を状態として書き込まないのは、圏外で開いたあとに
+/// オンラインへ戻ったときに、ユーザーが触っていない絞り込みが残って
+/// 「本が減った」ように見えるのを避けるため。
+@override final  bool? onlyDownloaded;
 @override@JsonKey() final  LibrarySort sort;
 
 /// Create a copy of LibraryFilter
@@ -277,7 +287,7 @@ abstract mixin class _$LibraryFilterCopyWith<$Res> implements $LibraryFilterCopy
   factory _$LibraryFilterCopyWith(_LibraryFilter value, $Res Function(_LibraryFilter) _then) = __$LibraryFilterCopyWithImpl;
 @override @useResult
 $Res call({
- String query, Set<int> categoryIds, Set<int> tagIds, bool onlyFavorites, bool onlyUnread, bool onlyComplete, bool onlyDownloaded, LibrarySort sort
+ String query, Set<int> categoryIds, Set<int> tagIds, bool onlyFavorites, bool onlyUnread, bool onlyComplete, bool? onlyDownloaded, LibrarySort sort
 });
 
 
@@ -294,7 +304,7 @@ class __$LibraryFilterCopyWithImpl<$Res>
 
 /// Create a copy of LibraryFilter
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? query = null,Object? categoryIds = null,Object? tagIds = null,Object? onlyFavorites = null,Object? onlyUnread = null,Object? onlyComplete = null,Object? onlyDownloaded = null,Object? sort = null,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? query = null,Object? categoryIds = null,Object? tagIds = null,Object? onlyFavorites = null,Object? onlyUnread = null,Object? onlyComplete = null,Object? onlyDownloaded = freezed,Object? sort = null,}) {
   return _then(_LibraryFilter(
 query: null == query ? _self.query : query // ignore: cast_nullable_to_non_nullable
 as String,categoryIds: null == categoryIds ? _self._categoryIds : categoryIds // ignore: cast_nullable_to_non_nullable
@@ -302,8 +312,8 @@ as Set<int>,tagIds: null == tagIds ? _self._tagIds : tagIds // ignore: cast_null
 as Set<int>,onlyFavorites: null == onlyFavorites ? _self.onlyFavorites : onlyFavorites // ignore: cast_nullable_to_non_nullable
 as bool,onlyUnread: null == onlyUnread ? _self.onlyUnread : onlyUnread // ignore: cast_nullable_to_non_nullable
 as bool,onlyComplete: null == onlyComplete ? _self.onlyComplete : onlyComplete // ignore: cast_nullable_to_non_nullable
-as bool,onlyDownloaded: null == onlyDownloaded ? _self.onlyDownloaded : onlyDownloaded // ignore: cast_nullable_to_non_nullable
-as bool,sort: null == sort ? _self.sort : sort // ignore: cast_nullable_to_non_nullable
+as bool,onlyDownloaded: freezed == onlyDownloaded ? _self.onlyDownloaded : onlyDownloaded // ignore: cast_nullable_to_non_nullable
+as bool?,sort: null == sort ? _self.sort : sort // ignore: cast_nullable_to_non_nullable
 as LibrarySort,
   ));
 }

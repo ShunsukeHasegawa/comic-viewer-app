@@ -8,6 +8,7 @@ import '../../../core/widgets/app_back_button.dart';
 import '../../../core/widgets/error_view.dart';
 import '../../../core/widgets/thumbnail_image.dart';
 import '../../../domain/models/book_detail.dart';
+import '../../downloads/application/downloaded_lookup.dart';
 import '../../library/presentation/widgets/book_tiles.dart';
 import '../application/book_detail_controller.dart';
 import 'widgets/volume_tile.dart';
@@ -22,7 +23,8 @@ class TitleDetailScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(bookDetailControllerProvider(bookId));
     final controller = ref.read(bookDetailControllerProvider(bookId).notifier);
-    final detail = async.value;
+    final data = async.value;
+    final detail = data?.detail;
 
     return Scaffold(
       appBar: AppBar(
@@ -39,15 +41,15 @@ class TitleDetailScreen extends ConsumerWidget {
             ),
         ],
       ),
-      body: switch ((detail, async.error)) {
+      body: switch ((data, async.error)) {
         (null, final error?) => ErrorView(
           error: error,
           onRetry: controller.refresh,
         ),
         (null, null) => const Center(child: CircularProgressIndicator()),
-        (final detail?, _) => RefreshIndicator(
+        (final data?, _) => RefreshIndicator(
           onRefresh: () => _refresh(context, ref, bookId),
-          child: _DetailBody(detail: detail),
+          child: _DetailBody(data: data),
         ),
       },
     );
@@ -77,22 +79,32 @@ Future<void> _refresh(BuildContext context, WidgetRef ref, int bookId) async {
   showRefreshFailure(context, error, what: 'タイトル詳細');
 }
 
-class _DetailBody extends StatelessWidget {
-  const _DetailBody({required this.detail});
+class _DetailBody extends ConsumerWidget {
+  const _DetailBody({required this.data});
 
-  final BookDetail detail;
+  final BookDetailData data;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final detail = data.detail;
     final resume = resumeTargetOf(detail);
+    // 圏外では端末にある巻しか開けない（#11）。
+    final downloaded = ref.watch(downloadedVolumeIdsProvider);
+    bool canOpen(BookVolume volume) =>
+        !data.isStale || downloaded.contains(volume.id);
 
     return CustomScrollView(
       physics: const AlwaysScrollableScrollPhysics(),
       slivers: [
+        if (data.isStale) const SliverToBoxAdapter(child: _OfflineNotice()),
         SliverToBoxAdapter(child: _Hero(detail: detail)),
         if (resume != null)
           SliverToBoxAdapter(
-            child: _ResumeButton(detail: detail, volume: resume),
+            child: _ResumeButton(
+              detail: detail,
+              volume: resume,
+              canOpen: canOpen(resume),
+            ),
           ),
         SliverToBoxAdapter(child: _Meta(detail: detail)),
         SliverToBoxAdapter(child: _VolumesHeader(detail: detail)),
@@ -112,12 +124,47 @@ class _DetailBody extends StatelessWidget {
               return VolumeTile(
                 bookId: detail.id,
                 volume: volume,
-                onOpen: () => context.push(AppRoutes.viewer(volume.id)),
+                // 開けない巻はタップ自体を無効にする。押してからダイアログで
+                // 断るより、読めないことが一覧で分かる方がよい。
+                onOpen: canOpen(volume)
+                    ? () => context.push(AppRoutes.viewer(volume.id))
+                    : null,
               );
             },
           ),
         const SliverToBoxAdapter(child: SizedBox(height: 24)),
       ],
+    );
+  }
+}
+
+/// 圏外で端末の控えを表示していることを伝える。
+class _OfflineNotice extends StatelessWidget {
+  const _OfflineNotice();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      width: double.infinity,
+      color: theme.colorScheme.surfaceContainerHigh,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        children: [
+          Icon(
+            Icons.wifi_off_outlined,
+            size: 18,
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'オフラインです。ダウンロード済みの巻だけ読めます。',
+              style: theme.textTheme.bodySmall,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -203,10 +250,17 @@ class _Hero extends StatelessWidget {
 }
 
 class _ResumeButton extends StatelessWidget {
-  const _ResumeButton({required this.detail, required this.volume});
+  const _ResumeButton({
+    required this.detail,
+    required this.volume,
+    required this.canOpen,
+  });
 
   final BookDetail detail;
   final BookVolume volume;
+
+  /// 開けるか（圏外で未ダウンロードの巻は開けない）。
+  final bool canOpen;
 
   @override
   Widget build(BuildContext context) {
@@ -214,11 +268,15 @@ class _ResumeButton extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
       child: FilledButton.icon(
-        onPressed: () => context.push(AppRoutes.viewer(volume.id)),
-        icon: const Icon(Icons.play_arrow),
-        label: Text(
-          isResume ? '${volume.volume} 巻の続きから読む' : '${volume.volume} 巻を読む',
-        ),
+        onPressed: canOpen
+            ? () => context.push(AppRoutes.viewer(volume.id))
+            : null,
+        icon: Icon(canOpen ? Icons.play_arrow : Icons.cloud_off_outlined),
+        label: Text(switch ((canOpen, isResume)) {
+          (false, _) => 'オフラインでは読めません',
+          (true, true) => '${volume.volume} 巻の続きから読む',
+          (true, false) => '${volume.volume} 巻を読む',
+        }),
       ),
     );
   }

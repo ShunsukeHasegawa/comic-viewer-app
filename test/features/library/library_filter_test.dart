@@ -1,3 +1,4 @@
+import 'package:comic_laz/domain/models/book.dart';
 import 'package:comic_laz/features/library/domain/library_filter.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -95,7 +96,7 @@ void main() {
       ]);
     });
 
-    test('ダウンロード済みのみ（#11 で使う）', () {
+    test('ダウンロード済みのみ', () {
       final result = applyLibraryFilter(
         candidates: books,
         filter: const LibraryFilter(onlyDownloaded: true),
@@ -105,6 +106,43 @@ void main() {
       );
 
       expect(result.map((b) => b.id), [3]);
+    });
+
+    // 圏外では読めるものだけを出す（#11）。ユーザーが触っていない状態
+    // （未指定）のときだけ既定を当てる。
+    test('未指定ならオフラインのときだけダウンロード済みに絞る', () {
+      List<Book> visible({required bool isOffline}) => applyLibraryFilter(
+        candidates: books,
+        filter: const LibraryFilter(),
+        favoriteIds: const {},
+        unreadIds: const {},
+        downloadedIds: const {3},
+        isOffline: isOffline,
+      );
+
+      expect(visible(isOffline: true).map((b) => b.id), [3]);
+      expect(visible(isOffline: false), hasLength(books.length));
+    });
+
+    test('明示的に OFF にしたらオフラインでも全部出す', () {
+      final result = applyLibraryFilter(
+        candidates: books,
+        filter: const LibraryFilter(onlyDownloaded: false),
+        favoriteIds: const {},
+        unreadIds: const {},
+        downloadedIds: const {3},
+        isOffline: true,
+      );
+
+      expect(result, hasLength(books.length));
+    });
+
+    test('オフラインの既定 ON は「絞り込み中」に数えない（解除の表示）', () {
+      expect(const LibraryFilter().hasActiveFilters, isFalse);
+      expect(
+        const LibraryFilter(onlyDownloaded: true).hasActiveFilters,
+        isTrue,
+      );
     });
   });
 
