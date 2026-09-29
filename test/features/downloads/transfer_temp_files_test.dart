@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:comic_laz/features/downloads/data/archive_transport.dart';
 import 'package:comic_laz/features/downloads/data/transfer_temp_files.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -55,6 +56,75 @@ void main() {
     expect(deleted, 1);
     expect(orphan.existsSync(), isFalse);
     expect(running.existsSync(), isTrue);
+  });
+
+  group('掃除の範囲', () {
+    TransferSnapshot snapshot(String id, TransferState state) =>
+        TransferSnapshot(taskId: id, state: state);
+
+    test('待機中の転送が 1 本でもあれば、年齢でも消さない', () {
+      // Android の時間切れ / Wi-Fi 設定の変更で再投入された転送は、再開データを
+      // ネイティブにしか持たず keepPaths に入らない。Wi-Fi を待つ間に書きかけが
+      // 古くなり、消すと走り出したときに先頭から落とし直しになる。
+      for (final waiting in [
+        TransferState.enqueued,
+        TransferState.waitingToRetry,
+      ]) {
+        expect(
+          tempSweepScopeFor([
+            snapshot('a', TransferState.running),
+            snapshot('b', waiting),
+          ], staleOnly: true),
+          TempSweepScope.none,
+          reason: '$waiting',
+        );
+      }
+    });
+
+    test('生きている転送がすべて走っていれば、しばらく書き込まれていないものだけを消す', () {
+      // 走っている転送は自分の書きかけを書き足し続けるので、古いものは失敗した
+      // 巻の置き去り。まとめて積んだ巻が走る間も溜めない。
+      expect(
+        tempSweepScopeFor([
+          snapshot('a', TransferState.running),
+          snapshot('b', TransferState.paused),
+        ], staleOnly: false),
+        TempSweepScope.stale,
+      );
+    });
+
+    test('ネイティブに何も生きていなければ全部消す（呼び出し側が絞れと言えば絞る）', () {
+      final idle = [snapshot('a', TransferState.paused)];
+      expect(tempSweepScopeFor(idle, staleOnly: false), TempSweepScope.all);
+      expect(tempSweepScopeFor(idle, staleOnly: true), TempSweepScope.stale);
+    });
+
+    test('再投入を待つ転送の古い書きかけは残り、待つものが無くなれば消える', () async {
+      final now = DateTime(2026, 9, 29, 12);
+      final waiting = write('${transferTempFilePrefix}333')
+        ..setLastModifiedSync(now.subtract(const Duration(minutes: 30)));
+
+      Future<void> sweep(List<TransferSnapshot> snapshots) async {
+        final scope = tempSweepScopeFor(snapshots, staleOnly: true);
+        if (scope == TempSweepScope.none) return;
+        await deleteTransferTempFiles(
+          [support],
+          olderThan: scope == TempSweepScope.stale
+              ? transferTempStaleAge
+              : null,
+          now: now,
+        );
+      }
+
+      await sweep([
+        snapshot('a', TransferState.running),
+        snapshot('b', TransferState.enqueued),
+      ]);
+      expect(waiting.existsSync(), isTrue);
+
+      await sweep([snapshot('a', TransferState.running)]);
+      expect(waiting.existsSync(), isFalse);
+    });
   });
 
   test('パッケージの一時ファイル以外（ダウンロード済みの巻など）には触らない', () async {

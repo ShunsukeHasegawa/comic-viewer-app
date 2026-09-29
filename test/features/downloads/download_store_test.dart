@@ -84,7 +84,12 @@ void main() {
     test('タスク ID に埋め込んで parse できる形になっている', () async {
       // parse できないタグだと、自分の転送を見分けられなくなる。
       final tag = await store.readSessionTag();
-      final id = ArchiveTaskId(volumeId: 1, filesVersion: 2, sessionTag: tag);
+      final id = ArchiveTaskId(
+        volumeId: 1,
+        filesVersion: 2,
+        sessionTag: tag,
+        nonce: ArchiveTaskId.newNonce(),
+      );
 
       expect(ArchiveTaskId.tryParse(id.toString()), id);
     });

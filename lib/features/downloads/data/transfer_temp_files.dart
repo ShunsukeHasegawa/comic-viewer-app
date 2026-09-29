@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
+import 'archive_transport.dart';
+
 /// パッケージが作る一時ファイルの名前の先頭。
 ///
 /// Android で `useCacheDir: never` にすると、一時ファイルは application
@@ -68,4 +70,50 @@ Future<int> deleteTransferTempFiles(
     }
   }
   return deleted;
+}
+
+/// 一時ファイルの掃除をどこまでするか。
+enum TempSweepScope {
+  /// 消さない（続きに使う書きかけを Dart から見分けられない）。
+  none,
+
+  /// しばらく書き込まれていないもの（[transferTempStaleAge]）だけを消す。
+  stale,
+
+  /// どの転送も指していないものをすべて消す。
+  all,
+}
+
+/// ネイティブの転送の一覧（[snapshots]）から、掃除の範囲を決める。
+///
+/// 年齢で消してよいのは、生きている転送が**すべて走っている**ときだけ。
+/// 走っている転送は受信のたびに自分の書きかけを書き足すので、古いものは
+/// 自分のものではない。待機中（enqueued / 再試行待ち）の転送が 1 本でも
+/// あれば消さない。Android の時間切れ（`BDPlugin.doEnqueue` へ直接渡す）や
+/// Wi-Fi 設定の変更（`localResumeData`）で再投入された転送は、再開データを
+/// ネイティブ側にしか持たず Dart の保存領域に載らない（`keepPaths` に
+/// 入らない）。Wi-Fi を待つ間は書きかけが書き足されずに古くなるので、
+/// 年齢で消すと、走り出したときに続きを取れず先頭から落とし直しになる
+/// （巻 1 冊ぶん、数百 MB）。置き去りの書きかけは、待機中の転送が無く
+/// なった後の掃除（失敗 / 完了 / 次の起動）で消える。
+///
+/// 一時停止中の転送は数えない（再開データが Dart にあり `keepPaths` で残す）。
+/// [staleOnly] は呼び出し側の判断（投入済みで未確定の巻がある）で、
+/// ネイティブが何も知らなくても年齢で絞る。
+TempSweepScope tempSweepScopeFor(
+  Iterable<TransferSnapshot> snapshots, {
+  required bool staleOnly,
+}) {
+  final alive = [
+    for (final snapshot in snapshots)
+      if (snapshot.state == TransferState.enqueued ||
+          snapshot.state == TransferState.running ||
+          snapshot.state == TransferState.waitingToRetry)
+        snapshot.state,
+  ];
+  if (alive.any((state) => state != TransferState.running)) {
+    return TempSweepScope.none;
+  }
+  if (staleOnly || alive.isNotEmpty) return TempSweepScope.stale;
+  return TempSweepScope.all;
 }

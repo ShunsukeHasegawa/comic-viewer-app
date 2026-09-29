@@ -121,7 +121,7 @@ final class DownloadQueueProvider
   DownloadQueue create() => DownloadQueue();
 }
 
-String _$downloadQueueHash() => r'd475305daffdc4c28c80f6798b7f1a3044de1b0d';
+String _$downloadQueueHash() => r'd947ef703babcc1655ba3f9c7b5391a806ffa7b5';
 
 /// 巻単位のダウンロードキュー。
 ///

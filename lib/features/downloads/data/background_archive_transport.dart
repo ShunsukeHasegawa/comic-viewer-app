@@ -245,17 +245,17 @@ class BackgroundArchiveTransport implements ArchiveTransport {
 
   @override
   Future<void> sweepOrphanTempFiles({bool staleOnly = false}) async {
-    // 走っている転送の書きかけも同じ名前。1 本でも生きていれば、しばらく
-    // 書き込まれていないもの（失敗して置き去りになったもの）だけを消す。
-    // まとめて積んだ巻が走り続ける間も、失敗のたびに数百 MB を溜めない。
-    final listed = await _downloader.allTasks(group: archiveTransferGroup);
-    final alive = mergeTransferSnapshots(
-      records: const [],
-      listedIds: [for (final task in listed) task.taskId],
-      resumeIds: const {},
-      pausedIds: await _pausedIds(),
-    ).where((snapshot) => snapshot.state != TransferState.paused);
-    final busy = staleOnly || alive.isNotEmpty;
+    // 走っている転送の書きかけも同じ名前。生きている転送がすべて走って
+    // いれば、しばらく書き込まれていないもの（失敗して置き去りになった
+    // もの）だけを消す。まとめて積んだ巻が走り続ける間も、失敗のたびに
+    // 数百 MB を溜めない。待機中のものがあれば消さない（再投入された転送の
+    // 書きかけを Dart から見分けられない。`tempSweepScopeFor` 参照）。
+    // 走っているかは記録（最後に届いた状態）で見るので、一覧も記録も要る。
+    final scope = tempSweepScopeFor(await snapshot(), staleOnly: staleOnly);
+    if (scope == TempSweepScope.none) {
+      debugPrint('[transfer] temp sweep skipped: a transfer is waiting');
+      return;
+    }
     // 一時停止中 / 再試行待ちの転送の書きかけは「再開」で続きに使うので残す。
     final keep = {
       for (final data in await _storage.retrieveAllResumeData()) data.data,
@@ -263,7 +263,7 @@ class BackgroundArchiveTransport implements ArchiveTransport {
     final deleted = await deleteTransferTempFiles(
       await _tempDirectories(),
       keepPaths: keep,
-      olderThan: busy ? transferTempStaleAge : null,
+      olderThan: scope == TempSweepScope.stale ? transferTempStaleAge : null,
     );
     if (deleted > 0) debugPrint('[transfer] swept $deleted temp files');
   }

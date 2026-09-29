@@ -89,6 +89,18 @@ class DownloadQueue extends _$DownloadQueue {
   /// （印を付けるだけ）ので、待機中のものは取り消しに回す。
   final _runningTasks = <int>{};
 
+  /// 今の転送が一度でも走った（`running` / 進捗 / paused が届いた）巻。
+  ///
+  /// 待機中の巻を中断するとき、取り消すか一時停止の印に任せるかを決める
+  /// （F11）。Android の時間切れ（`BDPlugin.doEnqueue` へ直接渡す）と
+  /// Wi-Fi 設定の変更（`localResumeData`）による再投入は、再開データを
+  /// ネイティブ側にしか持たず Dart の保存領域に載せない。パッケージの
+  /// 再開データの有無だけで決めると、その巻の中断が取り消しになり、
+  /// 書きかけを捨てて先頭から落とし直しになる。印を付けておけば、走り
+  /// 出したときにネイティブの再開データで続きを取れる状態のまま止まる。
+  /// 新しく積んだ（先頭から取る）とき・転送を手放したときに外す。
+  final _hadProgress = <int>{};
+
   /// OS に一時停止を頼んでいる最中の巻（その往復の間に「再開」が押されうる）。
   final _pausing = <int>{};
 
@@ -105,7 +117,7 @@ class DownloadQueue extends _$DownloadQueue {
   ///
   /// 「止めた」はネイティブが受け付けただけで、再開データは止め終わりの
   /// paused と一緒に届く。その前に resume すると断られ、先頭から積み直しに
-  /// なる（同じ ID なので、遅れて届く paused も新しい転送と取り違える）。
+  /// なる。
   final _pausedEventPending = <int>{};
 
   /// 起動時の照合の前に届いた完了（taskId）。
@@ -283,7 +295,9 @@ class DownloadQueue extends _$DownloadQueue {
               snapshots = await transport.snapshot();
             } on Object catch (error) {
               // 一覧が取れなければ「何も走っていない」とみなして積み直す。
-              // 同じ ID で積み直すので、走っていたとしても同じ転送になる。
+              // 走っていた場合は二重になるが、古い方は「今の転送」ではない
+              // ので、届いた完了 / 失敗は取り込まずに捨てる（書き込み先は
+              // 同じ世代なので消さない）。
               debugPrint('[downloads] snapshot failed: $error');
               snapshots = const [];
             }
@@ -401,7 +415,13 @@ class DownloadQueue extends _$DownloadQueue {
       // それでも取り消すと、canceled は最終状態なのでパッケージが再開データを
       // 捨て、書きかけごと先頭から落とし直しになる。
       wasRunning = _runningTasks.contains(volumeId);
-      final canPause = wasRunning || await _hasResumeData(task);
+      // 一度走った巻は、Dart から見えなくてもネイティブが再開データを
+      // 持っている（[_hadProgress]）。再起動でそれを忘れた後は、ユーザーの
+      // 一時停止で Dart に届いた再開データで判断する。
+      final canPause =
+          wasRunning ||
+          _hadProgress.contains(volumeId) ||
+          await _hasResumeData(task);
       if (!ref.mounted ||
           _tasks[volumeId] != task ||
           _resumeRequested.contains(volumeId)) {
@@ -737,14 +757,19 @@ class DownloadQueue extends _$DownloadQueue {
     download = state.value?[volumeId];
     if (download == null || !download.isActive) return;
 
+    // 投入のたびに新しい ID にする（[ArchiveTaskId] のノンス参照）。前の
+    // 転送に残った Android の一時停止の印で、この転送が止まらないように。
     final task = ArchiveTaskId(
       volumeId: volumeId,
       filesVersion: manifest.filesVersion,
       sessionTag: tag,
+      nonce: ArchiveTaskId.newNonce(),
     );
     // 投入の前に登録する（直後に届くイベントを「今の転送」と判断できるように）。
     _tasks[volumeId] = task;
     _liveTasks.add(volumeId);
+    // 先頭から取る転送。前の転送が走った記録は引き継がない。
+    _hadProgress.remove(volumeId);
     _reservedBytes[volumeId] = manifest.archiveBytes;
     _persistedBytes[volumeId] = 0;
     // 世代にかかわる項目（filesVersion / pageCount / archive_etag）は**検証が
@@ -900,6 +925,7 @@ class DownloadQueue extends _$DownloadQueue {
         if (!isCurrent) return;
         _liveTasks.add(volumeId);
         _runningTasks.add(volumeId);
+        _hadProgress.add(volumeId);
         if (download != null &&
             download.isActive &&
             download.status != VolumeDownloadStatus.downloading) {
@@ -913,8 +939,10 @@ class DownloadQueue extends _$DownloadQueue {
         // 反映による一時的な停止で、ネイティブがすぐ再投入する。どちらも
         // 台帳は変えない（「中断中」にすると、勝手に止まったように見える）。
         if (!isCurrent) return;
-        // 時間切れの再投入が走り出すまでは一時停止できない（F11）。
+        // 時間切れの再投入が走り出すまでは走っていない（F11）。ただし
+        // 再開データはネイティブにあるので、中断は印に任せる（[_hadProgress]）。
         _runningTasks.remove(volumeId);
+        _hadProgress.add(volumeId);
         _pausedEventPending.remove(volumeId);
         if (_pausing.contains(volumeId)) _pausedSeen.add(volumeId);
         if (_resumeOnPaused.remove(volumeId)) {
@@ -938,7 +966,7 @@ class DownloadQueue extends _$DownloadQueue {
           await _forgetQuietly(task);
           return;
         }
-        // 自分で取り消したもの。同じ ID で積み直していれば（isCurrent）触らない。
+        // 自分で取り消したもの。まだ今の転送なら（isCurrent）触らない。
         if (isCurrent && !expected) _clearTask(volumeId);
         if (isCurrent && expected) return;
         await _deleteStagingUnlessCurrent(task);
@@ -951,6 +979,8 @@ class DownloadQueue extends _$DownloadQueue {
         }
         _liveTasks.remove(volumeId);
         _runningTasks.remove(volumeId);
+        // 失敗でパッケージは再開データを捨てている（積み直しは先頭から）。
+        _hadProgress.remove(volumeId);
         if (download == null || !download.isActive) {
           _clearTask(volumeId);
           await _forgetQuietly(task);
@@ -968,6 +998,7 @@ class DownloadQueue extends _$DownloadQueue {
         if (isCurrent) {
           _liveTasks.remove(volumeId);
           _runningTasks.remove(volumeId);
+          _hadProgress.remove(volumeId);
         }
         _scheduleInstall(task);
     }
@@ -1013,6 +1044,7 @@ class DownloadQueue extends _$DownloadQueue {
     // 進捗が届く = 走っている（`running` を取りこぼしても一時停止できる）。
     _liveTasks.add(volumeId);
     _runningTasks.add(volumeId);
+    _hadProgress.add(volumeId);
     if (totalBytes > 0) {
       _reservedBytes[volumeId] = math.max(0, totalBytes - received);
     }
@@ -1161,8 +1193,7 @@ class DownloadQueue extends _$DownloadQueue {
   ///
   /// 再開データは paused と一緒に届くので、その前の resume は断られる
   /// （パッケージの `resume` は再開データが無ければ `false`）。断られて
-  /// 積み直すと書きかけを捨てて先頭からになり、遅れて届く paused も同じ ID の
-  /// 新しい転送と取り違える。
+  /// 積み直すと書きかけを捨てて先頭からになる。
   bool _deferResumeUntilPaused(int volumeId) {
     if (!_pausedEventPending.contains(volumeId)) return false;
     _resumeOnPaused.add(volumeId);
@@ -1485,8 +1516,20 @@ class DownloadQueue extends _$DownloadQueue {
     final failures = <ArchiveTaskId>[];
     final discards = <(TransferSnapshot, ArchiveTaskId?)>[];
     for (final MapEntry(key: volumeId, value: tasks) in byVolume.entries) {
-      // 同じ巻に世代違いが残っていたら、新しい世代だけを見る。
-      tasks.sort((a, b) => b.$1.filesVersion.compareTo(a.$1.filesVersion));
+      // 同じ巻に世代違いが残っていたら、新しい世代だけを見る。同じ世代の
+      // 別の投入（ID のノンス違い）が残っていたら、今の転送 → 書き上がった
+      // もの → 生きているもの → 続きを取れるもの、の順に 1 つだけ選び、
+      // 残りは捨てる（生きていれば取り消す。二重に落とさない）。
+      final current = _tasks[volumeId];
+      tasks.sort((a, b) {
+        final byVersion = b.$1.filesVersion.compareTo(a.$1.filesVersion);
+        if (byVersion != 0) return byVersion;
+        final byCurrent = (b.$1 == current ? 1 : 0).compareTo(
+          a.$1 == current ? 1 : 0,
+        );
+        if (byCurrent != 0) return byCurrent;
+        return _reconcileRank(a.$2.state).compareTo(_reconcileRank(b.$2.state));
+      });
       for (final (task, snapshot) in tasks.skip(1)) {
         discards.add((snapshot, task));
       }
@@ -1518,6 +1561,7 @@ class DownloadQueue extends _$DownloadQueue {
           );
           if (snapshot.state == TransferState.running) {
             _runningTasks.add(volumeId);
+            _hadProgress.add(volumeId);
             await _save(
               download.copyWith(status: VolumeDownloadStatus.downloading),
             );
@@ -1592,6 +1636,16 @@ class DownloadQueue extends _$DownloadQueue {
     }
   }
 
+  /// 照合で同じ巻・同じ世代の転送が複数あるときの優先順（小さいほど優先）。
+  static int _reconcileRank(TransferState state) => switch (state) {
+    TransferState.completed => 0,
+    TransferState.running => 1,
+    TransferState.enqueued || TransferState.waitingToRetry => 2,
+    TransferState.paused => 3,
+    TransferState.failed => 4,
+    TransferState.canceled || TransferState.notFound => 5,
+  };
+
   Future<void> _discardSnapshot(
     TransferSnapshot snapshot,
     ArchiveTaskId? task, {
@@ -1638,6 +1692,7 @@ class DownloadQueue extends _$DownloadQueue {
     _tasks.remove(volumeId);
     _liveTasks.remove(volumeId);
     _runningTasks.remove(volumeId);
+    _hadProgress.remove(volumeId);
     _awaitingInstall.remove(volumeId);
     _installing.remove(volumeId);
     _reservedBytes.remove(volumeId);
@@ -1852,6 +1907,7 @@ class DownloadQueue extends _$DownloadQueue {
     _tasks.clear();
     _liveTasks.clear();
     _runningTasks.clear();
+    _hadProgress.clear();
     _pausing.clear();
     _resumeRequested.clear();
     _pausedSeen.clear();

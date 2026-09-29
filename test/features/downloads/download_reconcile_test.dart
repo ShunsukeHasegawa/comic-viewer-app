@@ -36,12 +36,17 @@ void main() {
     tag = await harness.store.readSessionTag();
   });
 
-  String taskIdOf(int id, {int filesVersion = 111, String? sessionTag}) =>
-      ArchiveTaskId(
-        volumeId: id,
-        filesVersion: filesVersion,
-        sessionTag: sessionTag ?? tag,
-      ).toString();
+  String taskIdOf(
+    int id, {
+    int filesVersion = 111,
+    String? sessionTag,
+    String nonce = 'n0',
+  }) => ArchiveTaskId(
+    volumeId: id,
+    filesVersion: filesVersion,
+    sessionTag: sessionTag ?? tag,
+    nonce: nonce,
+  ).toString();
 
   Future<void> saveRow(
     VolumeDownloadStatus status, {
@@ -109,6 +114,27 @@ void main() {
       );
       await settle();
       expect(downloadOf(container)!.status, VolumeDownloadStatus.completed);
+    });
+
+    test('同じ世代の転送が 2 本残っていたら、書き上がった方を確定してもう一方は取り消す', () async {
+      // ID は投入ごとに変わるので、取り消しと積み直しが行き違うと同じ巻・同じ
+      // 世代の転送が 2 本残りうる。先に見つかった方を選ぶと、書き上がった ZIP を
+      // 捨てて走っている方を待つ / 同じ巻を 2 本で落とすことになる。
+      await saveRow(VolumeDownloadStatus.downloading);
+      await writeManifest();
+      stagingOf(volumeId).writeAsBytesSync(harness.api.archiveBytes);
+      final running = taskIdOf(volumeId, nonce: 'a');
+      final completed = taskIdOf(volumeId, nonce: 'b');
+      snapshots({
+        running: TransferState.running,
+        completed: TransferState.completed,
+      });
+
+      final container = await start();
+
+      expect(downloadOf(container)!.status, VolumeDownloadStatus.completed);
+      expect(harness.transport.canceled, [running]);
+      expect(harness.transport.enqueued, isEmpty);
     });
 
     test('アプリが死んでいる間に完了した巻は、起動時にネットワーク無しで確定する', () async {

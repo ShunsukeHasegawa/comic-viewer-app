@@ -70,9 +70,11 @@ abstract interface class ArchiveTransport {
   /// どの転送も指していないパッケージの一時ファイルを消す。
   ///
   /// 通信の失敗で終わった転送の書きかけ（Android）が残り続けないように。
-  /// [staleOnly] のとき、またはネイティブに生きている転送があるときは、
+  /// [staleOnly] のとき、またはネイティブに走っている転送があるときは、
   /// しばらく書き込まれていないもの（`transferTempStaleAge`）だけを消す
   /// （走行中の書きかけも同じ名前で、消すと完了時の移動が失敗する）。
+  /// ネイティブに待機中の転送があるときは何も消さない（再投入された転送の
+  /// 書きかけは Dart から見分けられない。`tempSweepScopeFor` 参照）。
   /// **投入（[enqueue]）と並べて呼ばない**こと。一覧を見てから消すまでの
   /// 間に積まれた転送の書きかけを消しうる（呼び出し側が直列にする）。
   Future<void> sweepOrphanTempFiles({bool staleOnly = false});

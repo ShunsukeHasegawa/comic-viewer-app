@@ -82,7 +82,12 @@ class FakeVolumesApi implements VolumesApi {
 ///   データが無ければ断る）。failed / canceled / completed を流すと捨てる
 ///   （`_clearPauseResumeInfo`）。[resume] しても最終状態までは残る。
 /// - [pause] は、待機しているだけのタスクにも `true` を返す（Android の
-///   `pauseTaskWithId` は印を付けるだけ）。
+///   `pauseTaskWithId` は印を付けるだけ）。印（[pauseMarks]）は ID ごとに
+///   残り、取り消しでも投入でも消えない。消えるのは、その ID の転送が
+///   実際に止まったとき（印を見た paused を流したとき）だけ。
+/// - 再開データが Dart に届くのは、印を見て止まった paused だけ
+///   （`processResumeData`）。印の無い paused（9 分の時間切れ）や Wi-Fi
+///   設定の変更による再投入では、再開データはネイティブ側にしか無い。
 /// - [enqueue] の途中（[onEnqueue]）に届いた [cancel] は空振りする（ネイティブは
 ///   まだタスクを知らず、知らない ID の取り消しを覚えておかない）。
 class FakeArchiveTransport implements ArchiveTransport {
@@ -145,6 +150,12 @@ class FakeArchiveTransport implements ArchiveTransport {
   /// 再開データがあるタスク。
   final _resumeData = <String>{};
 
+  /// Android の一時停止の印（`BDPlugin.pausedTaskIds`）。
+  final _pauseMarks = <String>{};
+
+  /// 一時停止の印が残っている ID（この ID の転送は走り出すとすぐ止まる）。
+  Set<String> get pauseMarks => {..._pauseMarks};
+
   /// ネイティブが受け付けて、取り消されずに残っているタスク（誰も追って
   /// いない転送が裏で走り続けていないかを確かめる）。
   Set<String> get nativeTaskIds => {..._native};
@@ -182,6 +193,7 @@ class FakeArchiveTransport implements ArchiveTransport {
   Future<bool> pause(String taskId) async {
     paused.add(taskId);
     await onPause?.call(taskId);
+    if (pauseResult) _pauseMarks.add(taskId);
     return pauseResult;
   }
 
@@ -255,7 +267,8 @@ class FakeArchiveTransport implements ArchiveTransport {
   /// OS から届くイベントを流す。
   ///
   /// 本物と同じく、終わった（失敗 / 取り消し / 完了）タスクはネイティブから
-  /// 消え、失敗と取り消しでは再開データも捨てられる。
+  /// 消え、失敗と取り消しでは再開データも捨てられる。paused で Dart に
+  /// 再開データが届くのは、一時停止の印を見て止まったときだけ。
   void emit(TransferEvent event) {
     if (event case TransferStateChanged(:final taskId, :final state)) {
       switch (state) {
@@ -265,7 +278,8 @@ class FakeArchiveTransport implements ArchiveTransport {
           _native.remove(taskId);
           _resumeData.remove(taskId);
         case TransferState.paused:
-          _resumeData.add(taskId);
+          // 印を見て止まった（ユーザーの一時停止）ときだけ再開データが届く。
+          if (_pauseMarks.remove(taskId)) _resumeData.add(taskId);
         case _:
       }
     }

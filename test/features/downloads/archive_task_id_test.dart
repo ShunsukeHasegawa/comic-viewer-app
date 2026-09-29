@@ -7,9 +7,10 @@ void main() {
       volumeId: 12,
       filesVersion: 1700000000,
       sessionTag: 'a1B2c3D4e5F6',
+      nonce: 'k3x9',
     );
     final text = id.toString();
-    expect(text, 'v12.f1700000000.sa1B2c3D4e5F6');
+    expect(text, 'v12.f1700000000.sa1B2c3D4e5F6.nk3x9');
     expect(ArchiveTaskId.tryParse(text), id);
   });
 
@@ -23,26 +24,60 @@ void main() {
     expect(ArchiveTaskId.tryParse(''), isNull);
     expect(ArchiveTaskId.tryParse('v12.f1'), isNull);
     expect(ArchiveTaskId.tryParse('v12.f1.s'), isNull);
-    expect(ArchiveTaskId.tryParse('v12.f1.sabc.extra'), isNull);
-    expect(ArchiveTaskId.tryParse('vx.f1.sabc'), isNull);
-    expect(ArchiveTaskId.tryParse(' v12.f1.sabc'), isNull);
-    expect(ArchiveTaskId.tryParse('v12.f1.sab-c'), isNull);
+    expect(ArchiveTaskId.tryParse('v12.f1.sabc'), isNull);
+    expect(ArchiveTaskId.tryParse('v12.f1.sabc.n'), isNull);
+    expect(ArchiveTaskId.tryParse('v12.f1.sabc.nx.extra'), isNull);
+    expect(ArchiveTaskId.tryParse('vx.f1.sabc.nx'), isNull);
+    expect(ArchiveTaskId.tryParse(' v12.f1.sabc.nx'), isNull);
+    expect(ArchiveTaskId.tryParse('v12.f1.sab-c.nx'), isNull);
+    expect(ArchiveTaskId.tryParse('v12.f1.sabc.n-x'), isNull);
   });
 
   test('負の値はありえない巻・世代なので null にする', () {
-    expect(ArchiveTaskId.tryParse('v-12.f1.sabc'), isNull);
-    expect(ArchiveTaskId.tryParse('v12.f-1.sabc'), isNull);
+    expect(ArchiveTaskId.tryParse('v-12.f1.sabc.nx'), isNull);
+    expect(ArchiveTaskId.tryParse('v12.f-1.sabc.nx'), isNull);
   });
 
-  test('巻・世代・セッションのどれかが違えば別のタスクとして扱う', () {
-    const base = ArchiveTaskId(volumeId: 1, filesVersion: 2, sessionTag: 'a');
-    expect(
-      base,
-      isNot(const ArchiveTaskId(volumeId: 1, filesVersion: 3, sessionTag: 'a')),
+  test('巻・世代・セッション・投入のどれかが違えば別のタスクとして扱う', () {
+    const base = ArchiveTaskId(
+      volumeId: 1,
+      filesVersion: 2,
+      sessionTag: 'a',
+      nonce: 'x',
     );
     expect(
       base,
-      isNot(const ArchiveTaskId(volumeId: 1, filesVersion: 2, sessionTag: 'b')),
+      isNot(
+        const ArchiveTaskId(
+          volumeId: 1,
+          filesVersion: 3,
+          sessionTag: 'a',
+          nonce: 'x',
+        ),
+      ),
+    );
+    expect(
+      base,
+      isNot(
+        const ArchiveTaskId(
+          volumeId: 1,
+          filesVersion: 2,
+          sessionTag: 'b',
+          nonce: 'x',
+        ),
+      ),
+    );
+    expect(
+      base,
+      isNot(
+        const ArchiveTaskId(
+          volumeId: 1,
+          filesVersion: 2,
+          sessionTag: 'a',
+          nonce: 'y',
+        ),
+      ),
+      reason: 'Android の一時停止の印は ID ごとに残る。投入し直した転送を前の印で止めない',
     );
     expect(
       base.hashCode,
@@ -50,7 +85,18 @@ void main() {
         volumeId: 1,
         filesVersion: 2,
         sessionTag: 'a',
+        nonce: 'x',
       ).hashCode,
     );
+  });
+
+  test('投入ごとのノンスは ID に埋め込める英数字で、毎回変わる', () {
+    // 連番だと、Flutter エンジンだけ作り直されたときに 0 から重なり、
+    // 生き残ったネイティブの印に当たる。
+    final nonces = {for (var i = 0; i < 100; i++) ArchiveTaskId.newNonce()};
+    expect(nonces, hasLength(100));
+    for (final nonce in nonces) {
+      expect(nonce, matches(RegExp(r'^[a-z0-9]+$')));
+    }
   });
 }

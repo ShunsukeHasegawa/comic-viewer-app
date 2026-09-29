@@ -742,9 +742,15 @@ void main() {
 
       await scope.queue.resume(volumeId);
       await settle();
+      final resubmitted = scope.harness.transport.taskIdOf(volumeId);
+      expect(
+        resubmitted,
+        isNot(taskId),
+        reason: '取り消したタスクに付いた一時停止の印を引き継がない（投入ごとに ID を変える）',
+      );
       expect(scope.harness.transport.nativeTaskIds, {
-        taskId,
-      }, reason: '再開で同じ ID を二重に積まない（元のタスクは取り消し済み）');
+        resubmitted,
+      }, reason: '再開で二重に積まない（元のタスクは取り消し済み）');
     });
 
     test('時間切れで再投入を待つ巻の中断は、再開データを捨てないよう取り消さずに一時停止の印に任せる', () async {
@@ -777,6 +783,67 @@ void main() {
 
       expect(scope.harness.transport.resumed, [taskId]);
       expect(scope.harness.transport.enqueued, hasLength(1));
+    });
+
+    test('Wi-Fi 設定の変更で再投入されて待機中の巻を中断しても、取り消さずに一時停止の印に任せる', () async {
+      // Android は Wi-Fi 限定への切り替えで走行中の転送を止めて積み直す。
+      // 再開データはネイティブ（localResumeData）にしか無く、paused も
+      // 握りつぶされて enqueued だけが届く。Dart からは再開データが見えない。
+      final scope = setUpQueue();
+      await enqueueAndSubmit(scope);
+      final taskId = scope.harness.transport.taskIdOf(volumeId);
+      scope.harness.transport.setState(volumeId, TransferState.running);
+      scope.harness.transport.emit(
+        TransferProgressed(taskId, received: 100, total: 1000),
+      );
+      await settle();
+      scope.harness.transport.setState(volumeId, TransferState.enqueued);
+      await settle();
+      expect(await scope.harness.transport.hasResumeData(taskId), isFalse);
+
+      await scope.queue.pause(volumeId);
+      await settle();
+
+      expect(
+        scope.harness.transport.canceled,
+        isEmpty,
+        reason: '取り消すと書きかけごと捨て、Wi-Fi に戻ってから先頭から落とし直しになる',
+      );
+      expect(scope.harness.transport.paused, [taskId]);
+      expect(downloadOf(scope.container)!.status, VolumeDownloadStatus.paused);
+
+      // Wi-Fi に戻って走り出し、印を見て止まる（ここで再開データが届く）。
+      scope.harness.transport.setState(volumeId, TransferState.paused);
+      await settle();
+      await scope.queue.resume(volumeId);
+      await settle();
+
+      expect(scope.harness.transport.resumed, [taskId]);
+      expect(scope.harness.transport.enqueued, hasLength(1));
+    });
+
+    test('一時停止の印が残ったまま削除した巻を積み直しても、新しい転送は印で止まらない', () async {
+      // Android の印（pausedTaskIds）は取り消しでも投入でも消えない。同じ ID で
+      // 積み直すと最初の受信で止まり、台帳は待機中のまま誰も再開しない。
+      final scope = setUpQueue();
+      await enqueueAndSubmit(scope);
+      final first = scope.harness.transport.taskIdOf(volumeId);
+      scope.harness.transport.setState(volumeId, TransferState.running);
+      await settle();
+      // 時間切れで再投入され、走り出す前に中断 → 削除された。
+      scope.harness.transport.setState(volumeId, TransferState.enqueued);
+      await settle();
+      await scope.queue.pause(volumeId);
+      await settle();
+      await scope.queue.remove(volumeId);
+      await settle();
+      expect(scope.harness.transport.pauseMarks, contains(first));
+
+      await enqueueAndSubmit(scope);
+
+      final second = scope.harness.transport.taskIdOf(volumeId);
+      expect(second, isNot(first));
+      expect(scope.harness.transport.pauseMarks, isNot(contains(second)));
     });
 
     test('続きから再開して待機に戻った巻を中断しても、再開データを捨てない', () async {
