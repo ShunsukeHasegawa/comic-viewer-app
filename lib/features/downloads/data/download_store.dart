@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
+import 'package:drift/drift.dart' show InsertMode;
 import 'package:path/path.dart' as p;
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
@@ -26,10 +28,15 @@ part 'download_store.g.dart';
 ///
 /// ファイル構成（アプリ専用領域の `downloads/` 配下）:
 /// ```
-/// downloads/{volumeId}/{filesVersion}.zip       完了したアーカイブ
-/// downloads/{volumeId}/{filesVersion}.zip.part  取得中（再開の起点）
-/// downloads/{volumeId}/{filesVersion}.json      マニフェスト（#11 のページ解決用）
+/// downloads/{volumeId}/{filesVersion}.zip           完了したアーカイブ
+/// downloads/{volumeId}/{filesVersion}.zip.download  OS の転送が書いている途中（#10）
+/// downloads/{volumeId}/{filesVersion}.json          マニフェスト（#11 のページ解決用）
+/// downloads/{volumeId}/{filesVersion}.zip.part      旧 Dio 経路の途中ファイル（[sweep] で消す）
 /// ```
+///
+/// 取得中のファイルを `.part` ではなく `.zip.download` にしたのは、旧 Dio 経路の
+/// 部分ファイル（Range で続きを足せる前提のもの）と、OS の転送が握っている
+/// ファイルを名前だけで区別するため。混ざると「どちらの続きか」が分からない。
 class DownloadStore {
   DownloadStore({
     required this.database,
@@ -43,6 +50,17 @@ class DownloadStore {
   /// 現在時刻（テストから決められるようにする）。
   final DateTime Function() now;
 
+  /// ログインセッションごとのタグ（転送タスク ID に埋め込む）の保存キー。
+  static const sessionTagKey = 'downloads.session_tag';
+
+  static const _sessionTagLength = 12;
+  static const _sessionTagAlphabet =
+      'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  static final _sessionTagPattern = RegExp(r'^[A-Za-z0-9]+$');
+
+  static const _stagingSuffix = '.zip.download';
+  static const _legacyPartSuffix = '.zip.part';
+
   Directory volumeDirectory(int volumeId) =>
       Directory(p.join(directories.downloads.path, '$volumeId'));
 
@@ -50,10 +68,36 @@ class DownloadStore {
   File archiveFile({required int volumeId, required int filesVersion}) =>
       File(p.join(volumeDirectory(volumeId).path, '$filesVersion.zip'));
 
-  /// 取得中の一時ファイル。**完了するまで拡張子を変えない**ので、
-  /// 途中のデータが「ダウンロード済み」と誤認されることがない。
-  File partFile({required int volumeId, required int filesVersion}) =>
-      File(p.join(volumeDirectory(volumeId).path, '$filesVersion.zip.part'));
+  /// OS の転送（background_downloader）が書き込む一時ファイル。
+  ///
+  /// 完了して検証が通るまでは `.zip` にしないので、途中のデータが
+  /// 「ダウンロード済み」と誤認されることがない。
+  File stagingFile({required int volumeId, required int filesVersion}) => File(
+    p.join(volumeDirectory(volumeId).path, stagingFilename(filesVersion)),
+  );
+
+  /// [stagingFile] のファイル名（転送の依頼にはディレクトリと分けて渡す）。
+  static String stagingFilename(int filesVersion) =>
+      '$filesVersion$_stagingSuffix';
+
+  /// [stagingFile] の置き場を、application support からの相対パスで返す。
+  ///
+  /// 転送の依頼に絶対パスを渡さないのは、iOS ではアプリの更新でコンテナの
+  /// パスが変わり、アプリが死んでいる間に完了した転送の保存先がずれるため。
+  /// OS 側は同じ相対パスを application support から解決するので、
+  /// [AppDirectories.downloads] が `support/downloads` であることが前提になる
+  /// （変えるとここで作る相対パスと実際の置き場が食い違う）。区切りは OS に
+  /// かかわらず `/`（Android / iOS のネイティブ側がそのまま解釈する）。
+  String stagingDirectoryRelative(int volumeId) {
+    assert(
+      p.equals(
+        directories.downloads.path,
+        p.join(directories.support.path, 'downloads'),
+      ),
+      'downloads は application support 直下でなければならない',
+    );
+    return 'downloads/$volumeId';
+  }
 
   File manifestFile({required int volumeId, required int filesVersion}) =>
       File(p.join(volumeDirectory(volumeId).path, '$filesVersion.json'));
@@ -144,7 +188,7 @@ class DownloadStore {
     if (!directory.existsSync()) return;
     final keep = {
       '$keepFilesVersion.zip',
-      '$keepFilesVersion.zip.part',
+      stagingFilename(keepFilesVersion),
       '$keepFilesVersion.json',
     };
     for (final entity in directory.listSync()) {
@@ -156,6 +200,160 @@ class DownloadStore {
         // 消せなくても次の取得の邪魔はしない。
       }
     }
+  }
+
+  /// 今のログインセッションのタグ。無ければ作って保存する。
+  ///
+  /// タグは転送タスクの ID に入り、アプリの再起動を跨いで「自分のセッションの
+  /// 転送か」を見分ける材料になる。そのため**毎回作り直さず**永続化する
+  /// （再起動のたびに変わると、アプリが死んでいる間に終わった転送を
+  /// 取り込めなくなる）。
+  Future<String> readSessionTag() async {
+    final stored = await _readSessionTagRow();
+    if (stored != null && _sessionTagPattern.hasMatch(stored)) return stored;
+
+    final generated = _generateSessionTag();
+    if (stored == null) {
+      // 同時に呼ばれても 1 つのタグに揃うよう、先に書いた方を正とする。
+      await database
+          .into(database.settings)
+          .insert(
+            SettingRow(key: sessionTagKey, value: generated),
+            mode: InsertMode.insertOrIgnore,
+          );
+      return await _readSessionTagRow() ?? generated;
+    }
+    // 壊れた値はタスク ID に埋め込めない（parse できない）ので上書きする。
+    await _writeSessionTag(generated);
+    return generated;
+  }
+
+  /// タグを作り直す（ログアウト時）。前のユーザーの転送の完了が後から
+  /// 届いても、タグが違うので取り込まれない（#15）。
+  Future<String> rotateSessionTag() async {
+    final generated = _generateSessionTag();
+    await _writeSessionTag(generated);
+    return generated;
+  }
+
+  Future<String?> _readSessionTagRow() async {
+    final row = await (database.select(
+      database.settings,
+    )..where((table) => table.key.equals(sessionTagKey))).getSingleOrNull();
+    return row?.value;
+  }
+
+  Future<void> _writeSessionTag(String value) => database
+      .into(database.settings)
+      .insertOnConflictUpdate(SettingRow(key: sessionTagKey, value: value));
+
+  /// 暗号論的な乱数にする。タスク ID は OS 側の記録に残るので、前の
+  /// セッションのタグと偶然一致しない（= 前のユーザーの転送を取り込まない）
+  /// ことが重要。
+  static String _generateSessionTag() {
+    final random = Random.secure();
+    return String.fromCharCodes([
+      for (var i = 0; i < _sessionTagLength; i++)
+        _sessionTagAlphabet.codeUnitAt(
+          random.nextInt(_sessionTagAlphabet.length),
+        ),
+    ]);
+  }
+
+  /// 台帳とも生きている転送とも結びつかないファイルを片付ける（起動時の
+  /// 突き合わせの最後に呼ぶ）。
+  ///
+  /// 消すもの:
+  /// - 台帳に無い巻のディレクトリ（削除の途中で落ちた・ログアウト後の残り）
+  /// - [liveStagingPaths]（絶対パス）に無い `.zip.download`（OS 側のタスクが
+  ///   消えた転送の残り）
+  /// - 旧 Dio 経路の `.zip.part`（新しい経路では続きに使えない）
+  /// - 台帳の世代でも、生きている転送の世代でもない `{v}.json`
+  ///
+  /// 台帳の世代の `{v}.zip` は消さない（オフラインで読める実体そのもの）。
+  /// それ以外の世代の `.zip` は、取り直しの完了時に [deleteOtherVersions] が
+  /// 片付けるのでここでは触らない（判断材料が少ない場面で ZIP を消さない）。
+  ///
+  /// 掃除は最善努力で、**例外は投げない**。消せなかったものは次の起動で
+  /// もう一度試せばよく、ここで失敗させると起動時の復元が止まってしまう。
+  Future<void> sweep({
+    required Map<int, VolumeDownload> ledger,
+    required Set<String> liveStagingPaths,
+  }) async {
+    final root = directories.downloads;
+    try {
+      if (!root.existsSync()) return;
+      final live = {for (final path in liveStagingPaths) p.normalize(path)};
+      for (final entity in root.listSync()) {
+        if (entity is! Directory) continue;
+        final volumeId = int.tryParse(p.basename(entity.path));
+        // 数字でない名前は巻のディレクトリではないので触らない。
+        if (volumeId == null) continue;
+        await _sweepVolume(entity, ledger[volumeId], live);
+      }
+    } on FileSystemException {
+      // 一覧すら取れない場合も、次の起動で試し直せばよい。
+    }
+  }
+
+  Future<void> _sweepVolume(
+    Directory directory,
+    VolumeDownload? row,
+    Set<String> live,
+  ) async {
+    try {
+      final liveHere = <String>{};
+      final liveVersions = <int>{};
+      for (final path in live) {
+        if (!p.equals(p.dirname(path), directory.path)) continue;
+        final name = p.basename(path);
+        liveHere.add(name);
+        if (_versionOf(name, _stagingSuffix) case final version?) {
+          liveVersions.add(version);
+        }
+      }
+
+      // 台帳に無く、生きている転送も無い巻は丸ごと要らない。生きている転送が
+      // あれば残す（突き合わせで取り消し損ねても、書き込み先を消さない）。
+      if (row == null && liveHere.isEmpty) {
+        await directory.delete(recursive: true);
+        return;
+      }
+
+      for (final entity in directory.listSync()) {
+        if (entity is! File) continue;
+        final name = p.basename(entity.path);
+        if (!_isSweepable(name, row, liveHere, liveVersions)) continue;
+        try {
+          await entity.delete();
+        } on FileSystemException {
+          // 1 件消せなくても残りは消す。
+        }
+      }
+    } on FileSystemException {
+      // 途中で消えた・読めないディレクトリは次の起動に回す。
+    }
+  }
+
+  static bool _isSweepable(
+    String name,
+    VolumeDownload? row,
+    Set<String> liveHere,
+    Set<int> liveVersions,
+  ) {
+    if (name.endsWith(_legacyPartSuffix)) return true;
+    if (name.endsWith(_stagingSuffix)) return !liveHere.contains(name);
+    final version = _versionOf(name, '.json');
+    if (version == null) return false;
+    // 転送中の世代の json は投入前に書いてある（アプリが死んでいる間に
+    // 完了しても、オフラインでページを解決できるように）ので残す。
+    return version != row?.filesVersion && !liveVersions.contains(version);
+  }
+
+  /// `{filesVersion}{suffix}` の形なら filesVersion、違えば `null`。
+  static int? _versionOf(String name, String suffix) {
+    if (!name.endsWith(suffix)) return null;
+    return int.tryParse(name.substring(0, name.length - suffix.length));
   }
 
   /// マニフェストを保存する（#11 がページ番号と拡張子の対応に使う）。

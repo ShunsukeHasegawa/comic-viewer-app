@@ -66,6 +66,22 @@ test/         lib と同じ構成。共通フェイクは test/support/
 - 「オフラインで読めるか」は台帳の `status` ではなく
   `VolumeDownload.hasInstalledArchive` で判断する。「更新あり」の取り直し中も
   旧世代の ZIP は端末に残っていて読める。
+- 巻の ZIP の転送は `ArchiveTransport`（`archiveTransportProvider`）だけ（#10）。
+  OS のバックグラウンド転送なのでアプリを閉じても続く。検証・rename・台帳の確定は
+  `DownloadQueue` に残す。`FileDownloader()` を他の場所で作らない（最初に作った側の
+  永続化ストアが使われ、再開データを引けなくなる）。テストでは `FakeArchiveTransport`
+  （`testOverrides` の既定）を使う。
+- 転送の taskId は `v{volumeId}.f{filesVersion}.s{sessionTag}`（`ArchiveTaskId`）。
+  タグはログアウトで作り直し、違うタグの完了は取り込まない（#15）。起動時は
+  `_reconcile` で OS 側の転送と台帳を突き合わせる（プラグインの自動再投入は使わない）。
+- 止める意図（中断）は**先に台帳へ書く**。OS から届く `paused` は台帳が中断なら
+  ユーザー操作、待機中 / 取得中のままなら 9 分の時間切れなどの一時的なものとして扱う。
+- ネイティブの 401 ですぐにログアウトさせない。マニフェストを Dio で取り直し、
+  失効していれば `AuthInterceptor` → `handleSessionExpired` の 1 経路に合流させる。
+- タスクの記録には Bearer が平文で残る（パッケージの永続領域）。ログアウトでは
+  `transport.reset()` をファイル削除より先に呼ぶ。
+- ネイティブの転送は https 前提。開発用の http サーバーでは ZIP のダウンロードは
+  失敗する（debug 用の cleartext 許可 / `NSAllowsLocalNetworking` は入れていない）。
 - テストはネットワークとプラットフォームチャネルを触らない。`test/support/test_scope.dart`
   の `testOverrides` / `createContainer` を使い、必要なフェイクは `test/support/` に足す。
 - テスト名・コメントは日本語で、「なぜ」を書く（「何を」はコードを読めば分かる）。

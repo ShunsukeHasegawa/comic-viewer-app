@@ -1,4 +1,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- API への通信。これまで debug / profile のマニフェストにしか無く、
+         release ビルドは通信できなかった。 -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- 巻の ZIP のバックグラウンド転送の進捗 / 完了通知（Android 13 以上。#10）。
+         無いと通知は黙って出ない（転送自体は続く）。
+         UIDT（priority 0）と foreground service は使わない（priority 5 +
+         allowPause で 9 分の時間切れを越える）ので、RUN_USER_INITIATED_JOBS /
+         FOREGROUND_SERVICE_DATA_SYNC は宣言しない。パッケージの receiver /
+         provider / service はライブラリのマニフェストからマージされる。 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
         android:label="comic_laz"
         android:name="${applicationName}"

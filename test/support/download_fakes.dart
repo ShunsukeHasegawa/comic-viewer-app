@@ -1,48 +1,37 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
+import 'package:comic_laz/core/config/app_config.dart';
+import 'package:comic_laz/core/device/app_resume_monitor.dart';
+import 'package:comic_laz/core/device/connectivity_monitor.dart';
 import 'package:comic_laz/core/device/network_kind_monitor.dart';
-import 'package:comic_laz/core/network/api_exception.dart';
 import 'package:comic_laz/data/api/volumes_api.dart';
 import 'package:comic_laz/domain/models/volume_manifest.dart';
+import 'package:comic_laz/features/auth/data/auth_store.dart';
 import 'package:comic_laz/features/downloads/application/download_queue.dart';
 import 'package:comic_laz/features/downloads/application/download_settings.dart';
+import 'package:comic_laz/features/downloads/data/archive_transport.dart';
 import 'package:comic_laz/features/downloads/data/archive_verifier.dart';
+import 'package:comic_laz/features/downloads/data/background_archive_transport.dart';
 import 'package:comic_laz/features/downloads/data/download_store.dart';
 import 'package:comic_laz/features/downloads/data/free_space_probe.dart';
+import 'package:comic_laz/features/downloads/domain/archive_task_id.dart';
 import 'package:comic_laz/features/downloads/domain/volume_download.dart';
 import 'package:comic_laz/features/offline/application/offline_detail_warmer.dart';
-import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 
+import 'auth_fakes.dart';
 import 'cache_fakes.dart';
 import 'progress_fakes.dart';
 
-/// 1 回の `downloadArchive` 呼び出しでの振る舞い。
+/// ネットワークを触らない [VolumesApi]（マニフェストだけ）。
 ///
-/// 「途中まで届いて切れた」「429 が返った」を作り分けるために使う。
-class FakeArchiveStep {
-  const FakeArchiveStep({this.bytes, this.error, this.onDelivered});
-
-  /// この呼び出しで書き足すバイト数（`null` は最後まで）。
-  final int? bytes;
-
-  /// 書いたあとに投げる例外。
-  final Object? error;
-
-  /// 書いたあとに実行する処理（テストから中断 / キャンセルを差し込む）。
-  final Future<void> Function()? onDelivered;
-}
-
-/// ネットワークを触らない [VolumesApi]。
-///
-/// `Range` の再開は本物と同じく**保存先ファイルの実サイズ**を起点にする
-/// （テストが「どこから続きを取りに行ったか」を実ファイルで検証できる）。
+/// ZIP 本体は OS の転送（[FakeArchiveTransport]）が運ぶ。
 class FakeVolumesApi implements VolumesApi {
   FakeVolumesApi({required this.manifest, required this.archiveBytes});
 
@@ -52,26 +41,20 @@ class FakeVolumesApi implements VolumesApi {
   /// 巻ごとのマニフェスト（無ければ [manifest]）。
   final manifests = <int, VolumeManifest>{};
 
-  /// 完成形の ZIP。
+  /// 完成形の ZIP（[FakeArchiveTransport.completeWith] に渡す既定値）。
   Uint8List archiveBytes;
 
   /// マニフェスト取得で投げる例外。
   Object? manifestError;
 
-  /// マニフェストを返す前に実行する処理（取得の準備中に中断を差し込む）。
+  /// マニフェストを返す前に実行する処理（取得の準備中に中断を差し込む /
+  /// 401 を受けた AuthInterceptor の振る舞いを模す）。
   Future<void> Function()? onManifest;
 
+  /// ZIP の配信元（Bearer を付けてよい相手かの判定に使われる）。
+  String archiveOrigin = DownloadHarness.apiBaseUrl;
+
   int manifestCalls = 0;
-  int archiveCalls = 0;
-
-  /// 呼び出しごとの振る舞い（足りなくなったら最後のものを使い続ける）。
-  List<FakeArchiveStep> steps = const [FakeArchiveStep()];
-
-  /// 各呼び出しでサーバーに要求した開始位置。
-  final requestedOffsets = <int>[];
-
-  /// 各呼び出しで送った `If-Range`。
-  final ifRangeEtags = <String?>[];
 
   @override
   Future<VolumeManifest> fetchManifest(int volumeId) async {
@@ -82,45 +65,163 @@ class FakeVolumesApi implements VolumesApi {
   }
 
   @override
-  Future<ArchiveDownloadResult> downloadArchive({
-    required int volumeId,
-    required File target,
-    String? ifRangeEtag,
-    ArchiveProgress? onProgress,
-    CancelToken? cancelToken,
+  Uri archiveUri(int volumeId) =>
+      Uri.parse('$archiveOrigin/api/v2/volumes/$volumeId/archive');
+}
+
+/// プラットフォームチャネルに触らない [ArchiveTransport]。
+///
+/// 呼ばれた操作を記録し、OS から届くイベントはテストから流す
+/// （[emit] / [completeWith]）。**画面のテストでも本物の `FileDownloader` を
+/// 作らせない**よう、`testOverrides` の既定にもなっている。
+class FakeArchiveTransport implements ArchiveTransport {
+  FakeArchiveTransport({this.supportDirectory, List<String>? log})
+    : log = log ?? [];
+
+  /// 転送先の基準（application support）。[completeWith] が書き込む先。
+  final Directory? supportDirectory;
+
+  /// 呼び出し順の記録（ファイル削除との前後を確かめる）。
+  final List<String> log;
+
+  final _events = StreamController<TransferEvent>.broadcast();
+
+  final startCalls = <({bool wifiOnly, TransferNotificationTexts texts})>[];
+  final wifiOnlyCalls = <bool>[];
+  final enqueued = <ArchiveTransferRequest>[];
+  final paused = <String>[];
+  final resumed = <String>[];
+  final canceled = <String>[];
+  final forgotten = <String>[];
+  int resetCount = 0;
+  int snapshotCalls = 0;
+  int notificationRequests = 0;
+
+  /// [snapshot] が返す一覧（起動時の照合の入力）。
+  List<TransferSnapshot> snapshotResult = const [];
+
+  bool enqueueResult = true;
+  bool pauseResult = true;
+  bool resumeResult = true;
+
+  /// [enqueue] の途中で起こすこと（投入の await の隙を作る）。
+  Future<void> Function(ArchiveTransferRequest request)? onEnqueue;
+
+  /// [reset] の途中で起こすこと（ログアウトの await の隙を作る）。
+  Future<void> Function()? onReset;
+
+  @override
+  Stream<TransferEvent> get events => _events.stream;
+
+  @override
+  Future<void> start({
+    required bool wifiOnly,
+    required TransferNotificationTexts texts,
   }) async {
-    archiveCalls++;
-    final offset = target.existsSync() ? target.lengthSync() : 0;
-    requestedOffsets.add(offset);
-    ifRangeEtags.add(ifRangeEtag);
+    log.add('start');
+    startCalls.add((wifiOnly: wifiOnly, texts: texts));
+  }
 
-    final step = steps[math.min(archiveCalls - 1, steps.length - 1)];
-    final end = math.min(
-      archiveBytes.length,
-      offset + (step.bytes ?? archiveBytes.length),
-    );
-    if (end > offset) {
-      final sink = target.openSync(mode: FileMode.writeOnlyAppend);
-      try {
-        sink.writeFromSync(archiveBytes.sublist(offset, end));
-      } finally {
-        sink.closeSync();
-      }
-      onProgress?.call(end, archiveBytes.length);
-    }
+  @override
+  Future<void> setWifiOnly(bool value) async => wifiOnlyCalls.add(value);
 
-    await step.onDelivered?.call();
-    if (cancelToken?.isCancelled ?? false) {
-      throw const RequestCancelledException();
-    }
-    if (step.error case final error?) throw error;
+  @override
+  Future<bool> enqueue(ArchiveTransferRequest request) async {
+    log.add('enqueue ${request.taskId}');
+    enqueued.add(request);
+    await onEnqueue?.call(request);
+    return enqueueResult;
+  }
 
-    return ArchiveDownloadResult(
-      receivedBytes: end,
-      resumed: offset > 0,
-      contentLength: archiveBytes.length,
+  @override
+  Future<bool> pause(String taskId) async {
+    paused.add(taskId);
+    return pauseResult;
+  }
+
+  @override
+  Future<bool> resume(String taskId) async {
+    resumed.add(taskId);
+    return resumeResult;
+  }
+
+  @override
+  Future<void> cancel(String taskId) async {
+    log.add('cancel $taskId');
+    canceled.add(taskId);
+  }
+
+  @override
+  Future<List<TransferSnapshot>> snapshot() async {
+    snapshotCalls++;
+    return snapshotResult;
+  }
+
+  @override
+  Future<void> forget(String taskId) async => forgotten.add(taskId);
+
+  @override
+  Future<void> reset() async {
+    log.add('reset');
+    resetCount++;
+    await onReset?.call();
+  }
+
+  @override
+  Future<bool> requestNotificationPermission() async {
+    notificationRequests++;
+    return true;
+  }
+
+  /// OS から届くイベントを流す。
+  void emit(TransferEvent event) => _events.add(event);
+
+  /// [volumeId] の直近の投入。
+  ArchiveTransferRequest requestOf(int volumeId) => enqueued.lastWhere(
+    (request) => ArchiveTaskId.tryParse(request.taskId)?.volumeId == volumeId,
+  );
+
+  /// [volumeId] の直近の投入の taskId。
+  String taskIdOf(int volumeId) => requestOf(volumeId).taskId;
+
+  /// [taskId] の転送が書き込む先（`downloads/{id}/{v}.zip.download`）。
+  File stagingFileOf(String taskId) {
+    final task = ArchiveTaskId.tryParse(taskId)!;
+    return File(
+      p.join(
+        supportDirectory!.path,
+        'downloads',
+        '${task.volumeId}',
+        DownloadStore.stagingFilename(task.filesVersion),
+      ),
     );
   }
+
+  /// [volumeId] の直近の転送を、[bytes] を書き終えて完了させる。
+  void completeWith(int volumeId, List<int> bytes) =>
+      completeTask(taskIdOf(volumeId), bytes);
+
+  /// [taskId] の転送を完了させる（本物と同じく、書き終えてから completed）。
+  void completeTask(String taskId, List<int> bytes) {
+    final file = stagingFileOf(taskId);
+    file.parent.createSync(recursive: true);
+    file.writeAsBytesSync(bytes);
+    emit(TransferStateChanged(taskId, TransferState.completed));
+  }
+
+  /// [volumeId] の直近の転送の状態を変える。
+  void setState(int volumeId, TransferState state) =>
+      emit(TransferStateChanged(taskIdOf(volumeId), state));
+
+  /// [volumeId] の直近の転送を失敗させる。
+  void fail(int volumeId, TransferFailureKind kind, {String message = ''}) =>
+      emit(
+        TransferStateChanged(
+          taskIdOf(volumeId),
+          TransferState.failed,
+          failure: TransferFailure(kind: kind, message: message),
+        ),
+      );
 }
 
 /// 後片付けの途中に別の処理を割り込ませられる [DownloadStore]。
@@ -133,7 +234,11 @@ class GatedDownloadStore extends DownloadStore {
     required super.database,
     required super.directories,
     super.now,
-  });
+    List<String>? log,
+  }) : log = log ?? [];
+
+  /// 呼び出し順の記録（転送の reset との前後を確かめる）。
+  final List<String> log;
 
   /// `deleteAllFiles` に入る前に待たせる（破棄の途中を作る）。
   Completer<void>? beforeDeleteAllFiles;
@@ -143,6 +248,7 @@ class GatedDownloadStore extends DownloadStore {
 
   @override
   Future<void> deleteAllFiles() async {
+    log.add('deleteAllFiles');
     final gate = beforeDeleteAllFiles;
     beforeDeleteAllFiles = null;
     if (gate != null) await gate.future;
@@ -165,11 +271,16 @@ class GatedDownloadStore extends DownloadStore {
 }
 
 /// メモリ DB + 一時ディレクトリで動くダウンロード一式。
+///
+/// OS の転送・回線・前面復帰・トークンはすべてフェイク（プラットフォーム
+/// チャネルとネットワークを触らない）。
 class DownloadHarness {
   DownloadHarness._({
     required this.cache,
     required this.store,
     required this.api,
+    required this.transport,
+    required this.log,
   });
 
   factory DownloadHarness.create({
@@ -177,23 +288,46 @@ class DownloadHarness {
     required Uint8List archiveBytes,
   }) {
     final cache = CacheHarness.create();
+    final log = <String>[];
     return DownloadHarness._(
       cache: cache,
+      log: log,
       store: GatedDownloadStore(
         database: cache.database,
         directories: cache.directories,
         now: cache.clock.now,
+        log: log,
       ),
       api: FakeVolumesApi(manifest: manifest, archiveBytes: archiveBytes),
+      transport: FakeArchiveTransport(
+        supportDirectory: cache.directories.support,
+        log: log,
+      ),
     );
   }
+
+  /// API の配信元（Bearer を付けてよい相手の判定）。
+  static const apiBaseUrl = 'http://localhost:8000';
 
   final CacheHarness cache;
   final GatedDownloadStore store;
   final FakeVolumesApi api;
+  final FakeArchiveTransport transport;
+
+  /// 転送とストアの呼び出し順。
+  final List<String> log;
 
   /// 回線（既定は Wi-Fi。Wi-Fi 限定の設定は本物の drift で持つ）。
   final network = FakeNetworkKindMonitor();
+
+  /// 圏外からの復帰。
+  final connectivity = FakeConnectivityMonitor();
+
+  /// 前面復帰。
+  final lifecycle = FakeAppResumeMonitor();
+
+  /// 転送に焼き込まれるトークン。
+  final authStore = FakeAuthStore(token: 'token-1');
 
   /// 空き容量（`null` は「分からない」= 本番の既定と同じ）。
   int? freeSpace;
@@ -207,20 +341,23 @@ class DownloadHarness {
   /// 待ち時間の間に起こすこと（待っている間の回線の切り替えなど）。
   Future<void> Function()? duringDelay;
 
-  /// 空き容量を調べている間に起こすこと（取得を始める直前の割り込み）。
-  Future<void> Function()? duringFreeSpaceProbe;
-
   /// 完了後に「オフライン用の詳細を控える」導線が呼ばれたタイトル（#11）。
   ///
   /// 本物は `/api/v2/books/{id}` を叩くので、テストでは記録だけにする。
   final warmedBooks = <int>[];
 
-  List<Override> overrides({int concurrency = 1}) => [
+  List<Override> overrides() => [
     ...cache.overrides(),
+    appConfigProvider.overrideWithValue(
+      AppConfig.from(apiBaseUrl: apiBaseUrl, flavor: 'development'),
+    ),
+    authStoreProvider.overrideWithValue(authStore),
     downloadStoreProvider.overrideWith((ref) async => store),
     volumesApiProvider.overrideWithValue(api),
+    archiveTransportProvider.overrideWithValue(transport),
     networkKindMonitorProvider.overrideWithValue(network),
-    downloadConcurrencyProvider.overrideWithValue(concurrency),
+    connectivityMonitorProvider.overrideWithValue(connectivity),
+    appResumeMonitorProvider.overrideWithValue(lifecycle),
     offlineDetailWarmerProvider.overrideWithValue(
       (bookId) async => warmedBooks.add(bookId),
     ),
@@ -229,53 +366,41 @@ class DownloadHarness {
       delays.add(duration);
       await duringDelay?.call();
     }),
-    freeSpaceProbeProvider.overrideWithValue(() async {
-      await duringFreeSpaceProbe?.call();
-      return freeSpace;
-    }),
+    freeSpaceProbeProvider.overrideWithValue(() async => freeSpace),
     if (verifier case final verifier?)
       archiveVerifierProvider.overrideWithValue(verifier),
   ];
 
-  File archiveFile({int? filesVersion}) => store.archiveFile(
-    volumeId: api.manifest.id,
+  File archiveFile({int? volumeId, int? filesVersion}) => store.archiveFile(
+    volumeId: volumeId ?? api.manifest.id,
     filesVersion: filesVersion ?? api.manifest.filesVersion,
   );
 
-  File partFile({int? filesVersion}) => store.partFile(
-    volumeId: api.manifest.id,
+  File stagingFile({int? volumeId, int? filesVersion}) => store.stagingFile(
+    volumeId: volumeId ?? api.manifest.id,
     filesVersion: filesVersion ?? api.manifest.filesVersion,
   );
 }
 
-/// キューが落ち着く（走行中・待機中が無くなる）まで待つ。
+/// キューが落ち着く（進行中の処理が無くなる）まで待つ。
 ///
-/// 固定回数の `pumpEventQueue` では足りないことがある。このテストは実ファイルへの
-/// 書き込みと本物の ZIP 検証を通すので、必要な非同期の段数がマシンの負荷で変わる
-/// （テストを並列に流すと顕著で、待ち切れないまま tearDown が DB を閉じてしまう）。
-/// 回数ではなく**状態**で待てば、速いマシンでは早く抜け、遅いマシンでも取りこぼさない。
-///
-/// 意図的に取得を止めているテスト（ゲートで待たせる）では落ち着かないので、
-/// [rounds] を使い切って戻る。そのときも「開始済みで止まっている」状態は作れている。
-Future<void> settleDownloads(
-  ProviderContainer container, {
-  int rounds = 200,
-}) async {
-  for (var round = 0; round < rounds; round++) {
-    await pumpEventQueue(times: 5);
-    // `pumpEventQueue` はイベントループに譲るだけで**実時間を待たない**ので、
-    // 実ファイルの読み書きと ZIP 検証が終わる前に 200 回を使い切ってしまう
-    // （マシンが重いときだけ落ちる、原因の分かりにくいテストになる）。
-    // 1 周ごとに僅かに実時間を進めて、I/O が完了する余地を作る。
-    await Future<void>.delayed(const Duration(milliseconds: 5));
-    final downloads = container.read(downloadQueueProvider).value;
-    // まだ build 中（null）なら落ち着いたとは言えない。
-    if (downloads == null) continue;
-    if (downloads.values.any((download) => download.isActive)) continue;
-    // 台帳が落ち着いた後も、破棄された世代の後片付け（一時ファイルの削除）が
-    // 残っていることがある。tearDown と競らせないよう少しだけ余分に回す。
-    await pumpEventQueue(times: 10);
+/// 回数ではなく**キューが抱えている処理**で待つ。このテストは実ファイルへの
+/// 書き込みと本物の ZIP 検証を通すので、必要な非同期の段数がマシンの負荷で
+/// 変わる（固定回数の `pumpEventQueue` では、重いときだけ待ち切れずに落ちる）。
+/// フェイクの転送が流したイベントは次のマイクロタスクで届くので、処理が
+/// 空になった後も 1 周回して、新しく始まったものが無いことを確かめる。
+Future<void> settleDownloads(ProviderContainer container) async {
+  try {
+    await container.read(downloadQueueProvider.future);
+  } on Object {
     return;
+  }
+  final queue = container.read(downloadQueueProvider.notifier);
+  for (var round = 0; round < 100; round++) {
+    await pumpEventQueue();
+    await queue.idle;
+    await pumpEventQueue();
+    if (!queue.hasPendingWork) return;
   }
 }
 

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- background_downloader の通知の文言（パッケージの strings.xml を上書きする。#10）。
+         名前はパッケージの Kotlin（BDPlugin.kt / Notifications.kt）が読む
+         リソース名に合わせている。 -->
+    <string name="bg_downloader_cancel">キャンセル</string>
+    <!-- 一時停止の通知は設定しない（Dart を経由しない操作を増やさない）ので、
+         通常は表示されない。英語のまま出ないように訳だけ置く。 -->
+    <string name="bg_downloader_pause">一時停止</string>
+    <string name="bg_downloader_resume">再開</string>
+    <string name="bg_downloader_notification_channel_name">ダウンロード</string>
+    <string name="bg_downloader_notification_channel_description">巻のダウンロードの進み具合と完了のお知らせ</string>
+</resources>

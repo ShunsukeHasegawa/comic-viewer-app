@@ -18,7 +18,8 @@ mixin _$VolumeManifest {
 
  int get id;@JsonKey(name: 'book_id') int get bookId;/// ZIP の mtime。取得済みデータの世代であり「更新あり」判定の基準。
 @JsonKey(name: 'files_version') int get filesVersion;/// ZIP のバイト数。`Content-Length` の検証と空き容量チェックに使う。
-@JsonKey(name: 'archive_bytes') int get archiveBytes;/// `<16進 mtime>-<16進 size>` 形式の検証子。再開時の `If-Range` に使う。
+@JsonKey(name: 'archive_bytes') int get archiveBytes;/// `<16進 mtime>-<16進 size>` 形式の検証子。どの世代を落としたかとして台帳に控える
+/// （再開時の世代の突き合わせは OS の転送が ETag で行う）。
 @JsonKey(name: 'archive_etag') String? get archiveEtag;/// ZIP に入っている画像の枚数。展開後の検証に使う。
 @JsonKey(name: 'page_count') int get pageCount; List<VolumeManifestPage> get pages;
 /// Create a copy of VolumeManifest
@@ -234,7 +235,8 @@ class _VolumeManifest implements VolumeManifest {
 @override@JsonKey(name: 'files_version') final  int filesVersion;
 /// ZIP のバイト数。`Content-Length` の検証と空き容量チェックに使う。
 @override@JsonKey(name: 'archive_bytes') final  int archiveBytes;
-/// `<16進 mtime>-<16進 size>` 形式の検証子。再開時の `If-Range` に使う。
+/// `<16進 mtime>-<16進 size>` 形式の検証子。どの世代を落としたかとして台帳に控える
+/// （再開時の世代の突き合わせは OS の転送が ETag で行う）。
 @override@JsonKey(name: 'archive_etag') final  String? archiveEtag;
 /// ZIP に入っている画像の枚数。展開後の検証に使う。
 @override@JsonKey(name: 'page_count') final  int pageCount;

@@ -1,6 +1,7 @@
 import 'package:comic_laz/core/cache/comic_image_loader.dart';
 import 'package:comic_laz/core/cache/image_cache_store.dart';
 import 'package:comic_laz/core/config/app_config.dart';
+import 'package:comic_laz/core/device/app_resume_monitor.dart';
 import 'package:comic_laz/core/device/connectivity_monitor.dart';
 import 'package:comic_laz/core/device/device_name_resolver.dart';
 import 'package:comic_laz/core/session/session_data_purger.dart';
@@ -14,6 +15,8 @@ import 'package:comic_laz/features/auth/data/auth_store.dart';
 import 'package:comic_laz/features/auth/domain/auth_state.dart';
 import 'package:comic_laz/features/downloads/application/download_queue.dart';
 import 'package:comic_laz/features/downloads/application/download_settings.dart';
+import 'package:comic_laz/features/downloads/data/archive_transport.dart';
+import 'package:comic_laz/features/downloads/data/background_archive_transport.dart';
 import 'package:comic_laz/features/downloads/domain/volume_download.dart';
 import 'package:comic_laz/features/library/data/library_repository.dart';
 import 'package:comic_laz/features/offline/application/offline_metadata_gateway.dart';
@@ -46,6 +49,8 @@ List<Override> testOverrides({
   DownloadQueue Function()? downloadQueue,
   DownloadGate downloadGate = DownloadGate.open,
   DownloadWifiOnly Function()? downloadWifiOnly,
+  ArchiveTransport? archiveTransport,
+  AppResumeMonitor? appResumeMonitor,
   ProgressStore? progressStore,
   ConnectivityMonitor? connectivityMonitor,
   OfflineMetadataGateway? offlineMetadata,
@@ -92,6 +97,15 @@ List<Override> testOverrides({
     downloadGateProvider.overrideWithValue(downloadGate),
     downloadWifiOnlyProvider.overrideWith(
       downloadWifiOnly ?? StubDownloadWifiOnly.new,
+    ),
+    // OS のバックグラウンド転送はプラットフォームチャネル。本物の
+    // `FileDownloader` を作らせない（画面のテストでキューを本物にしても安全に）。
+    archiveTransportProvider.overrideWithValue(
+      archiveTransport ?? FakeArchiveTransport(),
+    ),
+    // 前面復帰の検知は WidgetsBinding に依る。テストからは流さない。
+    appResumeMonitorProvider.overrideWithValue(
+      appResumeMonitor ?? FakeAppResumeMonitor(),
     ),
     // 読書進捗は drift（プラットフォームチャネル）を使うので、既定はメモリ実装。
     progressStoreProvider.overrideWithValue(

@@ -8,64 +8,6 @@ part of 'download_queue.dart';
 
 // GENERATED CODE - DO NOT MODIFY BY HAND
 // ignore_for_file: type=lint, type=warning
-/// 同時に走らせるダウンロードの数。
-///
-/// 自宅サーバーは HDD なので、並列に ZIP を読ませるとシークだらけになって
-/// 全体が遅くなる（1 巻 = 1 ファイルのシーケンシャル read が一番速い）。
-/// 既定は 1。テストや将来の設定から変えられるよう provider にしておく。
-
-@ProviderFor(downloadConcurrency)
-final downloadConcurrencyProvider = DownloadConcurrencyProvider._();
-
-/// 同時に走らせるダウンロードの数。
-///
-/// 自宅サーバーは HDD なので、並列に ZIP を読ませるとシークだらけになって
-/// 全体が遅くなる（1 巻 = 1 ファイルのシーケンシャル read が一番速い）。
-/// 既定は 1。テストや将来の設定から変えられるよう provider にしておく。
-
-final class DownloadConcurrencyProvider
-    extends $FunctionalProvider<int, int, int>
-    with $Provider<int> {
-  /// 同時に走らせるダウンロードの数。
-  ///
-  /// 自宅サーバーは HDD なので、並列に ZIP を読ませるとシークだらけになって
-  /// 全体が遅くなる（1 巻 = 1 ファイルのシーケンシャル read が一番速い）。
-  /// 既定は 1。テストや将来の設定から変えられるよう provider にしておく。
-  DownloadConcurrencyProvider._()
-    : super(
-        from: null,
-        argument: null,
-        retry: null,
-        name: r'downloadConcurrencyProvider',
-        isAutoDispose: false,
-        dependencies: null,
-        $allTransitiveDependencies: null,
-      );
-
-  @override
-  String debugGetCreateSourceHash() => _$downloadConcurrencyHash();
-
-  @$internal
-  @override
-  $ProviderElement<int> $createElement($ProviderPointer pointer) =>
-      $ProviderElement(pointer);
-
-  @override
-  int create(Ref ref) {
-    return downloadConcurrency(ref);
-  }
-
-  /// {@macro riverpod.override_with_value}
-  Override overrideWithValue(int value) {
-    return $ProviderOverride(
-      origin: this,
-      providerOverride: $SyncValueProvider<int>(value),
-    );
-  }
-}
-
-String _$downloadConcurrencyHash() =>
-    r'1901fc6894407f6201d218882ddb9f4de13fcaf6';
 
 @ProviderFor(downloadRetryDelay)
 final downloadRetryDelayProvider = DownloadRetryDelayProvider._();
@@ -111,37 +53,49 @@ String _$downloadRetryDelayHash() =>
 
 /// 巻単位のダウンロードキュー。
 ///
-/// - 同時実行数を [downloadConcurrency] に制限する
-/// - 中断・再開は `Range`（一時ファイルの実サイズを起点にする）
-/// - 失敗は指数バックオフで再試行。429 は `Retry-After` に従う
-/// - [downloadGateProvider] が閉じている間（Wi-Fi 限定で Wi-Fi に繋がって
-///   いない）は新しく始めず、走行中のものは待機に戻す（#10）
-/// - 完了前に検証（サイズ / ZIP として開けるか / ページ数）し、
-///   通ったものだけ `.part` から本番のファイル名へ rename する
+/// ZIP の転送は OS のバックグラウンド転送（[ArchiveTransport]）に任せ、
+/// アプリを閉じても続くようにする（#10）。Dart 側に残すのは次のものだけ:
+/// - 積む順番（`creationTime` を狭義単調増加にして、1 巻から順に落とす）
+/// - 転送が終わった後の検証（サイズ / ZIP として開けるか / ページ数）と、
+///   `.zip.download` から本番のファイル名への rename、台帳の確定
+/// - 失敗の解釈と再試行（ネイティブの 401 / Wi-Fi 切れ / 5xx を分ける）
+/// - 起動時の照合（アプリが死んでいる間に終わった / 消えた転送の拾い上げ）
+///
+/// 同時実行数（1。自宅サーバーの HDD を複数本で読ませない）と Wi-Fi 限定は
+/// OS 側（holding queue / requireWiFi）が守る。アプリが閉じていても効かせる
+/// ため、Dart では止めない。
 
 @ProviderFor(DownloadQueue)
 final downloadQueueProvider = DownloadQueueProvider._();
 
 /// 巻単位のダウンロードキュー。
 ///
-/// - 同時実行数を [downloadConcurrency] に制限する
-/// - 中断・再開は `Range`（一時ファイルの実サイズを起点にする）
-/// - 失敗は指数バックオフで再試行。429 は `Retry-After` に従う
-/// - [downloadGateProvider] が閉じている間（Wi-Fi 限定で Wi-Fi に繋がって
-///   いない）は新しく始めず、走行中のものは待機に戻す（#10）
-/// - 完了前に検証（サイズ / ZIP として開けるか / ページ数）し、
-///   通ったものだけ `.part` から本番のファイル名へ rename する
+/// ZIP の転送は OS のバックグラウンド転送（[ArchiveTransport]）に任せ、
+/// アプリを閉じても続くようにする（#10）。Dart 側に残すのは次のものだけ:
+/// - 積む順番（`creationTime` を狭義単調増加にして、1 巻から順に落とす）
+/// - 転送が終わった後の検証（サイズ / ZIP として開けるか / ページ数）と、
+///   `.zip.download` から本番のファイル名への rename、台帳の確定
+/// - 失敗の解釈と再試行（ネイティブの 401 / Wi-Fi 切れ / 5xx を分ける）
+/// - 起動時の照合（アプリが死んでいる間に終わった / 消えた転送の拾い上げ）
+///
+/// 同時実行数（1。自宅サーバーの HDD を複数本で読ませない）と Wi-Fi 限定は
+/// OS 側（holding queue / requireWiFi）が守る。アプリが閉じていても効かせる
+/// ため、Dart では止めない。
 final class DownloadQueueProvider
     extends $AsyncNotifierProvider<DownloadQueue, Map<int, VolumeDownload>> {
   /// 巻単位のダウンロードキュー。
   ///
-  /// - 同時実行数を [downloadConcurrency] に制限する
-  /// - 中断・再開は `Range`（一時ファイルの実サイズを起点にする）
-  /// - 失敗は指数バックオフで再試行。429 は `Retry-After` に従う
-  /// - [downloadGateProvider] が閉じている間（Wi-Fi 限定で Wi-Fi に繋がって
-  ///   いない）は新しく始めず、走行中のものは待機に戻す（#10）
-  /// - 完了前に検証（サイズ / ZIP として開けるか / ページ数）し、
-  ///   通ったものだけ `.part` から本番のファイル名へ rename する
+  /// ZIP の転送は OS のバックグラウンド転送（[ArchiveTransport]）に任せ、
+  /// アプリを閉じても続くようにする（#10）。Dart 側に残すのは次のものだけ:
+  /// - 積む順番（`creationTime` を狭義単調増加にして、1 巻から順に落とす）
+  /// - 転送が終わった後の検証（サイズ / ZIP として開けるか / ページ数）と、
+  ///   `.zip.download` から本番のファイル名への rename、台帳の確定
+  /// - 失敗の解釈と再試行（ネイティブの 401 / Wi-Fi 切れ / 5xx を分ける）
+  /// - 起動時の照合（アプリが死んでいる間に終わった / 消えた転送の拾い上げ）
+  ///
+  /// 同時実行数（1。自宅サーバーの HDD を複数本で読ませない）と Wi-Fi 限定は
+  /// OS 側（holding queue / requireWiFi）が守る。アプリが閉じていても効かせる
+  /// ため、Dart では止めない。
   DownloadQueueProvider._()
     : super(
         from: null,
@@ -161,17 +115,21 @@ final class DownloadQueueProvider
   DownloadQueue create() => DownloadQueue();
 }
 
-String _$downloadQueueHash() => r'5f0e7ec5eb5034bd8ea5c8118f7517a2ce82deee';
+String _$downloadQueueHash() => r'2414962d92ebee447f16b7909b45e72804471f0e';
 
 /// 巻単位のダウンロードキュー。
 ///
-/// - 同時実行数を [downloadConcurrency] に制限する
-/// - 中断・再開は `Range`（一時ファイルの実サイズを起点にする）
-/// - 失敗は指数バックオフで再試行。429 は `Retry-After` に従う
-/// - [downloadGateProvider] が閉じている間（Wi-Fi 限定で Wi-Fi に繋がって
-///   いない）は新しく始めず、走行中のものは待機に戻す（#10）
-/// - 完了前に検証（サイズ / ZIP として開けるか / ページ数）し、
-///   通ったものだけ `.part` から本番のファイル名へ rename する
+/// ZIP の転送は OS のバックグラウンド転送（[ArchiveTransport]）に任せ、
+/// アプリを閉じても続くようにする（#10）。Dart 側に残すのは次のものだけ:
+/// - 積む順番（`creationTime` を狭義単調増加にして、1 巻から順に落とす）
+/// - 転送が終わった後の検証（サイズ / ZIP として開けるか / ページ数）と、
+///   `.zip.download` から本番のファイル名への rename、台帳の確定
+/// - 失敗の解釈と再試行（ネイティブの 401 / Wi-Fi 切れ / 5xx を分ける）
+/// - 起動時の照合（アプリが死んでいる間に終わった / 消えた転送の拾い上げ）
+///
+/// 同時実行数（1。自宅サーバーの HDD を複数本で読ませない）と Wi-Fi 限定は
+/// OS 側（holding queue / requireWiFi）が守る。アプリが閉じていても効かせる
+/// ため、Dart では止めない。
 
 abstract class _$DownloadQueue
     extends $AsyncNotifier<Map<int, VolumeDownload>> {

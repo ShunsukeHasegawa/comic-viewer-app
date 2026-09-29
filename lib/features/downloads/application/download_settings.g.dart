@@ -58,14 +58,23 @@ String _$downloadSettingsStoreHash() =>
     r'85b9390723ce9a4d76ad41f0124e4a4377c7bb9b';
 
 /// 「Wi-Fi のときだけダウンロードする」設定。
+///
+/// 実際の制限は OS の転送（`ArchiveTransport.setWifiOnly`）が行う。
+/// アプリが閉じていても守られるよう、Dart 側では止めない。
 
 @ProviderFor(DownloadWifiOnly)
 final downloadWifiOnlyProvider = DownloadWifiOnlyProvider._();
 
 /// 「Wi-Fi のときだけダウンロードする」設定。
+///
+/// 実際の制限は OS の転送（`ArchiveTransport.setWifiOnly`）が行う。
+/// アプリが閉じていても守られるよう、Dart 側では止めない。
 final class DownloadWifiOnlyProvider
     extends $AsyncNotifierProvider<DownloadWifiOnly, bool> {
   /// 「Wi-Fi のときだけダウンロードする」設定。
+  ///
+  /// 実際の制限は OS の転送（`ArchiveTransport.setWifiOnly`）が行う。
+  /// アプリが閉じていても守られるよう、Dart 側では止めない。
   DownloadWifiOnlyProvider._()
     : super(
         from: null,
@@ -88,6 +97,9 @@ final class DownloadWifiOnlyProvider
 String _$downloadWifiOnlyHash() => r'2858ec592d0b2b96d9e3a4c3895f5d9d76c2d19c';
 
 /// 「Wi-Fi のときだけダウンロードする」設定。
+///
+/// 実際の制限は OS の転送（`ArchiveTransport.setWifiOnly`）が行う。
+/// アプリが閉じていても守られるよう、Dart 側では止めない。
 
 abstract class _$DownloadWifiOnly extends $AsyncNotifier<bool> {
   FutureOr<bool> build();
@@ -107,26 +119,44 @@ abstract class _$DownloadWifiOnly extends $AsyncNotifier<bool> {
   }
 }
 
-/// [DownloadWifiOnly] と回線の種類から、キューを流してよいかを決める。
+/// [DownloadWifiOnly] と回線の種類から、ダウンロードが進める状況かを決める。
 ///
-/// 設定や回線がまだ分からない間は閉じておく。起動直後に一瞬モバイル回線で
-/// 走り出してしまうより、数百ミリ秒待たせる方がよい。
+/// **表示と失敗の解釈にだけ使う**（#10）。転送を止めるのは OS 側の Wi-Fi
+/// 制限で、ここではない（アプリが閉じている間は Dart が動かないため）。
+/// - 画面の「Wi-Fi 待ち」の表示
+/// - Wi-Fi が切れて失敗した転送を再試行の回数に数えない判定
+///   （`DownloadQueue` の F3。数えると Wi-Fi が 3 回途切れるだけで失敗になる）
+///
+/// 設定や回線がまだ分からない間は閉じておく。起動直後に一瞬「進める」と
+/// 表示するより、数百ミリ秒「Wi-Fi 待ち」と出す方がよい。
 
 @ProviderFor(downloadGate)
 final downloadGateProvider = DownloadGateProvider._();
 
-/// [DownloadWifiOnly] と回線の種類から、キューを流してよいかを決める。
+/// [DownloadWifiOnly] と回線の種類から、ダウンロードが進める状況かを決める。
 ///
-/// 設定や回線がまだ分からない間は閉じておく。起動直後に一瞬モバイル回線で
-/// 走り出してしまうより、数百ミリ秒待たせる方がよい。
+/// **表示と失敗の解釈にだけ使う**（#10）。転送を止めるのは OS 側の Wi-Fi
+/// 制限で、ここではない（アプリが閉じている間は Dart が動かないため）。
+/// - 画面の「Wi-Fi 待ち」の表示
+/// - Wi-Fi が切れて失敗した転送を再試行の回数に数えない判定
+///   （`DownloadQueue` の F3。数えると Wi-Fi が 3 回途切れるだけで失敗になる）
+///
+/// 設定や回線がまだ分からない間は閉じておく。起動直後に一瞬「進める」と
+/// 表示するより、数百ミリ秒「Wi-Fi 待ち」と出す方がよい。
 
 final class DownloadGateProvider
     extends $FunctionalProvider<DownloadGate, DownloadGate, DownloadGate>
     with $Provider<DownloadGate> {
-  /// [DownloadWifiOnly] と回線の種類から、キューを流してよいかを決める。
+  /// [DownloadWifiOnly] と回線の種類から、ダウンロードが進める状況かを決める。
   ///
-  /// 設定や回線がまだ分からない間は閉じておく。起動直後に一瞬モバイル回線で
-  /// 走り出してしまうより、数百ミリ秒待たせる方がよい。
+  /// **表示と失敗の解釈にだけ使う**（#10）。転送を止めるのは OS 側の Wi-Fi
+  /// 制限で、ここではない（アプリが閉じている間は Dart が動かないため）。
+  /// - 画面の「Wi-Fi 待ち」の表示
+  /// - Wi-Fi が切れて失敗した転送を再試行の回数に数えない判定
+  ///   （`DownloadQueue` の F3。数えると Wi-Fi が 3 回途切れるだけで失敗になる）
+  ///
+  /// 設定や回線がまだ分からない間は閉じておく。起動直後に一瞬「進める」と
+  /// 表示するより、数百ミリ秒「Wi-Fi 待ち」と出す方がよい。
   DownloadGateProvider._()
     : super(
         from: null,

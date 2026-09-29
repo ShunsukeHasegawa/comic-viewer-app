@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:comic_laz/core/device/app_resume_monitor.dart';
 import 'package:comic_laz/core/device/connectivity_monitor.dart';
 import 'package:comic_laz/core/device/network_kind_monitor.dart';
 import 'package:comic_laz/domain/models/volume_status_sync.dart';
@@ -288,3 +289,17 @@ ReadingProgress testProgress({
   readAt: readAt ?? DateTime.utc(2026, 9, 25, 10),
   synced: synced,
 );
+
+/// 前面復帰をテストから起こせる [AppResumeMonitor]。
+///
+/// 本物は `AppLifecycleListener`（`WidgetsBinding`）を使うので、単体テストでは
+/// 差し替える。
+class FakeAppResumeMonitor implements AppResumeMonitor {
+  final _controller = StreamController<void>.broadcast();
+
+  @override
+  Stream<void> get onResumed => _controller.stream;
+
+  /// 背面 → 前面。
+  void resume() => _controller.add(null);
+}

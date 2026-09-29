@@ -11,20 +11,38 @@ class DownloadSettingsStore {
 
   static const wifiOnlyKey = 'downloads.wifi_only';
 
+  /// 通知の許可を一度求めたか。
+  static const notificationPermissionRequestedKey =
+      'downloads.notification_permission_requested';
+
   final AppDatabase _database;
 
   /// 「Wi-Fi のときだけダウンロードする」。既定は ON（モバイル回線で
   /// 1 巻数百 MB を勝手に使わない）。
-  Future<bool> readWifiOnly() async {
+  Future<bool> readWifiOnly() async => await _read(wifiOnlyKey) != 'false';
+
+  Future<void> writeWifiOnly(bool value) => _write(wifiOnlyKey, '$value');
+
+  /// 通知の許可をもう求めたか。
+  ///
+  /// 断られた後に積むたびダイアログを出し直さないため、結果に関わらず
+  /// 「求めた」ことを残す（許可は OS の設定画面から変えられる）。
+  Future<bool> readNotificationPermissionRequested() async =>
+      await _read(notificationPermissionRequestedKey) == 'true';
+
+  Future<void> markNotificationPermissionRequested() =>
+      _write(notificationPermissionRequestedKey, 'true');
+
+  Future<String?> _read(String key) async {
     final row = await (_database.select(
       _database.settings,
-    )..where((t) => t.key.equals(wifiOnlyKey))).getSingleOrNull();
-    return row?.value != 'false';
+    )..where((t) => t.key.equals(key))).getSingleOrNull();
+    return row?.value;
   }
 
-  Future<void> writeWifiOnly(bool value) => _database
+  Future<void> _write(String key, String value) => _database
       .into(_database.settings)
-      .insertOnConflictUpdate(SettingRow(key: wifiOnlyKey, value: '$value'));
+      .insertOnConflictUpdate(SettingRow(key: key, value: value));
 }
 
 @Riverpod(keepAlive: true)
@@ -32,6 +50,9 @@ DownloadSettingsStore downloadSettingsStore(Ref ref) =>
     DownloadSettingsStore(ref.watch(appDatabaseProvider));
 
 /// 「Wi-Fi のときだけダウンロードする」設定。
+///
+/// 実際の制限は OS の転送（`ArchiveTransport.setWifiOnly`）が行う。
+/// アプリが閉じていても守られるよう、Dart 側では止めない。
 @Riverpod(keepAlive: true)
 class DownloadWifiOnly extends _$DownloadWifiOnly {
   @override
@@ -46,7 +67,7 @@ class DownloadWifiOnly extends _$DownloadWifiOnly {
   }
 }
 
-/// いまダウンロードを走らせてよいか。
+/// いまダウンロードが進める状況か。
 enum DownloadGate {
   open,
 
@@ -54,10 +75,16 @@ enum DownloadGate {
   waitingForWifi,
 }
 
-/// [DownloadWifiOnly] と回線の種類から、キューを流してよいかを決める。
+/// [DownloadWifiOnly] と回線の種類から、ダウンロードが進める状況かを決める。
 ///
-/// 設定や回線がまだ分からない間は閉じておく。起動直後に一瞬モバイル回線で
-/// 走り出してしまうより、数百ミリ秒待たせる方がよい。
+/// **表示と失敗の解釈にだけ使う**（#10）。転送を止めるのは OS 側の Wi-Fi
+/// 制限で、ここではない（アプリが閉じている間は Dart が動かないため）。
+/// - 画面の「Wi-Fi 待ち」の表示
+/// - Wi-Fi が切れて失敗した転送を再試行の回数に数えない判定
+///   （`DownloadQueue` の F3。数えると Wi-Fi が 3 回途切れるだけで失敗になる）
+///
+/// 設定や回線がまだ分からない間は閉じておく。起動直後に一瞬「進める」と
+/// 表示するより、数百ミリ秒「Wi-Fi 待ち」と出す方がよい。
 @Riverpod(keepAlive: true)
 DownloadGate downloadGate(Ref ref) {
   final setting = ref.watch(downloadWifiOnlyProvider);

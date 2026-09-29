@@ -21,7 +21,8 @@ abstract class VolumeManifest with _$VolumeManifest {
     /// ZIP のバイト数。`Content-Length` の検証と空き容量チェックに使う。
     @JsonKey(name: 'archive_bytes') @Default(0) int archiveBytes,
 
-    /// `<16進 mtime>-<16進 size>` 形式の検証子。再開時の `If-Range` に使う。
+    /// `<16進 mtime>-<16進 size>` 形式の検証子。どの世代を落としたかとして台帳に控える
+    /// （再開時の世代の突き合わせは OS の転送が ETag で行う）。
     @JsonKey(name: 'archive_etag') String? archiveEtag,
 
     /// ZIP に入っている画像の枚数。展開後の検証に使う。
