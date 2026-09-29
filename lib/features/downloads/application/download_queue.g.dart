@@ -63,7 +63,9 @@ String _$downloadRetryDelayHash() =>
 ///
 /// 同時実行数（1。自宅サーバーの HDD を複数本で読ませない）と Wi-Fi 限定は
 /// OS 側（holding queue / requireWiFi）が守る。アプリが閉じていても効かせる
-/// ため、Dart では止めない。
+/// ため、Dart では止めない。Android の 9 分の時間切れは holding queue を
+/// 迂回して同時実行数を崩すので foreground 実行で避ける（背面で始まった巻には
+/// 効かない残りの穴がある。`foregroundModeFor` 参照）。
 
 @ProviderFor(DownloadQueue)
 final downloadQueueProvider = DownloadQueueProvider._();
@@ -80,7 +82,9 @@ final downloadQueueProvider = DownloadQueueProvider._();
 ///
 /// 同時実行数（1。自宅サーバーの HDD を複数本で読ませない）と Wi-Fi 限定は
 /// OS 側（holding queue / requireWiFi）が守る。アプリが閉じていても効かせる
-/// ため、Dart では止めない。
+/// ため、Dart では止めない。Android の 9 分の時間切れは holding queue を
+/// 迂回して同時実行数を崩すので foreground 実行で避ける（背面で始まった巻には
+/// 効かない残りの穴がある。`foregroundModeFor` 参照）。
 final class DownloadQueueProvider
     extends $AsyncNotifierProvider<DownloadQueue, Map<int, VolumeDownload>> {
   /// 巻単位のダウンロードキュー。
@@ -95,7 +99,9 @@ final class DownloadQueueProvider
   ///
   /// 同時実行数（1。自宅サーバーの HDD を複数本で読ませない）と Wi-Fi 限定は
   /// OS 側（holding queue / requireWiFi）が守る。アプリが閉じていても効かせる
-  /// ため、Dart では止めない。
+  /// ため、Dart では止めない。Android の 9 分の時間切れは holding queue を
+  /// 迂回して同時実行数を崩すので foreground 実行で避ける（背面で始まった巻には
+  /// 効かない残りの穴がある。`foregroundModeFor` 参照）。
   DownloadQueueProvider._()
     : super(
         from: null,
@@ -115,7 +121,7 @@ final class DownloadQueueProvider
   DownloadQueue create() => DownloadQueue();
 }
 
-String _$downloadQueueHash() => r'2414962d92ebee447f16b7909b45e72804471f0e';
+String _$downloadQueueHash() => r'd475305daffdc4c28c80f6798b7f1a3044de1b0d';
 
 /// 巻単位のダウンロードキュー。
 ///
@@ -129,7 +135,9 @@ String _$downloadQueueHash() => r'2414962d92ebee447f16b7909b45e72804471f0e';
 ///
 /// 同時実行数（1。自宅サーバーの HDD を複数本で読ませない）と Wi-Fi 限定は
 /// OS 側（holding queue / requireWiFi）が守る。アプリが閉じていても効かせる
-/// ため、Dart では止めない。
+/// ため、Dart では止めない。Android の 9 分の時間切れは holding queue を
+/// 迂回して同時実行数を崩すので foreground 実行で避ける（背面で始まった巻には
+/// 効かない残りの穴がある。`foregroundModeFor` 参照）。
 
 abstract class _$DownloadQueue
     extends $AsyncNotifier<Map<int, VolumeDownload>> {

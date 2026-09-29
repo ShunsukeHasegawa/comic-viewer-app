@@ -144,6 +144,56 @@ void main() {
       expect(failure.message, 'No space left on device');
     });
 
+    test('Android が fileSystem で送ってくる回線の瞬断は、恒久的な失敗にせず connection に写す', () {
+      // TaskRunner.setTaskException は SocketException 以外の IOException を
+      // すべて fileSystem にする。これを容量不足と同じに扱うと、サーバーの
+      // 再起動や TLS の切断 1 回で数百 MB の転送が失敗のまま止まる（F8）。
+      for (final description in [
+        'java.net.ProtocolException: unexpected end of stream',
+        'javax.net.ssl.SSLException: Read error: ssl=0x7b: I/O error during '
+            'system call, Connection reset by peer',
+        'java.net.UnknownHostException: Unable to resolve host '
+            '"comic.lazgram.com": No address associated with hostname',
+        'java.io.EOFException',
+      ]) {
+        final failure = failureOf(
+          TaskStatusUpdate(
+            task(),
+            TaskStatus.failed,
+            TaskFileSystemException(description),
+          ),
+        );
+        expect(
+          failure.kind,
+          TransferFailureKind.connection,
+          reason: description,
+        );
+      }
+    });
+
+    test('端末側の問題と文言で分かる fileSystem は、再試行しない fileSystem のまま', () {
+      for (final description in [
+        'Insufficient space to store the file to be downloaded',
+        'java.io.IOException: write failed: ENOSPC (No space left on device)',
+        'java.io.FileNotFoundException: /data/x: open failed: EACCES '
+            '(Permission denied)',
+        'File operation failed: The file couldn’t be saved.',
+      ]) {
+        final failure = failureOf(
+          TaskStatusUpdate(
+            task(),
+            TaskStatus.failed,
+            TaskFileSystemException(description),
+          ),
+        );
+        expect(
+          failure.kind,
+          TransferFailureKind.fileSystem,
+          reason: description,
+        );
+      }
+    });
+
     test('回線の切断は待てば直るので connection に写す', () {
       final failure = failureOf(
         TaskStatusUpdate(
@@ -221,6 +271,92 @@ void main() {
 
     test('全体サイズが分からなければバイト数に直せないので流さない', () {
       expect(mapProgress(TaskProgressUpdate(task(), 0.5)), isNull);
+    });
+  });
+
+  group('mergeTransferSnapshots', () {
+    TransferState stateOf(List<TransferSnapshot> snapshots, String taskId) =>
+        snapshots.singleWhere((s) => s.taskId == taskId).state;
+
+    test('ユーザーが止めた転送は、allTasks に混ざっていても一時停止として返す', () {
+      // allTasks は Dart 側の一時停止中も返す。「ネイティブが持っている」と
+      // 数えると enqueued に化け、照合が取り消して再開データと書きかけを
+      // 捨てる（起動のたびに数百 MB がやり直しになる。F5）。
+      final snapshots = mergeTransferSnapshots(
+        records: [('a', TaskStatus.paused)],
+        listedIds: ['a'],
+        resumeIds: {'a'},
+        pausedIds: {'a'},
+      );
+      expect(stateOf(snapshots, 'a'), TransferState.paused);
+      expect(snapshots.single.hasResumeData, isTrue);
+    });
+
+    test('走行中の記録のまま一時停止に残っているものも、一時停止として返して再開させる', () {
+      // 時間切れの pause の後、ネイティブの再投入の前にプロセスが死んだ。
+      final snapshots = mergeTransferSnapshots(
+        records: [('a', TaskStatus.running)],
+        listedIds: ['a'],
+        resumeIds: {'a'},
+        pausedIds: {'a'},
+      );
+      expect(stateOf(snapshots, 'a'), TransferState.paused);
+    });
+
+    test('時間切れの後にネイティブで走り直しているものは、一時停止に残っていても生きているとする', () {
+      // パッケージは最終状態まで一時停止の記録を消さない。一時停止として
+      // 返すと、照合が走っている転送を二重に再開してしまう。
+      final snapshots = mergeTransferSnapshots(
+        records: [('a', TaskStatus.running)],
+        listedIds: ['a', 'a'],
+        resumeIds: {'a'},
+        pausedIds: {'a'},
+      );
+      expect(stateOf(snapshots, 'a'), TransferState.running);
+    });
+
+    test('記録が走行中なのにネイティブが知らないものは、消えたとして積み直させる', () {
+      final snapshots = mergeTransferSnapshots(
+        records: [('a', TaskStatus.running)],
+        listedIds: const [],
+        resumeIds: const {},
+        pausedIds: const {},
+      );
+      expect(stateOf(snapshots, 'a'), TransferState.notFound);
+    });
+
+    test('記録が遅れていても、ネイティブが持っているものは生きているとする', () {
+      final snapshots = mergeTransferSnapshots(
+        records: [('a', TaskStatus.paused)],
+        listedIds: ['a'],
+        resumeIds: const {},
+        pausedIds: const {},
+      );
+      expect(stateOf(snapshots, 'a'), TransferState.enqueued);
+    });
+  });
+
+  group('パッケージの設定', () {
+    test('記録を自動で間引かない（閉じている間に終わった巻の完了を照合の前に消さない）', () {
+      // 自動の間引きは投入時刻で状態に関係なく消す。10 日前に積んだ巻が
+      // 閉じている間に終わると、書き上がった ZIP が孤児として掃除される（F6）。
+      expect(archiveTransferStartOptions.autoCleanDatabase, isFalse);
+      expect(
+        archiveTransferStartOptions.doRescheduleKilledTasks,
+        isFalse,
+        reason: '古いトークンのまま、照合と二重に積み直すため',
+      );
+    });
+
+    test('通知の許可があれば foreground で走らせ、9 分の時間切れで同時実行数を崩さない', () {
+      // 時間切れの再投入は holding queue を通らず、HDD を 2 本で読ませる（F12）。
+      expect(foregroundModeFor(notificationsGranted: true), Config.always);
+    });
+
+    test('通知の許可が無ければ foreground にしない（WorkManager の 10 分の上限で落ちるため）', () {
+      // パッケージは許可を見ずに foreground 扱いにし、通知を出せず foreground
+      // にも移れないまま 9 分の pause も起きなくなる。
+      expect(foregroundModeFor(notificationsGranted: false), Config.never);
     });
   });
 

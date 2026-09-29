@@ -3,27 +3,30 @@ import 'dart:io';
 
 import 'package:background_downloader/background_downloader.dart';
 import 'package:flutter/foundation.dart';
-import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import 'archive_transport.dart';
+import 'task_record_scrubber.dart';
 import 'transfer_mapping.dart';
+import 'transfer_temp_files.dart';
 
 part 'background_archive_transport.g.dart';
 
 /// `background_downloader` で ZIP を転送する [ArchiveTransport]（#10）。
 ///
 /// パッケージを包むだけの薄い層にして、判断（再試行・検証・台帳）は持たせない。
-/// プラットフォームチャネルに触るので単体テストはせず、変換は
-/// `transfer_mapping.dart` の純粋関数に寄せてそちらをテストする。
+/// プラットフォームチャネルに触るので単体テストはせず、変換や掃除は
+/// `transfer_mapping.dart` などの純粋な部品に寄せてそちらをテストする。
 ///
 /// パッケージの `FileDownloader` はプロセスで 1 つのシングルトンで、
 /// `updates` も 1 つしか購読できない。**アプリの他の場所から
 /// `FileDownloader()` を呼ばない**こと（最初に作った側の永続化ストアが
 /// 使われ、再開データを引けなくなる）。
 class BackgroundArchiveTransport implements ArchiveTransport {
-  BackgroundArchiveTransport();
+  BackgroundArchiveTransport() {
+    _scrubber = TaskRecordScrubber(erase: _erase, exists: _hasRecord);
+  }
 
   /// パッケージの永続化ストア。再開データと一時停止中のタスクは
   /// `FileDownloader` の公開 API から引けないので、同じインスタンスを持っておく。
@@ -38,6 +41,9 @@ class BackgroundArchiveTransport implements ArchiveTransport {
   final _events = StreamController<TransferEvent>.broadcast();
   StreamSubscription<TaskUpdate>? _subscription;
   Future<void>? _packageStarted;
+
+  /// 前のセッションのタスクの記録を、書き戻されても消し直す（#15）。
+  late final TaskRecordScrubber _scrubber;
 
   @override
   Stream<TransferEvent> get events => _events.stream;
@@ -69,15 +75,21 @@ class BackgroundArchiveTransport implements ArchiveTransport {
     //      次の巻を取り出す。
     //    - 一時ファイルをキャッシュ領域に置かない: 数百 MB の ZIP が OS に
     //      消されると、時間切れの pause から再開できなくなる。
-    final results = await _downloader.configure(
-      globalConfig: [(Config.holdingQueue, (1, null, null))],
-      androidConfig: [(Config.useCacheDir, Config.never)],
+    //    - foreground 実行: 9 分の時間切れ（holding queue を迂回する再投入）を
+    //      起こさない。通知の許可が無いと逆効果なので許可を見て決める
+    //      （`foregroundModeFor` 参照）。
+    final foreground = foregroundModeFor(
+      notificationsGranted: await _notificationsGranted(),
     );
-    for (final (config, result) in results) {
-      if (result.isNotEmpty) {
-        debugPrint('[transfer] configure $config: $result');
-      }
-    }
+    _logConfigureResults(
+      await _downloader.configure(
+        globalConfig: [(Config.holdingQueue, (1, null, null))],
+        androidConfig: [
+          (Config.useCacheDir, Config.never),
+          (Config.runInForeground, foreground),
+        ],
+      ),
+    );
 
     // 3. Wi-Fi 限定（走行中の転送にも反映させる）。
     await setWifiOnly(wifiOnly);
@@ -93,15 +105,13 @@ class BackgroundArchiveTransport implements ArchiveTransport {
       groupNotificationId: archiveTransferNotificationId,
     );
 
-    // 5. パッケージを開始する。
-    //    - プラグインの自動再投入（5 秒後の rescheduleKilledTasks）は使わない。
-    //      古いトークンのまま積み直し、キューの照合と二重に投入するため。
-    //    - 記録は自動で間引く（増え続けないように）。
+    // 5. パッケージを開始する（設定の理由は `archiveTransferStartOptions`）。
     //    二度目以降の呼び出しでは再送を繰り返さない。失敗したら次の呼び出しで
     //    やり直せるよう、覚えた Future を捨てる。
     final started = _packageStarted ??= _downloader.start(
-      doRescheduleKilledTasks: false,
-      autoCleanDatabase: true,
+      doRescheduleKilledTasks:
+          archiveTransferStartOptions.doRescheduleKilledTasks,
+      autoCleanDatabase: archiveTransferStartOptions.autoCleanDatabase,
     );
     try {
       await started;
@@ -113,6 +123,8 @@ class BackgroundArchiveTransport implements ArchiveTransport {
 
   void _onUpdate(TaskUpdate update) {
     if (_events.isClosed || update.task.group != archiveTransferGroup) return;
+    // ログアウトで消した ID の更新は、その更新が記録を書き戻す。消し直す。
+    _scrubber.onUpdate(update.task.taskId);
     final event = mapTaskUpdate(update);
     if (event != null) _events.add(event);
   }
@@ -129,8 +141,9 @@ class BackgroundArchiveTransport implements ArchiveTransport {
 
   @override
   Future<bool> pause(String taskId) async {
-    // 走っているタスクしか確実には引けない。引けなければ（holding queue で
-    // 待っているだけ等）一時停止はできないので false（呼び出し側が取り消す）。
+    // 引けなければ一時停止はできないので false（呼び出し側が取り消す）。
+    // Android は待機中のタスクにも true を返すので、走っているものにだけ
+    // 呼んでもらう（[ArchiveTransport.pause]）。
     final task = await _downloader.taskForId(taskId);
     if (task is! DownloadTask) return false;
     return _downloader.pause(task);
@@ -152,62 +165,35 @@ class BackgroundArchiveTransport implements ArchiveTransport {
 
   @override
   Future<List<TransferSnapshot>> snapshot() async {
-    final active = await _downloader.allTasks(group: archiveTransferGroup);
-    final activeIds = {for (final task in active) task.taskId};
+    final listed = await _downloader.allTasks(group: archiveTransferGroup);
     final records = await _downloader.database.allRecords(
       group: archiveTransferGroup,
     );
-    final resumeIds = {
-      for (final data in await _storage.retrieveAllResumeData())
-        if (data.task.group == archiveTransferGroup) data.task.taskId,
-    };
-    final pausedIds = {
-      for (final task in await _storage.retrieveAllPausedTasks())
-        if (task.group == archiveTransferGroup) task.taskId,
-    };
-
-    final states = <String, TransferState>{};
-    for (final record in records) {
-      final state = mapTaskStatus(record.status);
-      final alive =
-          state == TransferState.enqueued ||
-          state == TransferState.running ||
-          state == TransferState.waitingToRetry;
-      // 記録は「走行中」なのにネイティブが知らない = プロセスごと殺されて
-      // 消えた（holding queue の中身はメモリにしか無い）。積み直しが要る。
-      states[record.taskId] = alive && !activeIds.contains(record.taskId)
-          ? TransferState.notFound
-          : state;
-    }
-    for (final taskId in activeIds) {
-      final recorded = states[taskId];
-      final alive =
-          recorded == TransferState.enqueued ||
-          recorded == TransferState.running ||
-          recorded == TransferState.waitingToRetry;
-      // 記録が遅れていても、ネイティブが持っているなら生きている。
-      if (!alive) states[taskId] = TransferState.enqueued;
-    }
-    for (final taskId in {...resumeIds, ...pausedIds}) {
-      states.putIfAbsent(taskId, () => TransferState.paused);
-    }
-
-    return [
-      for (final MapEntry(key: taskId, value: state) in states.entries)
-        TransferSnapshot(
-          taskId: taskId,
-          state: state,
-          hasResumeData: resumeIds.contains(taskId),
-        ),
-    ];
+    return mergeTransferSnapshots(
+      records: [for (final record in records) (record.taskId, record.status)],
+      listedIds: [for (final task in listed) task.taskId],
+      resumeIds: await _resumeIds(),
+      pausedIds: await _pausedIds(),
+    );
   }
 
   @override
-  Future<void> forget(String taskId) async {
+  Future<void> forget(String taskId) => _erase(taskId);
+
+  @override
+  Future<void> forgetForeign(String taskId) async {
+    await _erase(taskId);
+    _scrubber.purge([taskId]);
+  }
+
+  Future<void> _erase(String taskId) async {
     await _downloader.database.deleteRecordWithId(taskId);
     await _storage.removeResumeData(taskId);
     await _storage.removePausedTask(taskId);
   }
+
+  Future<bool> _hasRecord(String taskId) async =>
+      await _downloader.database.recordForId(taskId) != null;
 
   @override
   Future<void> reset() async {
@@ -244,18 +230,53 @@ class BackgroundArchiveTransport implements ArchiveTransport {
     for (final task in paused) {
       await _storage.removePausedTask(task.taskId);
     }
-    await _deleteTempFiles();
+    // 取り消した転送の canceled は後から届き、そのたびにパッケージが記録
+    // （トークン入り）を書き戻す。消した ID を覚えておき、届いた後にも消し直す。
+    // アプリがその前に落ちても、次の起動の照合が別セッションの記録として
+    // `forgetForeign` で消す。
+    _scrubber.purge(taskIds);
+    // 前のユーザーの書きかけ。走っていたものも取り消したので全部消す。
+    await deleteTransferTempFiles(await _tempDirectories());
   }
 
-  /// パッケージの一時ファイル（前のユーザーの部分データ）を消す。
+  @override
+  Future<void> sweepOrphanTempFiles() async {
+    // 走っている転送の書きかけも同じ名前なので、1 本でも生きていれば触らない。
+    final listed = await _downloader.allTasks(group: archiveTransferGroup);
+    final alive = mergeTransferSnapshots(
+      records: const [],
+      listedIds: [for (final task in listed) task.taskId],
+      resumeIds: const {},
+      pausedIds: await _pausedIds(),
+    ).where((snapshot) => snapshot.state != TransferState.paused);
+    if (alive.isNotEmpty) return;
+    // 一時停止中の転送の書きかけは「再開」で続きに使うので残す。
+    final keep = {
+      for (final data in await _storage.retrieveAllResumeData()) data.data,
+    };
+    final deleted = await deleteTransferTempFiles(
+      await _tempDirectories(),
+      keepPaths: keep,
+    );
+    if (deleted > 0) debugPrint('[transfer] swept $deleted temp files');
+  }
+
+  Future<Set<String>> _resumeIds() async => {
+    for (final data in await _storage.retrieveAllResumeData())
+      if (data.task.group == archiveTransferGroup) data.task.taskId,
+  };
+
+  Future<Set<String>> _pausedIds() async => {
+    for (final task in await _storage.retrieveAllPausedTasks())
+      if (task.group == archiveTransferGroup) task.taskId,
+  };
+
+  /// パッケージの一時ファイルが置かれうる場所。
   ///
-  /// Android で `useCacheDir: never` にすると、一時ファイルは application
-  /// support の直下に `com.bbflight.background_downloader<乱数>` の名前で
-  /// 作られ、取り消しや失敗で残ることがある（パッケージの CONFIG.md が
-  /// 掃除をアプリに求めている）。以前の既定（whenAble）で作られたものが
-  /// キャッシュ側に残っている可能性もあるので両方を見る。
-  /// iOS は URLSession が自分の領域に置くので、ここでは何も見つからない。
-  Future<void> _deleteTempFiles() async {
+  /// `useCacheDir: never` なら application support の直下。以前の既定
+  /// （whenAble）で作られたものがキャッシュ側に残っている可能性もあるので
+  /// 両方を見る。iOS は URLSession が自分の領域に置くので何も見つからない。
+  Future<List<Directory>> _tempDirectories() async {
     final directories = <Directory>[];
     try {
       directories.add(await getApplicationSupportDirectory());
@@ -263,31 +284,52 @@ class BackgroundArchiveTransport implements ArchiveTransport {
     } on Object catch (error) {
       debugPrint('[transfer] temp dir lookup failed: $error');
     }
-    for (final directory in directories) {
-      if (!directory.existsSync()) continue;
-      for (final entity in directory.listSync(followLinks: false)) {
-        if (entity is! File) continue;
-        final name = p.basename(entity.path);
-        if (!name.startsWith(_tempFilePrefix)) continue;
-        try {
-          await entity.delete();
-        } on FileSystemException catch (error) {
-          debugPrint('[transfer] temp file delete failed: $error');
-        }
-      }
+    return directories;
+  }
+
+  Future<bool> _notificationsGranted() async {
+    try {
+      final status = await _downloader.permissions.status(
+        PermissionType.notifications,
+      );
+      return status == PermissionStatus.granted;
+    } on Object catch (error) {
+      debugPrint('[transfer] notification status failed: $error');
+      return false;
     }
   }
 
-  static const _tempFilePrefix = 'com.bbflight.background_downloader';
+  void _logConfigureResults(List<(String, String)> results) {
+    for (final (config, result) in results) {
+      if (result.isNotEmpty) {
+        debugPrint('[transfer] configure $config: $result');
+      }
+    }
+  }
 
   @override
   Future<bool> requestNotificationPermission() async {
     try {
       final permissions = _downloader.permissions;
-      final status = await permissions.status(PermissionType.notifications);
-      if (status == PermissionStatus.granted) return true;
-      final result = await permissions.request(PermissionType.notifications);
-      return result == PermissionStatus.granted;
+      var status = await permissions.status(PermissionType.notifications);
+      if (status != PermissionStatus.granted) {
+        status = await permissions.request(PermissionType.notifications);
+      }
+      final granted = status == PermissionStatus.granted;
+      if (granted) {
+        // 許可が出たので foreground 実行に切り替える（次に走るタスクから効く）。
+        _logConfigureResults(
+          await _downloader.configure(
+            androidConfig: [
+              (
+                Config.runInForeground,
+                foregroundModeFor(notificationsGranted: true),
+              ),
+            ],
+          ),
+        );
+      }
+      return granted;
     } on Object catch (error) {
       // 通知が出せなくても転送は続くので、失敗は「許可されなかった」扱いにする。
       debugPrint('[transfer] notification permission failed: $error');

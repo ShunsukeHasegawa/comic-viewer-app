@@ -129,6 +129,45 @@ void main() {
       expect(harness.transport.forgotten, contains(taskIdOf(volumeId)));
     });
 
+    test('記録が消えていても、起動時に届いた完了の ZIP は掃除せずに確定する', () async {
+      // 照合の一覧（パッケージの記録）には載っていないが、閉じている間の完了は
+      // `start` の中で届く（F6）。
+      await saveRow(VolumeDownloadStatus.queued);
+      await writeManifest();
+      stagingOf(volumeId).writeAsBytesSync(harness.api.archiveBytes);
+      harness.transport.onStart = () async => harness.transport.emit(
+        TransferStateChanged(taskIdOf(volumeId), TransferState.completed),
+      );
+
+      final container = await start();
+
+      expect(downloadOf(container)!.status, VolumeDownloadStatus.completed);
+      expect(harness.archiveFile().existsSync(), isTrue);
+      expect(harness.transport.enqueued, isEmpty, reason: '書き上がった巻を落とし直さない');
+    });
+
+    test('何も走っていなければ、積み直す前に置き去りの一時ファイルを掃除させる', () async {
+      await saveRow(VolumeDownloadStatus.queued);
+
+      await start();
+
+      expect(
+        harness.transport.tempSweeps,
+        greaterThan(0),
+        reason: '失敗した転送の書きかけ（Android）は誰も指さず、容量を食い続ける（F9）',
+      );
+    });
+
+    test('走っている転送があれば、起動時に一時ファイルを掃除させない', () async {
+      await saveRow(VolumeDownloadStatus.downloading);
+      await writeManifest();
+      snapshots({taskIdOf(volumeId): TransferState.running});
+
+      await start();
+
+      expect(harness.transport.tempSweeps, 0);
+    });
+
     test('rename の後に落ちて完了が再送されても壊れない', () async {
       // 書きかけは既に {v}.zip に rename 済みで、台帳の確定と forget の前に落ちた。
       await saveRow(VolumeDownloadStatus.downloading);
@@ -167,14 +206,20 @@ void main() {
       expect(harness.transport.forgotten, contains(taskIdOf(volumeId)));
     });
 
-    test('失敗で終わっていた転送は回数を数え直して再開する', () async {
+    test('失敗で終わっていた転送は回数を数え直して積み直す（失敗で再開データは消えている）', () async {
       await saveRow(VolumeDownloadStatus.queued);
       snapshots({taskIdOf(volumeId): TransferState.failed});
 
       final container = await start();
 
       expect(harness.delays, [const Duration(seconds: 2)]);
-      expect(harness.transport.resumed, [taskIdOf(volumeId)]);
+      expect(
+        harness.transport.resumed,
+        isEmpty,
+        reason: 'パッケージは failed で再開データを捨てるので、再開のふりをしない（F9）',
+      );
+      expect(harness.transport.enqueued, hasLength(1));
+      expect(harness.transport.forgotten, contains(taskIdOf(volumeId)));
       expect(downloadOf(container)!.isActive, isTrue);
     });
 
@@ -298,6 +343,11 @@ void main() {
         reason: 'ログアウト前のユーザーの転送を今のユーザーの巻として確定しない（#15）',
       );
       expect(harness.transport.forgotten, contains(foreign));
+      expect(
+        harness.transport.foreignForgotten,
+        contains(foreign),
+        reason: 'ログアウト直後に落ちて書き戻された Bearer 入りの記録も、次の起動で消し切る（#15）',
+      );
       expect(
         ArchiveTaskId.tryParse(harness.transport.enqueued.single.taskId)!
             .sessionTag,

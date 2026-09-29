@@ -1,18 +1,31 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <!-- API への通信。これまで debug / profile のマニフェストにしか無く、
          release ビルドは通信できなかった。 -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <!-- 巻の ZIP のバックグラウンド転送の進捗 / 完了通知（Android 13 以上。#10）。
          無いと通知は黙って出ない（転送自体は続く）。
-         UIDT（priority 0）と foreground service は使わない（priority 5 +
-         allowPause で 9 分の時間切れを越える）ので、RUN_USER_INITIATED_JOBS /
-         FOREGROUND_SERVICE_DATA_SYNC は宣言しない。パッケージの receiver /
+         UIDT（priority 0）は使わない（背面の holding queue から予約できない）
+         ので RUN_USER_INITIATED_JOBS は宣言しない。パッケージの receiver /
          provider / service はライブラリのマニフェストからマージされる。 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- 転送を WorkManager の foreground（dataSync）で走らせる（#10）。
+         通常の実行は 9 分で時間切れになり、パッケージが holding queue を
+         通さずに再投入するので、同時実行数 1（自宅サーバーの HDD 保護）が
+         崩れる。通知の許可があるときだけ foreground にする（無いと WorkManager
+         の 10 分の上限で止められるため。transfer_mapping.dart の
+         foregroundModeFor）。Android 14 以上は種類ごとの権限と、
+         SystemForegroundService の foregroundServiceType の宣言が要る。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
     <application
         android:label="comic_laz"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

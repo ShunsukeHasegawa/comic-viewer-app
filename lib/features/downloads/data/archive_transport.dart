@@ -28,7 +28,12 @@ abstract interface class ArchiveTransport {
   /// 転送を積む。受け付けられなければ `false`。
   Future<bool> enqueue(ArchiveTransferRequest request);
 
-  /// 一時停止。走っていない（再開データを作れない）なら `false`。
+  /// 一時停止。止められなければ `false`。
+  ///
+  /// **走っている（`running` が届いた）転送にだけ呼ぶ**こと。Android の
+  /// パッケージは、holding queue や Wi-Fi 待ちで待機しているだけのタスクにも
+  /// `true` を返す（止める印を付けるだけ）。そのタスクは待機のまま残り、
+  /// 後で走り出して同時実行の枠を使ってから止まる。待機中の転送は取り消す。
   Future<bool> pause(String taskId);
 
   /// 再開。再開データが無ければ `false`（呼び出し側が積み直す）。
@@ -41,6 +46,19 @@ abstract interface class ArchiveTransport {
 
   /// 完了 / 取り消し済みのタスクの記録と再開データを捨てる。
   Future<void> forget(String taskId);
+
+  /// 前のセッション（ログアウト前）のタスクの記録を捨てる（#15）。
+  ///
+  /// [forget] と違い、パッケージが後から記録を書き戻しても消し直す
+  /// （記録には前のユーザーの Bearer が平文で入っている）。同じ ID で
+  /// 積み直すことのない ID にだけ使う。
+  Future<void> forgetForeign(String taskId);
+
+  /// どの転送も指していないパッケージの一時ファイルを消す。
+  ///
+  /// 通信の失敗で終わった転送の書きかけ（Android）が残り続けないように。
+  /// 走っている転送があれば何もしない（書きかけを消すと完了時に失敗する）。
+  Future<void> sweepOrphanTempFiles();
 
   /// 全部捨てる（ログアウト。#15）。
   ///

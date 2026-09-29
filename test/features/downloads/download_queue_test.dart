@@ -719,9 +719,10 @@ void main() {
       expect(downloadOf(scope.container)!.isActive, isTrue);
     });
 
-    test('走っていない巻の中断は取り消しに切り替え、中断として残す', () async {
+    test('走っていない巻の中断は、Android が「止めた」と返す場合でも取り消しに切り替える', () async {
+      // フェイクの pause は既定で true（Android の pauseTaskWithId は、holding
+      // queue で待っているだけのタスクにも印を付けて true を返す）。
       final scope = setUpQueue();
-      scope.harness.transport.pauseResult = false;
       await enqueueAndSubmit(scope);
       final taskId = scope.harness.transport.taskIdOf(volumeId);
       scope.harness.stagingFile().writeAsBytesSync([1, 2, 3]);
@@ -729,11 +730,39 @@ void main() {
       await scope.queue.pause(volumeId);
       await settle();
 
-      expect(scope.harness.transport.canceled, [
-        taskId,
-      ], reason: 'holding queue で待っている転送は一時停止できない。止めないと後で走り出す');
+      expect(
+        scope.harness.transport.paused,
+        isEmpty,
+        reason: '待機中のまま残り、後で走り出して同時実行の枠を使ってから止まる（F11）',
+      );
+      expect(scope.harness.transport.canceled, [taskId]);
+      expect(scope.harness.transport.nativeTaskIds, isEmpty);
       expect(downloadOf(scope.container)!.status, VolumeDownloadStatus.paused);
       expect(scope.harness.stagingFile().existsSync(), isFalse);
+
+      await scope.queue.resume(volumeId);
+      await settle();
+      expect(scope.harness.transport.nativeTaskIds, {
+        taskId,
+      }, reason: '再開で同じ ID を二重に積まない（元のタスクは取り消し済み）');
+    });
+
+    test('時間切れで止まって再投入を待つ間の中断も、走り出すまでは取り消しに回す', () async {
+      final scope = setUpQueue();
+      await enqueueAndSubmit(scope);
+      final taskId = scope.harness.transport.taskIdOf(volumeId);
+      scope.harness.transport.setState(volumeId, TransferState.running);
+      await settle();
+      // 9 分の時間切れ。ネイティブが 1 秒後に自分で再投入する。
+      scope.harness.transport.setState(volumeId, TransferState.paused);
+      await settle();
+
+      await scope.queue.pause(volumeId);
+      await settle();
+
+      expect(scope.harness.transport.paused, isEmpty);
+      expect(scope.harness.transport.canceled, [taskId]);
+      expect(downloadOf(scope.container)!.status, VolumeDownloadStatus.paused);
     });
 
     test('再開データが無ければ投入し直す', () async {
@@ -753,12 +782,16 @@ void main() {
     test('Wi-Fi 待ちの巻もユーザーが中断できる', () async {
       final scope = setUpQueue(network: NetworkKind.metered);
       await enqueueAndSubmit(scope);
+      final taskId = scope.harness.transport.taskIdOf(volumeId);
 
       await scope.queue.pause(volumeId);
       await settle();
 
       expect(downloadOf(scope.container)!.status, VolumeDownloadStatus.paused);
-      expect(scope.harness.transport.paused, hasLength(1));
+      expect(scope.harness.transport.canceled, [
+        taskId,
+      ], reason: '待機中のタスクは一時停止では止まらない（Android は印を付けるだけ）');
+      expect(scope.harness.transport.nativeTaskIds, isEmpty);
     });
 
     test('通知の Cancel は中断として扱い、完了済みの ZIP は消さない', () async {
@@ -834,7 +867,7 @@ void main() {
       );
     });
 
-    test('5xx は 3 回まで待って再開する', () async {
+    test('5xx は 3 回まで待って積み直す（失敗で再開データは消えるので、再開のふりをしない）', () async {
       final scope = setUpQueue();
       await enqueueAndSubmit(scope);
       final taskId = scope.harness.transport.taskIdOf(volumeId);
@@ -848,19 +881,70 @@ void main() {
         const Duration(seconds: 2),
         const Duration(seconds: 4),
       ], reason: '自宅サーバーを叩き続けない');
-      expect(scope.harness.transport.resumed, [taskId, taskId]);
+      expect(
+        scope.harness.transport.resumed,
+        isEmpty,
+        reason: 'パッケージは failed を届ける前に再開データを捨てている（F9）',
+      );
+      expect(scope.harness.transport.enqueued, hasLength(maxDownloadAttempts));
       final download = downloadOf(scope.container)!;
       expect(download.status, VolumeDownloadStatus.failed);
       expect(download.failureReason, isNotNull);
       expect(
         scope.harness.transport.forgotten,
-        isNot(contains(taskId)),
-        reason: '通信の失敗で手元の進捗（再開データ）を捨てない',
+        contains(taskId),
+        reason: '続きに使えない記録を残さない',
       );
 
       await scope.queue.resume(volumeId);
       await settle();
-      expect(scope.harness.transport.resumed, hasLength(3));
+      expect(
+        scope.harness.transport.enqueued,
+        hasLength(maxDownloadAttempts + 1),
+        reason: '「再開」は積み直しになる',
+      );
+      expect(downloadOf(scope.container)!.isActive, isTrue);
+    });
+
+    test('失敗で置き去りになった一時ファイルは、何も走っていないときに掃除させる', () async {
+      final scope = setUpQueue();
+      await enqueueAndSubmit(scope);
+      final before = scope.harness.transport.tempSweeps;
+
+      scope.harness.transport.fail(volumeId, TransferFailureKind.forbidden);
+      await settle();
+
+      expect(
+        scope.harness.transport.tempSweeps,
+        greaterThan(before),
+        reason: 'Android は失敗した転送の書きかけ（数百 MB）を残し、誰も指さなくなる（F9）',
+      );
+    });
+
+    test('転送が走っている間は一時ファイルを掃除させない', () async {
+      final scope = setUpQueue();
+      scope.harness.api.manifests[341] = testManifest(
+        id: 341,
+        bookId: bookId,
+        archiveBytes: scope.harness.api.archiveBytes.length,
+      );
+      await scope.queue.enqueueAll([
+        (volumeId: volumeId, bookId: bookId),
+        (volumeId: 341, bookId: bookId),
+      ]);
+      await settle();
+      scope.harness.transport.setState(341, TransferState.running);
+      await settle();
+      final before = scope.harness.transport.tempSweeps;
+
+      scope.harness.transport.fail(volumeId, TransferFailureKind.forbidden);
+      await settle();
+
+      expect(
+        scope.harness.transport.tempSweeps,
+        before,
+        reason: '走行中の書きかけも同じ名前。消すと完了時の移動が失敗する',
+      );
     });
 
     test('Wi-Fi 限定で Wi-Fi が切れた失敗は回数に数えない', () async {
@@ -883,8 +967,53 @@ void main() {
       );
       expect(scope.harness.delays, isEmpty);
       expect(
-        scope.harness.transport.resumed,
-        hasLength(maxDownloadAttempts + 1),
+        scope.harness.transport.enqueued,
+        hasLength(maxDownloadAttempts + 2),
+        reason: '積み直せば、ネイティブが Wi-Fi に戻るまで待ってから取り始める',
+      );
+    });
+
+    test('Android で Wi-Fi が外れた失敗は理由無しで届くので、それも回数に数えない', () async {
+      // WorkManager が UNMETERED の制約でワーカーを止めると、パッケージは
+      // connection ではなく一般の例外（または例外無し）で failed を送る。
+      final scope = setUpQueue(network: NetworkKind.metered);
+      await enqueueAndSubmit(scope);
+
+      for (var i = 0; i < maxDownloadAttempts + 1; i++) {
+        final taskId = scope.harness.transport.taskIdOf(volumeId);
+        scope.harness.transport.emit(
+          TransferStateChanged(
+            taskId,
+            TransferState.failed,
+            failure: i.isEven
+                ? const TransferFailure(kind: TransferFailureKind.other)
+                : null,
+          ),
+        );
+        await settle();
+      }
+
+      expect(
+        downloadOf(scope.container)!.isActive,
+        isTrue,
+        reason: 'Wi-Fi が 3 回途切れるだけで「失敗」にしない（F10）',
+      );
+      expect(scope.harness.delays, isEmpty);
+    });
+
+    test('Wi-Fi に繋がっているときの理由無しの失敗は回数に数える', () async {
+      final scope = setUpQueue();
+      await enqueueAndSubmit(scope);
+
+      for (var i = 0; i < maxDownloadAttempts; i++) {
+        scope.harness.transport.fail(volumeId, TransferFailureKind.other);
+        await settle();
+      }
+
+      expect(
+        downloadOf(scope.container)!.status,
+        VolumeDownloadStatus.failed,
+        reason: '本当に壊れている転送で自宅サーバーを叩き続けない',
       );
     });
 
@@ -1198,6 +1327,187 @@ void main() {
     });
   });
 
+  group('操作と OS の競合', () {
+    test('投入の await の間に中断したら、受け付けられた転送を取り消し直す', () async {
+      final scope = setUpQueue();
+      // ネイティブがまだタスクを知らない間に中断が届く（取り消しは空振りする）。
+      scope.harness.transport.onEnqueue = (_) => scope.queue.pause(volumeId);
+
+      await enqueueAndSubmit(scope);
+
+      expect(
+        scope.harness.transport.nativeTaskIds,
+        isEmpty,
+        reason: '誰も追っていない転送が数百 MB を落とし、同時実行の枠を塞ぐ（F1）',
+      );
+      expect(downloadOf(scope.container)!.status, VolumeDownloadStatus.paused);
+
+      scope.harness.transport.onEnqueue = null;
+      await scope.queue.resume(volumeId);
+      await settle();
+      expect(scope.harness.transport.nativeTaskIds, {
+        scope.harness.transport.taskIdOf(volumeId),
+      }, reason: '再開すれば積み直す');
+    });
+
+    test('投入の await の間に削除したら、受け付けられた転送を取り消し直す', () async {
+      final scope = setUpQueue();
+      scope.harness.transport.onEnqueue = (_) => scope.queue.remove(volumeId);
+
+      await enqueueAndSubmit(scope);
+
+      expect(scope.harness.transport.nativeTaskIds, isEmpty);
+      expect(downloadOf(scope.container), isNull);
+      expect(await scope.harness.store.find(volumeId), isNull);
+    });
+
+    test('検証の途中で中断しても、書き上がった ZIP を捨てずに確定させる', () async {
+      final gate = Completer<void>();
+      var verifying = false;
+      final scope = startQueue(
+        createHarness(
+          verifier: (archive) async {
+            verifying = true;
+            await gate.future;
+            return verifyArchivePages(archive);
+          },
+        ),
+      );
+      await enqueueAndSubmit(scope);
+      scope.harness.transport.completeWith(
+        volumeId,
+        scope.harness.api.archiveBytes,
+      );
+      await waitUntil(() => verifying);
+
+      await scope.queue.pause(volumeId);
+      gate.complete();
+      await settle();
+
+      expect(
+        downloadOf(scope.container)!.status,
+        VolumeDownloadStatus.completed,
+        reason: '転送は終わっている。止めると数百 MB を落とし直すことになる（F2）',
+      );
+      expect(downloadOf(scope.container)!.failureReason, isNull);
+      expect(scope.harness.archiveFile().existsSync(), isTrue);
+      expect(scope.harness.transport.enqueued, hasLength(1));
+    });
+
+    test('確定待ち（圏外でマニフェストが無い）の巻を中断しても、書き上がった ZIP は捨てない', () async {
+      final scope = setUpQueue();
+      await enqueueAndSubmit(scope);
+      scope.harness.store
+          .manifestFile(volumeId: volumeId, filesVersion: 111)
+          .deleteSync();
+      scope.harness.api.manifestError = const NetworkException();
+      scope.harness.transport.completeWith(
+        volumeId,
+        scope.harness.api.archiveBytes,
+      );
+      await settle();
+
+      await scope.queue.pause(volumeId);
+      await settle();
+
+      expect(
+        scope.harness.stagingFile().existsSync(),
+        isTrue,
+        reason: 'オフラインで確定できないだけ。回線が戻れば確定できる',
+      );
+
+      scope.harness.api.manifestError = null;
+      scope.harness.connectivity.restore();
+      await settle();
+
+      expect(
+        downloadOf(scope.container)!.status,
+        VolumeDownloadStatus.completed,
+      );
+      expect(scope.harness.transport.enqueued, hasLength(1));
+    });
+
+    test('一時停止の往復中に再開が押されたら、止め終わってから続きを取る', () async {
+      final scope = setUpQueue();
+      await enqueueAndSubmit(scope);
+      final taskId = scope.harness.transport.taskIdOf(volumeId);
+      scope.harness.transport.setState(volumeId, TransferState.running);
+      await settle();
+      final gate = Completer<void>();
+      scope.harness.transport.onPause = (_) => gate.future;
+
+      final pausing = scope.queue.pause(volumeId);
+      await waitUntil(() => scope.harness.transport.paused.isNotEmpty);
+      await scope.queue.resume(volumeId);
+      gate.complete();
+      await pausing;
+      // ネイティブが止め終わって再開データを残した。
+      scope.harness.transport.setState(volumeId, TransferState.paused);
+      await settle();
+
+      expect(scope.harness.transport.resumed, [
+        taskId,
+      ], reason: '放っておくと、止まったまま「待機中」と表示し続ける（F3）');
+      expect(downloadOf(scope.container)!.isActive, isTrue);
+      expect(scope.harness.transport.canceled, isEmpty);
+      expect(scope.harness.transport.enqueued, hasLength(1));
+    });
+
+    test('止め終わりの paused が一時停止の往復より先に届いても、再開を取りこぼさない', () async {
+      final scope = setUpQueue();
+      await enqueueAndSubmit(scope);
+      final taskId = scope.harness.transport.taskIdOf(volumeId);
+      scope.harness.transport.setState(volumeId, TransferState.running);
+      await settle();
+      final gate = Completer<void>();
+      scope.harness.transport.onPause = (_) => gate.future;
+
+      final pausing = scope.queue.pause(volumeId);
+      await waitUntil(() => scope.harness.transport.paused.isNotEmpty);
+      await scope.queue.resume(volumeId);
+      scope.harness.transport.setState(volumeId, TransferState.paused);
+      await settle();
+      gate.complete();
+      await pausing;
+      await settle();
+
+      expect(scope.harness.transport.resumed, [taskId]);
+      expect(downloadOf(scope.container)!.isActive, isTrue);
+    });
+
+    test('確定の途中で削除し、DB の削除を待つ間に確定が進んでも行を書き戻さない', () async {
+      final scope = setUpQueue();
+      await enqueueAndSubmit(scope);
+      // rename は済み、旧世代の掃除で待っている状態を作る。
+      final finishing = Completer<void>();
+      scope.harness.store.beforeDeleteOtherVersions = finishing;
+      scope.harness.transport.completeWith(
+        volumeId,
+        scope.harness.api.archiveBytes,
+      );
+      await waitUntil(() => scope.harness.archiveFile().existsSync());
+
+      // DB からは消えたが、remove() にまだ戻っていない隙に確定を進める。
+      final deleted = Completer<void>();
+      scope.harness.store.afterDeleteRow = deleted;
+      final removing = scope.queue.remove(volumeId);
+      await waitUntil(() => scope.harness.log.contains('deleteRow $volumeId'));
+      finishing.complete();
+      await settle();
+      deleted.complete();
+      await removing;
+      await settle();
+
+      expect(
+        await scope.harness.store.find(volumeId),
+        isNull,
+        reason: '次の起動で実体の無い「ダウンロード済み」が出る（F4）',
+      );
+      expect(downloadOf(scope.container), isNull);
+      expect(scope.harness.archiveFile().existsSync(), isFalse);
+    });
+  });
+
   group('ログアウト', () {
     test('破棄するとダウンロード済みの実体も台帳も残らない', () async {
       final scope = await setUpCompleted();
@@ -1246,6 +1556,27 @@ void main() {
       expect(scope.harness.archiveFile().existsSync(), isFalse);
       expect(scope.harness.transport.forgotten, contains(oldTask));
       expect(await scope.harness.store.readSessionTag(), isNot(oldTag));
+    });
+
+    test('ログアウト後に届いた取り消しの記録は、書き戻されても消し直す方で捨てる', () async {
+      final scope = setUpQueue();
+      await enqueueAndSubmit(scope);
+      final oldTask = scope.harness.transport.taskIdOf(volumeId);
+
+      await scope.queue.purgeAll();
+      await settle();
+      // 走っていた転送の canceled は reset の後に届く。パッケージはこの更新で
+      // Bearer 入りの記録を書き戻してから通知してくる。
+      scope.harness.transport.emit(
+        TransferStateChanged(oldTask, TransferState.canceled),
+      );
+      await settle();
+
+      expect(
+        scope.harness.transport.foreignForgotten,
+        contains(oldTask),
+        reason: '1 回消すだけだと、非同期の書き戻しに負けてトークンが残る（#15）',
+      );
     });
 
     test('purge の await の隙に届いた完了を書き戻さない', () async {
