@@ -1,6 +1,7 @@
 import 'package:comic_laz/core/network/api_exception.dart';
 import 'package:comic_laz/core/widgets/error_view.dart';
 import 'package:comic_laz/domain/models/book_detail.dart';
+import 'package:comic_laz/features/downloads/domain/volume_download.dart';
 import 'package:comic_laz/features/library/application/library_controller.dart';
 import 'package:comic_laz/features/title/application/book_detail_controller.dart';
 import 'package:comic_laz/features/title/presentation/title_detail_screen.dart';
@@ -10,6 +11,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../support/api_fakes.dart';
+import '../../support/download_fakes.dart';
 import '../../support/test_scope.dart';
 
 BookDetail sampleDetail({
@@ -60,9 +62,11 @@ BookDetail sampleDetail({
 Future<ProviderContainer> pumpDetail(
   WidgetTester tester, {
   FakeBooksApi? booksApi,
+  StubDownloadQueue? downloadQueue,
 }) async {
   final container = createContainer(
     booksApi: booksApi ?? FakeBooksApi(bookDetail: sampleDetail()),
+    downloadQueue: downloadQueue == null ? null : () => downloadQueue,
   );
   addTearDown(container.dispose);
 
@@ -143,16 +147,161 @@ void main() {
   testWidgets('ダウンロードできない巻はその旨を示す', (tester) async {
     await pumpDetail(tester);
 
-    // 2 巻は archive_bytes が無い
+    // 2 巻は archive_bytes / files_version が無いので落とせない。
     expect(find.byIcon(Icons.cloud_off_outlined), findsOneWidget);
-    // 1 巻はダウンロード導線（#9 実装までは押せない）
-    final button = tester.widget<IconButton>(
-      find.ancestor(
-        of: find.byIcon(Icons.download_outlined),
-        matching: find.byType(IconButton),
-      ),
-    );
-    expect(button.onPressed, isNull);
+    expect(find.textContaining('ダウンロード不可'), findsOneWidget);
+  });
+
+  group('巻ごとのダウンロード導線', () {
+    testWidgets('台帳に無い巻は「未ダウンロード」で、押すとキューに積む', (tester) async {
+      final queue = StubDownloadQueue();
+      await pumpDetail(tester, downloadQueue: queue);
+
+      expect(find.textContaining('未ダウンロード'), findsOneWidget);
+      await tester.tap(find.byIcon(Icons.download_outlined));
+      await tester.pumpAndSettle();
+
+      expect(queue.enqueued, [
+        (volumeId: 340, bookId: 12),
+      ], reason: '一括ダウンロード（#10）と共有する台帳のため book_id も渡す');
+    });
+
+    testWidgets('取得中は % を出し、押すと中断する', (tester) async {
+      final queue = StubDownloadQueue(
+        initial: {
+          340: const VolumeDownload(
+            volumeId: 340,
+            bookId: 12,
+            filesVersion: 1,
+            status: VolumeDownloadStatus.downloading,
+            receivedBytes: 30,
+            totalBytes: 100,
+          ),
+        },
+      );
+      await pumpDetail(tester, downloadQueue: queue);
+
+      expect(find.textContaining('ダウンロード中 30%'), findsOneWidget);
+      await tester.tap(find.byIcon(Icons.stop));
+      await tester.pumpAndSettle();
+
+      expect(queue.paused, [340]);
+    });
+
+    testWidgets('中断中は続きから再開できる（取り直しにしない）', (tester) async {
+      final queue = StubDownloadQueue(
+        initial: {
+          340: const VolumeDownload(
+            volumeId: 340,
+            bookId: 12,
+            filesVersion: 1,
+            status: VolumeDownloadStatus.paused,
+            receivedBytes: 50,
+            totalBytes: 100,
+          ),
+        },
+      );
+      await pumpDetail(tester, downloadQueue: queue);
+
+      expect(find.textContaining('中断中 50%'), findsOneWidget);
+      // ヒーローの「続きから読む」も同じアイコンなので、行の中に絞る。
+      await tester.tap(
+        find.descendant(
+          of: find.byType(VolumeTile),
+          matching: find.byIcon(Icons.play_arrow),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(queue.resumed, [340]);
+      expect(queue.enqueued, isEmpty, reason: '再開は Range で続きから取る');
+    });
+
+    testWidgets('失敗は理由を添えて見せる（黙って未ダウンロードに戻さない）', (tester) async {
+      final queue = StubDownloadQueue(
+        initial: {
+          340: const VolumeDownload(
+            volumeId: 340,
+            bookId: 12,
+            filesVersion: 1,
+            status: VolumeDownloadStatus.failed,
+            failureReason: 'ページ数が一致しません（2 / 3 ページ）。',
+          ),
+        },
+      );
+      await pumpDetail(tester, downloadQueue: queue);
+
+      expect(find.textContaining('ページ数が一致しません（2 / 3 ページ）。'), findsOneWidget);
+      expect(find.byIcon(Icons.refresh), findsOneWidget);
+    });
+
+    testWidgets('ダウンロード済みは削除の確認を挟む（オフラインで読めなくなる）', (tester) async {
+      final queue = StubDownloadQueue(
+        initial: {
+          340: const VolumeDownload(
+            volumeId: 340,
+            bookId: 12,
+            filesVersion: 1,
+            status: VolumeDownloadStatus.completed,
+            receivedBytes: 100,
+            totalBytes: 100,
+          ),
+        },
+      );
+      await pumpDetail(tester, downloadQueue: queue);
+
+      expect(find.textContaining('ダウンロード済み'), findsOneWidget);
+      expect(find.byIcon(Icons.offline_pin), findsOneWidget);
+
+      await tester.tap(find.byIcon(Icons.delete_outline));
+      await tester.pumpAndSettle();
+      // 確認を出した時点ではまだ消さない。
+      expect(queue.removed, isEmpty);
+
+      await tester.tap(find.widgetWithText(FilledButton, '削除'));
+      await tester.pumpAndSettle();
+      expect(queue.removed, [340]);
+    });
+
+    testWidgets('files_version が変わっていたら「更新あり」として落とし直せる', (tester) async {
+      // 手元は世代 1、サーバーの巻は files_version = 9。
+      final queue = StubDownloadQueue(
+        initial: {
+          340: const VolumeDownload(
+            volumeId: 340,
+            bookId: 12,
+            filesVersion: 1,
+            status: VolumeDownloadStatus.completed,
+            receivedBytes: 100,
+            totalBytes: 100,
+          ),
+        },
+      );
+      await pumpDetail(
+        tester,
+        booksApi: FakeBooksApi(
+          bookDetail: sampleDetail(
+            volumes: const [
+              BookVolume(
+                id: 340,
+                volume: 1,
+                archiveBytes: 104857600,
+                filesVersion: 9,
+                totalPages: 190,
+              ),
+            ],
+          ),
+        ),
+        downloadQueue: queue,
+      );
+
+      expect(find.textContaining('更新あり'), findsOneWidget);
+      expect(find.byIcon(Icons.offline_pin), findsNothing);
+
+      await tester.tap(find.byIcon(Icons.sync_problem));
+      await tester.pumpAndSettle();
+      expect(queue.enqueued, [(volumeId: 340, bookId: 12)]);
+    });
   });
 
   group('お気に入り', () {

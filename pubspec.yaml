@@ -9,6 +9,7 @@ environment:
   sdk: ^3.13.4
 
 dependencies:
+  archive: ^4.3.0
   cupertino_icons: ^1.0.8
   # HTTP クライアント（Bearer 付与・ETag・リトライのインターセプタを載せる）
   device_info_plus: ^13.2.0

@@ -110,6 +110,7 @@ class _DetailBody extends StatelessWidget {
             itemBuilder: (context, index) {
               final volume = detail.volumes[index];
               return VolumeTile(
+                bookId: detail.id,
                 volume: volume,
                 onOpen: () => context.push(AppRoutes.viewer(volume.id)),
               );

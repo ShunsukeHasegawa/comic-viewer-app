@@ -81,10 +81,11 @@ class _Body extends ConsumerWidget {
           bytes: usage.thumbnailBytes,
           count: usage.thumbnailCount,
         ),
-        // ダウンロード済み容量の集計は #9 / #13。枠だけ先に用意する。
+        // ダウンロード済み容量の集計と削除導線は #13（ダウンロード管理画面）。
+        // ここで集計すると設定画面が巻の台帳まで読むことになるので枠だけ残す。
         const ListTile(
           title: Text('ダウンロード済み'),
-          subtitle: Text('#9 で実装予定（一時キャッシュとは別に管理します）'),
+          subtitle: Text('一時キャッシュとは別に管理します（集計は #13）'),
           trailing: Text('—'),
         ),
         ListTile(

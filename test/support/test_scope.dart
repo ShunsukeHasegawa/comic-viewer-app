@@ -11,6 +11,8 @@ import 'package:comic_laz/features/auth/application/auth_controller.dart';
 import 'package:comic_laz/features/auth/data/auth_api.dart';
 import 'package:comic_laz/features/auth/data/auth_store.dart';
 import 'package:comic_laz/features/auth/domain/auth_state.dart';
+import 'package:comic_laz/features/downloads/application/download_queue.dart';
+import 'package:comic_laz/features/downloads/domain/volume_download.dart';
 import 'package:comic_laz/features/viewer/presentation/widgets/viewer_page_image.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -19,6 +21,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'api_fakes.dart';
 import 'auth_fakes.dart';
+import 'download_fakes.dart';
 
 /// プラットフォームチャネルとネットワークを触らないようにした標準の override 群。
 List<Override> testOverrides({
@@ -33,6 +36,8 @@ List<Override> testOverrides({
   ViewerImageBuilder? viewerImageBuilder,
   PagePrecacher? pagePrecacher,
   StaleCacheEvictor? staleCacheEvictor,
+  Map<int, VolumeDownload>? downloads,
+  DownloadQueue Function()? downloadQueue,
   String apiBaseUrl = 'http://localhost:8000',
 }) {
   return [
@@ -66,6 +71,11 @@ List<Override> testOverrides({
       staleCacheEvictor ??
           ({required int volumeId, required int keepFilesVersion}) async {},
     ),
+    // ダウンロードは DB とファイルを作るので、画面のテストでは記録だけの
+    // スタブに差し替える（キューそのものの検証は download_queue_test）。
+    downloadQueueProvider.overrideWith(
+      downloadQueue ?? () => StubDownloadQueue(initial: {...?downloads}),
+    ),
   ];
 }
 
@@ -88,6 +98,8 @@ ProviderContainer createContainer({
   BooksApi? booksApi,
   UserApi? userApi,
   TaxonomyApi? taxonomyApi,
+  Map<int, VolumeDownload>? downloads,
+  DownloadQueue Function()? downloadQueue,
 }) {
   return ProviderContainer(
     overrides: testOverrides(
@@ -98,6 +110,8 @@ ProviderContainer createContainer({
       booksApi: booksApi,
       userApi: userApi,
       taxonomyApi: taxonomyApi,
+      downloads: downloads,
+      downloadQueue: downloadQueue,
     ),
   );
 }
