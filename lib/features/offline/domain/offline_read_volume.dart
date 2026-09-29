@@ -11,9 +11,10 @@ import '../../downloads/domain/volume_download.dart';
 /// - ダウンロードしただけで開いていない巻は、**マニフェスト**（ZIP のページ
 ///   エントリ番号）と**タイトル詳細**（巻数 / 次巻 / 表紙）から組み立てる
 ///
-/// 「ダウンロード済みでない巻は開けない」ことをここで担保する（[download] が
-/// 完了していなければ必ず `null`）。ページ画像は ZIP からしか出せないため、
-/// 台帳が完了していない巻を開かせても真っ黒な画面になるだけ。
+/// 「実体が無い巻は開けない」ことをここで担保する（[download] が端末の ZIP を
+/// 指していなければ必ず `null`）。ページ画像は ZIP からしか出せないため、実体の
+/// 無い巻を開かせても真っ黒な画面になるだけ。判定に status を使わないのは、
+/// 「更新あり」の取り直し中も旧世代の ZIP は読めるため（#11 のレビュー指摘）。
 ReadVolume? buildOfflineReadVolume({
   required int volumeId,
   required VolumeDownload? download,
@@ -21,7 +22,7 @@ ReadVolume? buildOfflineReadVolume({
   BookDetail? detail,
   VolumeManifest? manifest,
 }) {
-  if (download == null || !download.isCompleted) return null;
+  if (download == null || !download.hasInstalledArchive) return null;
 
   // 保存済みの巻情報が手元の ZIP と同じ世代なら、それが一番情報量が多い
   // （サーバーが返した next_volume_id / 次巻サムネイルを含む）。

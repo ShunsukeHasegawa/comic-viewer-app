@@ -5,6 +5,7 @@ import '../../auth/domain/auth_state.dart';
 import '../../progress/application/progress_syncer.dart';
 import '../../progress/data/local_progress_recorder.dart';
 import '../../progress/data/progress_store.dart';
+import '../../progress/domain/reading_progress.dart';
 
 part 'progress_recorder.g.dart';
 
@@ -33,11 +34,17 @@ abstract interface class ProgressRecorder {
     required DateTime readAt,
   });
 
-  /// まだサーバーへ送れていないローカルの進捗ページ（無ければ `null`）。
+  /// 端末に残っているこの巻の進捗（無ければ `null`）。
   ///
   /// オフラインで読み進めた巻を開き直したときに、サーバー由来の古いページから
   /// 再開して**手元の進捗を巻き戻さない**ために使う。
-  Future<int?> unsyncedPage(int volumeId);
+  ///
+  /// 送信済み（`synced`）の行も返す。控えてある `ReadVolume`（#11）は「最後に
+  /// オンラインで開いた時点」の `current_page` なので、そのあと読んで送信できた
+  /// ページは入っていない。圏外で開き直したときに古いページから再開すると、
+  /// そこからのページ送りが**新しい `read_at`** で保存され、復帰後の一括同期が
+  /// サーバーの正しい進捗を巻き戻してしまう。
+  Future<ReadingProgress?> localProgress(int volumeId);
 }
 
 @Riverpod(keepAlive: true)

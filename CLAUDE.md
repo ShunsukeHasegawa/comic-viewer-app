@@ -60,6 +60,12 @@ test/         lib と同じ構成。共通フェイクは test/support/
 - 画像に Bearer を付けるのは **API と同じオリジンのみ**（`AppConfig.isApiOrigin`）。
 - 端末内にユーザー固有データを持つ機能は `SessionDataPurger` を
   `sessionDataPurgersProvider` に登録する（ログアウト時に破棄。#15）。
+  取り直せないデータ（ダウンロード済み ZIP / 未送信の進捗）を消すものは
+  `purgesRefetchableOnly = false` にする。`safe_mode` の変更だけでは走らせない
+  （同じユーザーの数 GB と、サーバーにも無い読書位置を黙って消さない）。
+- 「オフラインで読めるか」は台帳の `status` ではなく
+  `VolumeDownload.hasInstalledArchive` で判断する。「更新あり」の取り直し中も
+  旧世代の ZIP は端末に残っていて読める。
 - テストはネットワークとプラットフォームチャネルを触らない。`test/support/test_scope.dart`
   の `testOverrides` / `createContainer` を使い、必要なフェイクは `test/support/` に足す。
 - テスト名・コメントは日本語で、「なぜ」を書く（「何を」はコードを読めば分かる）。

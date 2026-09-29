@@ -91,6 +91,19 @@ void main() {
       );
     });
 
+    // 詳細画面（autoDispose）は「ダウンロードを始めてすぐ一覧へ戻る」だけで
+    // 破棄されるので、完了時に詳細を控えられない。圏外で一覧には出るのに詳細が
+    // 開けないタイトルになるため、画面に依存しないここから控える（#11 の
+    // レビュー指摘）。
+    test('完了したらオフライン用の詳細を控えに行く（画面が無くても）', () async {
+      final scope = setUpQueue();
+
+      await scope.queue.enqueue(volumeId: volumeId, bookId: bookId);
+      await settle();
+
+      expect(scope.harness.warmedBooks, [bookId]);
+    });
+
     test('同じ巻を二重に積まない（自宅サーバーへ同じ ZIP を 2 回取りに行かない）', () async {
       final scope = setUpQueue();
       final gate = Completer<void>();

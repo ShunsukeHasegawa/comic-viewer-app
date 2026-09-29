@@ -49,13 +49,21 @@ class FakeDeviceNameResolver implements DeviceNameResolver {
 }
 
 class RecordingPurger implements SessionDataPurger {
-  RecordingPurger({this.throwOnPurge = false});
+  RecordingPurger({
+    this.throwOnPurge = false,
+    this.purgesRefetchableOnly = true,
+    this.debugLabel = 'recording',
+  });
 
   final bool throwOnPurge;
   int calls = 0;
 
+  /// 取り直せるデータだけを消す破棄か（`safe_mode` の変更でも走る）。
   @override
-  String get debugLabel => 'recording';
+  final bool purgesRefetchableOnly;
+
+  @override
+  final String debugLabel;
 
   @override
   Future<void> purgeSessionData() async {

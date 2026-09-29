@@ -117,13 +117,21 @@ void main() {
   // しまうので破棄する（#11）。
   group('ユーザー / セーフモードの変更', () {
     /// 前回は [previous]、今回サーバーが [next} を返した状況を作る。
-    Future<RecordingPurger> restoreWith(User previous, User next) async {
+    ///
+    /// 取り直せるもの（一覧 / 画像キャッシュ）と、端末にしか無いもの
+    /// （ダウンロード済みの巻 / 未送信の進捗）を別々に見られるようにしておく。
+    Future<({RecordingPurger refetchable, RecordingPurger localOnly})>
+    restoreWithPurgers(User previous, User next) async {
       final api = MockAuthApi()..stubCurrentUser(next);
-      final purger = RecordingPurger();
+      final refetchable = RecordingPurger(debugLabel: 'offline metadata');
+      final localOnly = RecordingPurger(
+        purgesRefetchableOnly: false,
+        debugLabel: 'downloaded volumes',
+      );
       final container = createContainer(
         authStore: FakeAuthStore(token: 'valid', user: previous),
         authApi: api,
-        purgers: [purger],
+        purgers: [refetchable, localOnly],
       );
       addTearDown(container.dispose);
 
@@ -132,25 +140,37 @@ void main() {
         container.read(authControllerProvider),
         AuthState.authenticated(next),
       );
-      return purger;
+      return (refetchable: refetchable, localOnly: localOnly);
     }
 
-    test('別のユーザーに変わったら端末内データを破棄する', () async {
-      final purger = await restoreWith(
+    Future<RecordingPurger> restoreWith(User previous, User next) async =>
+        (await restoreWithPurgers(previous, next)).refetchable;
+
+    test('別のユーザーに変わったら端末内データを全部破棄する', () async {
+      final purgers = await restoreWithPurgers(
         testUser,
         const User(id: 2, name: '別の人'),
       );
 
-      expect(purger.calls, 1);
+      expect(purgers.refetchable.calls, 1);
+      expect(purgers.localOnly.calls, 1, reason: '前のユーザーのコミックと読書位置を端末に残さない');
     });
 
-    test('セーフモード設定が変わったら端末内データを破棄する', () async {
-      final purger = await restoreWith(
+    // #11 のレビュー指摘: 同じユーザーなのにダウンロード済みの巻（数 GB）と
+    // 未送信の進捗まで消していた。未送信の進捗はサーバーにも無いので、消したら
+    // 永久に失われる。セーフモードで隠したいのは前の設定で取った一覧・詳細・画像。
+    test('セーフモード設定だけが変わったら取り直せるものしか破棄しない', () async {
+      final purgers = await restoreWithPurgers(
         testUser,
         testUser.copyWith(safeMode: true),
       );
 
-      expect(purger.calls, 1, reason: '前の設定で取った一覧がオフラインで見えてしまう');
+      expect(purgers.refetchable.calls, 1, reason: '前の設定で取った一覧がオフラインで見えてしまう');
+      expect(
+        purgers.localOnly.calls,
+        0,
+        reason: 'ダウンロード済みの巻と未送信の進捗は同じユーザーのものなので残す',
+      );
     });
 
     test('同じユーザー・同じ設定なら破棄しない', () async {

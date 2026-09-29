@@ -7,6 +7,21 @@ import '../cache/image_cache_purger.dart';
 
 part 'session_data_purger.g.dart';
 
+/// 破棄の範囲。
+///
+/// 「見せてはいけないものを隠す」目的（`safe_mode` の変更）で、端末にしか無い
+/// データまで消してしまうのは行き過ぎ（#11 のレビュー指摘）。ダウンロード済みの
+/// 巻は数 GB を予告なく消すことになり、未送信の読書進捗はサーバーにも無いので
+/// **永久に失われる**。範囲を分けて、取り直せるものだけ消せるようにする。
+enum SessionPurgeScope {
+  /// セッションが終わった / 別のユーザーになった。端末内のユーザー固有データを全部捨てる。
+  session,
+
+  /// 同じユーザーのまま「見せてよい範囲」が変わった（`safe_mode`）。
+  /// サーバーから取り直せるものだけ捨てる。
+  refetchable,
+}
+
 /// ログアウト / トークン失効時に端末内のデータを破棄する処理。
 ///
 /// Web 版の `purgeMediaCaches` / `clearLocalStorageReadingProgress` 相当。
@@ -15,8 +30,26 @@ abstract interface class SessionDataPurger {
   /// 何を消すかの説明（ログ用）。
   String get debugLabel;
 
+  /// サーバーから取り直せるデータだけを消す破棄か。
+  ///
+  /// `true` のものは [SessionPurgeScope.refetchable]（`safe_mode` の変更）でも
+  /// 走る。端末にしか無いデータ（ダウンロード済みの ZIP / 未送信の進捗）を消す
+  /// ものは `false` にして、セッションの終わり・ユーザー切り替えだけに限る。
+  bool get purgesRefetchableOnly;
+
   Future<void> purgeSessionData();
 }
+
+/// [scope] で走らせる破棄だけを選ぶ。
+Iterable<SessionDataPurger> purgersInScope(
+  Iterable<SessionDataPurger> purgers,
+  SessionPurgeScope scope,
+) => switch (scope) {
+  SessionPurgeScope.session => purgers,
+  SessionPurgeScope.refetchable => purgers.where(
+    (purger) => purger.purgesRefetchableOnly,
+  ),
+};
 
 /// 登録済みの破棄処理。
 ///

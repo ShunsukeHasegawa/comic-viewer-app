@@ -53,7 +53,7 @@ final class AuthControllerProvider
   }
 }
 
-String _$authControllerHash() => r'91353759a138c3f40f69c2b0c74a1c5e6c69bd98';
+String _$authControllerHash() => r'7b69cba78a8bf096872c9f4619f8e317e021bbd8';
 
 /// ログイン状態の管理。
 ///

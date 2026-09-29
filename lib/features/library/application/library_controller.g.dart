@@ -36,7 +36,7 @@ final class LibraryControllerProvider
   LibraryController create() => LibraryController();
 }
 
-String _$libraryControllerHash() => r'8423a6c2cd1114267fdecfc16f45d0a61f72daaf';
+String _$libraryControllerHash() => r'ec9553ff157a8a79e123ea9fc780537b5a53d0d8';
 
 /// ライブラリ一覧の読み込み。
 
@@ -220,4 +220,4 @@ final class VisibleBooksProvider
   }
 }
 
-String _$visibleBooksHash() => r'afd315946f0e1354fc25ff0ca59a5a81a25cbbe3';
+String _$visibleBooksHash() => r'23a9307187e97d05b3cda1fd3d73dc8592ffbade';

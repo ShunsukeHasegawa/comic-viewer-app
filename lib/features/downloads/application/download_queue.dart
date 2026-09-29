@@ -8,6 +8,7 @@ import '../../../core/network/api_exception.dart';
 import '../../../core/utils/format.dart';
 import '../../../data/api/volumes_api.dart';
 import '../../../domain/models/volume_manifest.dart';
+import '../../offline/application/offline_detail_warmer.dart';
 import '../data/archive_verifier.dart';
 import '../data/download_store.dart';
 import '../data/free_space_probe.dart';
@@ -572,6 +573,19 @@ class DownloadQueue extends _$DownloadQueue {
         clearFailureReason: true,
       ),
     );
+    _warmOfflineDetail(download.bookId);
+  }
+
+  /// 圏外でも詳細が開けるように、このタイトルの詳細を控える（#11）。
+  ///
+  /// 詳細画面（autoDispose）に任せると「ダウンロードを始めてすぐ一覧へ戻る」
+  /// だけで控えが作られず、圏外で一覧には出るのに詳細が開けないタイトルになる。
+  /// キューの完了は画面に依存しないので、ここから控える。表示を待たせないし、
+  /// 失敗しても取得自体は成功として扱う（次にオンラインで詳細を開けば控えられる）。
+  void _warmOfflineDetail(int bookId) {
+    if (!ref.mounted) return;
+    final warm = ref.read(offlineDetailWarmerProvider);
+    unawaited(warm(bookId).catchError((Object _) {}));
   }
 
   /// 取り直しの起点になる「手元にある完了済みの世代」を覚える。

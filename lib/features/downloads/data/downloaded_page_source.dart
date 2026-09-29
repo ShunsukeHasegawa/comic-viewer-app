@@ -60,10 +60,14 @@ class ZipDownloadedPageSource implements DownloadedPageSource {
     required int filesVersion,
   }) async {
     final download = await _store.find(volumeId);
-    if (download == null || !download.isCompleted) return null;
+    if (download == null) return null;
     // 取得済みの世代がサーバーと違う = 「更新あり」。古い絵を新しい URL の
     // 内容として見せない（消すのはユーザーの操作だけ）。
     if (download.filesVersion != filesVersion) return null;
+    // status は見ない。「更新あり」の取り直し中・中断中も台帳は旧世代を指した
+    // ままで、その ZIP は端末に残っていて読める（#11 のレビュー指摘）。実体が
+    // あるかどうかは下の `existsSync` が確かめる。初回の取得中は台帳の
+    // `filesVersion` が 0 なので、上の比較で弾かれる。
 
     final archive = _store.archiveFile(
       volumeId: volumeId,

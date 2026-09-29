@@ -20,6 +20,10 @@ class OfflineMetadataPurger implements SessionDataPurger {
   @override
   String get debugLabel => 'offline metadata';
 
+  /// 一覧 / 詳細 / 巻情報はオンラインになれば取り直せる。
+  @override
+  bool get purgesRefetchableOnly => true;
+
   @override
   Future<void> purgeSessionData() => _catalog.clear();
 }

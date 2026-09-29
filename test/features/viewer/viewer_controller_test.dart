@@ -35,6 +35,9 @@ ReadVolume volumeFixture({
   /// まだ送れていないローカル進捗（巻 ID → ページ）。
   Map<int, int> unsyncedPages = const {},
 
+  /// 送信済みのローカル進捗（巻 ID → ページ）。
+  Map<int, int> syncedPages = const {},
+
   /// ローカル進捗の読み出しで投げる例外（ローカル DB が読めない状況）。
   Object? unsyncedPageError,
 
@@ -46,6 +49,7 @@ ReadVolume volumeFixture({
 }) {
   final recorder = RecordingProgressRecorder(succeeds: !recordFails)
     ..unsyncedPages.addAll(unsyncedPages)
+    ..syncedPages.addAll(syncedPages)
     ..unsyncedPageError = unsyncedPageError;
   final container = ProviderContainer(
     overrides: [
@@ -94,6 +98,68 @@ void main() {
       );
 
       expect(state.currentPage, 4);
+    });
+
+    // 控えた ReadVolume は「最後にオンラインで開いた時点」の current_page なので、
+    // そのあと読んで**送信できた**ページより古い。古い方から再開すると、1 回
+    // ページを送っただけで新しい read_at の未送信行ができ、復帰後の一括同期
+    // （クライアント申告の read_at 同士で比較する）でサーバーの進捗が巻き戻る。
+    test('圏外で控えから開くときは送信済みのローカル進捗も見る（巻き戻さない）', () async {
+      final fixture = build(
+        readVolumeError: const NetworkException(),
+        offline: FakeOfflineMetadataGateway(
+          volumes: {340: volumeFixture(currentPage: 1)},
+        ),
+        syncedPages: const {340: 4},
+      );
+
+      final state = await fixture.container.read(
+        viewerControllerProvider(340).future,
+      );
+
+      expect(state.isStale, isTrue);
+      expect(state.currentPage, 4);
+
+      // ここからのページ送りはサーバーの 4 より先に進む（2 を書かない）。
+      fixture.container
+          .read(viewerControllerProvider(340).notifier)
+          .goToNextPage();
+      await pumpEventQueue();
+      expect(
+        [for (final save in fixture.recorder.saved) save.currentPage],
+        [5],
+      );
+    });
+
+    test('控えの方が進んでいれば控えを使う（他端末の進捗を取り込んだ控えを戻さない）', () async {
+      final fixture = build(
+        readVolumeError: const NetworkException(),
+        offline: FakeOfflineMetadataGateway(
+          volumes: {340: volumeFixture(currentPage: 5)},
+        ),
+        syncedPages: const {340: 2},
+      );
+
+      final state = await fixture.container.read(
+        viewerControllerProvider(340).future,
+      );
+
+      expect(state.currentPage, 5);
+    });
+
+    test('サーバーに確認できたときは送信済みのローカル値で上書きしない', () async {
+      // 送信済みの行はサーバーが知っている値。サーバーが別の値を返すのは他端末が
+      // 後から読んだからなので、そちらを正にする。
+      final fixture = build(
+        volume: volumeFixture(currentPage: 2),
+        syncedPages: const {340: 5},
+      );
+
+      final state = await fixture.container.read(
+        viewerControllerProvider(340).future,
+      );
+
+      expect(state.currentPage, 2);
     });
 
     test('サーバー由来のページ番号が範囲外でも丸める', () async {

@@ -191,16 +191,31 @@ class AuthController extends _$AuthController {
   /// それがそのまま表示されてしまう（キャッシュ経由で見えてしまわないこと）。
   ///
   /// 前のユーザーが分からない（初回ログイン / ログアウト済み）ときは何もしない。
+  ///
+  /// `safe_mode` だけが変わったときは**取り直せるものだけ**捨てる（#11 の
+  /// レビュー指摘）。同じユーザーなのにダウンロード済みの巻（数 GB）と未送信の
+  /// 読書進捗まで消すのは行き過ぎで、未送信の進捗はサーバーにも無いので
+  /// 永久に失われる。隠したいのは「前の設定で取った一覧・詳細・画像」だけ。
   Future<void> _purgeIfUserChanged(User next) async {
     final previous = await ref.read(authStoreProvider).readUser();
     if (previous == null) return;
-    if (previous.id == next.id && previous.safeMode == next.safeMode) return;
+    if (previous.id != next.id) {
+      if (!ref.mounted) return;
+      await _purgeLocalData();
+      return;
+    }
+    if (previous.safeMode == next.safeMode) return;
     if (!ref.mounted) return;
-    await _purgeLocalData();
+    await _purgeLocalData(scope: SessionPurgeScope.refetchable);
   }
 
-  Future<void> _purgeLocalData() async {
-    for (final purger in ref.read(sessionDataPurgersProvider)) {
+  Future<void> _purgeLocalData({
+    SessionPurgeScope scope = SessionPurgeScope.session,
+  }) async {
+    for (final purger in purgersInScope(
+      ref.read(sessionDataPurgersProvider),
+      scope,
+    )) {
       try {
         await purger.purgeSessionData();
       } on Object {

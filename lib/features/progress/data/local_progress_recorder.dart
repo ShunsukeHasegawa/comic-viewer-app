@@ -1,6 +1,7 @@
 import '../../viewer/data/progress_recorder.dart';
 import '../application/progress_syncer.dart';
 import '../data/progress_store.dart';
+import '../domain/reading_progress.dart';
 
 /// ページ送りをまずローカルへ書き、そのうえで送信を試みる [ProgressRecorder]（#12）。
 ///
@@ -72,8 +73,5 @@ class LocalProgressRecorder implements ProgressRecorder {
   }
 
   @override
-  Future<int?> unsyncedPage(int volumeId) async {
-    final saved = await store.find(volumeId);
-    return saved != null && saved.isPending ? saved.currentPage : null;
-  }
+  Future<ReadingProgress?> localProgress(int volumeId) => store.find(volumeId);
 }

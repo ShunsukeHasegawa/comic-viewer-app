@@ -22,6 +22,11 @@ class DownloadedVolumePurger implements SessionDataPurger {
   @override
   String get debugLabel => 'downloaded volumes';
 
+  /// 数 GB を落とし直させることになるので、セッションの終わり / ユーザー切り替え
+  /// だけで消す（`safe_mode` の変更では消さない。#11 のレビュー指摘）。
+  @override
+  bool get purgesRefetchableOnly => false;
+
   @override
   Future<void> purgeSessionData() => _purge();
 }

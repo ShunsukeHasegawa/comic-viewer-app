@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/widgets/error_view.dart';
 import '../../../domain/models/book.dart';
+import '../../downloads/application/downloaded_lookup.dart';
 import '../application/library_controller.dart';
 import '../domain/library_filter.dart';
 import 'widgets/book_tiles.dart';
@@ -84,6 +85,11 @@ class _LibraryBody extends ConsumerWidget {
             hasScrollBody: false,
             child: switch ((data.books.isEmpty, onlyDownloaded)) {
               (true, _) => const EmptyView(message: '表示できる書籍がありません。'),
+              // ダウンロード台帳を読み終えていないうちは 0 件の理由が分からない
+              // （まだ「無い」とは言えない）。ここで「すべて表示」を押されると
+              // 絞り込み解除が明示状態として残り、読み終えても戻らない（#11）。
+              (false, true) when ref.watch(isDownloadLedgerLoadingProvider) =>
+                const Center(child: CircularProgressIndicator()),
               // 絞り込みを掛けていないのに 0 件 = ダウンロード済みが無い。
               // 「条件に一致しません」だけでは理由も逃げ道も分からない。
               (false, true) when !filter.hasActiveFilters => EmptyView(

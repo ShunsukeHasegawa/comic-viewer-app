@@ -1,6 +1,7 @@
 import 'package:comic_laz/core/device/connectivity_monitor.dart';
 import 'package:comic_laz/core/network/api_exception.dart';
 import 'package:comic_laz/core/widgets/error_view.dart';
+import 'package:comic_laz/data/api/conditional_response.dart';
 import 'package:comic_laz/domain/models/book.dart';
 import 'package:comic_laz/domain/models/reading_book.dart';
 import 'package:comic_laz/features/downloads/domain/volume_download.dart';
@@ -14,6 +15,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../support/api_fakes.dart';
+import '../../support/download_fakes.dart';
 import '../../support/offline_fakes.dart';
 import '../../support/progress_fakes.dart';
 import '../../support/test_scope.dart';
@@ -39,6 +41,23 @@ final sampleBooks = [
     categories: [2],
   ),
 ];
+
+/// 1 回目だけ圏外になる [BooksApi]（復帰の合図で取り直せることを見る）。
+class _OfflineOnceBooksApi extends FakeBooksApi {
+  _OfflineOnceBooksApi() : super(books: sampleBooks, etag: '"v1"');
+
+  @override
+  Future<ConditionalResponse<List<Book>>> fetchBooks({
+    String? ifNoneMatch,
+  }) async {
+    if (fetchBooksCount == 0) {
+      fetchBooksCount++;
+      ifNoneMatchCalls.add(ifNoneMatch);
+      throw const NetworkException();
+    }
+    return super.fetchBooks(ifNoneMatch: ifNoneMatch);
+  }
+}
 
 Future<ProviderContainer> pumpLibrary(
   WidgetTester tester, {
@@ -296,6 +315,49 @@ void main() {
       expect(find.byType(BookGridTile), findsNWidgets(2));
     });
 
+    // 台帳（path_provider + ディレクトリ作成）は一覧（drift の控え）より遅れる。
+    // その間の空集合を「ダウンロード済みが 0 件」と言い切ると、ここで「すべて表示」を
+    // 押されて絞り込み解除が明示状態として残り、読み終えても戻らない（#11 の
+    // レビュー指摘）。pumpAndSettle は進行表示で止まらないので pump で進める。
+    testWidgets('台帳を読み終えるまでは「ありません」と言い切らない', (tester) async {
+      final queue = LoadingDownloadQueue();
+      final cache = InMemoryLibraryCacheStore();
+      await cache.write(
+        LibrarySnapshot(
+          books: sampleBooks,
+          etag: '"v1"',
+          fetchedAt: DateTime.utc(2026, 9, 20),
+        ),
+      );
+      final container = createContainer(
+        booksApi: FakeBooksApi(error: const NetworkException()),
+        taxonomyApi: FakeTaxonomyApi(error: const NetworkException()),
+        libraryCache: cache,
+        downloadQueue: () => queue,
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(home: LibraryScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.textContaining('オフラインです'), findsOneWidget);
+      expect(find.textContaining('ダウンロード済みのタイトルがありません'), findsNothing);
+      expect(find.widgetWithText(OutlinedButton, 'すべて表示'), findsNothing);
+
+      // 台帳を読み終えて、初めて理由と逃げ道を出す。
+      queue.finish();
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.textContaining('ダウンロード済みのタイトルがありません'), findsOneWidget);
+    });
+
     testWidgets('ネットワーク復帰で自動的に最新化する', (tester) async {
       final monitor = FakeConnectivityMonitor();
       final api = FakeBooksApi(books: sampleBooks, etag: '"v1"');
@@ -323,6 +385,61 @@ void main() {
         '"v1"',
         reason: '復帰時は ETag で確認する（変わっていなければ 304 で済む）',
       );
+    });
+
+    // 本物の監視（connectivity_plus）は購読した瞬間に現在の接続状態を 1 件流す。
+    // 初回ロードの最中に 2 本目を走らせると、/api/books を ETag 無しで二重に
+    // 叩いてしまい（どちらもキャッシュ書き込み前に読むので送れない）、後から
+    // 終わった方が古い結果で上書きしかねない（#11 のレビュー指摘）。
+    testWidgets('一覧を開いた瞬間の復帰通知で二重に取りに行かない', (tester) async {
+      final api = FakeBooksApi(books: sampleBooks, etag: '"v1"');
+      final offline = FakeOfflineMetadataGateway();
+
+      await pumpLibrary(
+        tester,
+        booksApi: api,
+        offline: offline,
+        connectivityMonitor: FakeConnectivityMonitor(emitsOnListen: true),
+      );
+
+      expect(api.fetchBooksCount, 1, reason: '起動のたびに 2 回叩かない');
+      expect(offline.pruneCount, 1, reason: '掃除も同時に 2 本走らせない');
+      expect(find.textContaining('オフラインです'), findsNothing);
+      expect(find.byType(BookGridTile), findsNWidgets(2));
+    });
+
+    // 復帰の合図より前に始まったロードが圏外で終わった場合は、そのあと改めて
+    // 取り直しに行く（「進行中があれば何もしない」では復帰を取りこぼす）。
+    // ウィジェットを出さないので擬似時間に縛られない `test` で書く。
+    test('進行中のロードが圏外で終わったら、復帰通知で取り直す', () async {
+      final cache = InMemoryLibraryCacheStore();
+      await cache.write(
+        LibrarySnapshot(
+          books: sampleBooks,
+          etag: '"v1"',
+          fetchedAt: DateTime.utc(2026, 9, 20),
+        ),
+      );
+      final api = _OfflineOnceBooksApi();
+
+      final container = createContainer(
+        booksApi: api,
+        // 購読した瞬間（= 初回ロードの最中）に復帰通知が届く。
+        connectivityMonitor: FakeConnectivityMonitor(emitsOnListen: true),
+        libraryCache: cache,
+      );
+      addTearDown(container.dispose);
+      final sub = container.listen(libraryControllerProvider, (_, _) {});
+      addTearDown(sub.close);
+
+      // 初回ロードは圏外で終わる（控えを isStale つきで返す）。
+      final first = await container.read(libraryControllerProvider.future);
+      expect(first.isStale, isTrue);
+      await pumpEventQueue();
+
+      final data = container.read(libraryControllerProvider).value!;
+      expect(api.fetchBooksCount, 2, reason: '復帰の合図を取りこぼさない');
+      expect(data.isStale, isFalse);
     });
 
     testWidgets('最新を表示中なら復帰通知で取りに行かない', (tester) async {

@@ -3,8 +3,8 @@ import 'package:riverpod_annotation/riverpod_annotation.dart';
 import '../../../domain/models/book_detail.dart';
 import '../../../domain/models/read_volume.dart';
 import '../../../domain/models/reading_book.dart';
-import '../../downloads/application/downloaded_lookup.dart';
 import '../../downloads/data/download_store.dart';
+import '../../downloads/domain/volume_download.dart';
 import '../data/offline_catalog.dart';
 import '../domain/offline_read_volume.dart';
 
@@ -91,7 +91,18 @@ class CatalogOfflineMetadataGateway implements OfflineMetadataGateway {
   Future<ReadVolume?> readVolume(int volumeId) async {
     final store = await downloads();
     final download = await store.find(volumeId);
-    if (download == null || !download.isCompleted) return null;
+    // 「completed か」ではなく「台帳の世代の実体があるか」で判断する。
+    // 「更新あり」の取り直し中（queued / downloading）やその途中でアプリが
+    // 落ちた後（paused）も、台帳は旧世代を指したままで ZIP も残っている。
+    // status で弾くと、手元に完全な ZIP があるのに開けなくなる（#11 のレビュー指摘）。
+    if (download == null || !download.hasInstalledArchive) return null;
+    if (!store
+        .archiveFile(volumeId: volumeId, filesVersion: download.filesVersion)
+        .existsSync()) {
+      // 台帳は指しているのに実体が無い（外部から消された）。開いても真っ黒に
+      // なるだけなので開かせない。
+      return null;
+    }
 
     final stored = await catalog.readVolume(volumeId);
     // 控えが手元の ZIP と同じ世代なら、それだけで開ける。マニフェスト（ファイル
@@ -122,7 +133,7 @@ class CatalogOfflineMetadataGateway implements OfflineMetadataGateway {
     final store = await downloads();
     final download = await store.find(volume.id);
     // 端末に無い巻を控えても、ページが出せないので意味が無い（容量だけ食う）。
-    if (download == null || !download.isCompleted) return;
+    if (download == null || !download.hasInstalledArchive) return;
     await catalog.writeVolume(volume);
   }
 
@@ -135,7 +146,8 @@ class CatalogOfflineMetadataGateway implements OfflineMetadataGateway {
     final store = await downloads();
     final ledger = await store.loadAll();
     final hasDownload = ledger.values.any(
-      (download) => download.bookId == detail.id && download.isCompleted,
+      (download) =>
+          download.bookId == detail.id && download.hasInstalledArchive,
     );
     if (!hasDownload) return;
     await catalog.writeBookDetail(detail);
@@ -158,13 +170,20 @@ class CatalogOfflineMetadataGateway implements OfflineMetadataGateway {
   ///
   /// キュー（メモリ上の状態）ではなく台帳を見るのは、まだキューを組み立てて
   /// いない起動直後にも掃除できるようにするため。
+  ///
+  /// 残す条件は「**台帳に行があるか**」で、完了しているかは見ない（#11 の
+  /// レビュー指摘）。「更新あり」の取り直し中に一覧を読み込むと、行が完了では
+  /// ないせいで詳細・巻情報・サムネイルの保護印まで消えてしまう。取り直しが
+  /// 失敗して台帳が旧世代（completed）へ戻っても控えは戻らないので、読める
+  /// ZIP があるのに圏外で詳細が開けなくなる。ユーザーが削除すれば行ごと
+  /// 消えるので、「行がある」を条件にしても溜め込みは起きない。
   @override
   Future<void> prune() async {
     final store = await downloads();
     final ledger = await store.loadAll();
     await catalog.retain(
-      bookIds: completedBookIds(ledger),
-      volumeIds: completedVolumeIds(ledger),
+      bookIds: ledgerBookIds(ledger),
+      volumeIds: ledger.keys.toSet(),
     );
   }
 }

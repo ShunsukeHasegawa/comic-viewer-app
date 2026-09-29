@@ -25,6 +25,10 @@ class ImageCachePurger implements SessionDataPurger {
   @override
   String get debugLabel => 'image cache';
 
+  /// 一時キャッシュは取り直せる（消えても表示が遅くなるだけ）。
+  @override
+  bool get purgesRefetchableOnly => true;
+
   @override
   Future<void> purgeSessionData() async {
     final store = await _store();

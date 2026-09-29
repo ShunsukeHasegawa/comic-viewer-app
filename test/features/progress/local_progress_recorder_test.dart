@@ -34,7 +34,7 @@ void main() {
 
     expect((await store.find(340))!.currentPage, 7);
     expect(api.syncedBatches, isEmpty, reason: 'ページ送りごとにサーバーを叩かない');
-    expect(await recorder.unsyncedPage(340), 7);
+    expect((await recorder.localProgress(340))?.currentPage, 7);
   });
 
   test('オンラインなら送信まで済んで synced が立つ', () async {
@@ -48,7 +48,10 @@ void main() {
     expect(sent, isTrue);
     expect(server.statuses[340]!.currentPage, 7);
     expect((await store.find(340))!.synced, isTrue);
-    expect(await recorder.unsyncedPage(340), isNull);
+    // 送信済みの行も残る（控えた巻情報より新しいので、圏外の再開位置に使う）。
+    final local = await recorder.localProgress(340);
+    expect(local?.currentPage, 7);
+    expect(local?.isPending, isFalse);
   });
 
   test('圏外では送信できなかったことを返し、進捗は端末に残る', () async {
@@ -66,7 +69,7 @@ void main() {
     expect(saved!.currentPage, 7);
     expect(saved.synced, isFalse);
     // 次に開いたときはこのページから再開する（サーバーの古い値に戻さない）。
-    expect(await recorder.unsyncedPage(340), 7);
+    expect((await recorder.localProgress(340))?.currentPage, 7);
   });
 
   test('ページ番号は min(page, files.length) に丸める', () async {

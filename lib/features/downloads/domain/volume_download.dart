@@ -63,6 +63,23 @@ class VolumeDownload {
 
   bool get isCompleted => status == VolumeDownloadStatus.completed;
 
+  /// 端末に「読める実体」（[filesVersion] の ZIP とマニフェスト）があるか。
+  ///
+  /// 「更新あり」の取り直し中（queued / downloading）も、その途中でアプリが
+  /// 落ちた後（paused）も、台帳の行は**旧世代**を指したままで ZIP も残っている
+  /// （`DownloadQueue` は世代にかかわる項目 [filesVersion] / [pageCount] /
+  /// [archiveEtag] を**検証が通ってから**しか書かない）。そのため status だけで
+  /// 「オフラインで読めるか」を判断すると、手元に完全な ZIP があるのに読めない
+  /// 巻ができてしまう（#11 のレビュー指摘）。
+  ///
+  /// 逆に一度も完了していない行は [filesVersion] / [pageCount] が 0 のままで、
+  /// `{0}.zip` という実体は存在しないので、ここで拾ってしまうことは無い。
+  ///
+  /// 実体が本当にあるか（外部から消されていないか）を見るのは、ファイルを触れる
+  /// 側（`ZipDownloadedPageSource` / `CatalogOfflineMetadataGateway`）に任せる。
+  bool get hasInstalledArchive =>
+      isCompleted || (filesVersion > 0 && pageCount > 0);
+
   /// もう一度開始できる状態か（中断 / 失敗）。
   bool get isResumable =>
       status == VolumeDownloadStatus.paused ||
@@ -132,3 +149,23 @@ class VolumeDownload {
       'VolumeDownload(v$volumeId, ${status.name}, '
       '$receivedBytes/$totalBytes)';
 }
+
+/// 端末で読める巻 ID（[VolumeDownload.hasInstalledArchive]）。
+Set<int> installedVolumeIds(Map<int, VolumeDownload>? downloads) => {
+  for (final download in downloads?.values ?? const <VolumeDownload>[])
+    if (download.hasInstalledArchive) download.volumeId,
+};
+
+/// 読める巻を 1 つ以上持つタイトル ID。
+Set<int> installedBookIds(Map<int, VolumeDownload>? downloads) => {
+  for (final download in downloads?.values ?? const <VolumeDownload>[])
+    if (download.hasInstalledArchive) download.bookId,
+};
+
+/// 台帳に行があるタイトル ID（状態は問わない）。
+///
+/// オフライン用メタ情報の掃除（`OfflineMetadataGateway.prune`）に使う。
+/// 取り直し中の控えまで消さないため、完了しているかは見ない。
+Set<int> ledgerBookIds(Map<int, VolumeDownload> downloads) => {
+  for (final download in downloads.values) download.bookId,
+};

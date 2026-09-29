@@ -18,6 +18,11 @@ class ProgressPurger implements SessionDataPurger {
   @override
   String get debugLabel => 'reading progress';
 
+  /// 未送信の進捗はサーバーにも無いので、消したら復旧できない。
+  /// ユーザーが変わったときだけ消す（`safe_mode` の変更では消さない）。
+  @override
+  bool get purgesRefetchableOnly => false;
+
   @override
   Future<void> purgeSessionData() => _store.deleteAll();
 }

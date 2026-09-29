@@ -48,6 +48,15 @@ Duration? noAutoRetry(int retryCount, Object error) => null;
 /// ライブラリ一覧の読み込み。
 @Riverpod(retry: noAutoRetry)
 class LibraryController extends _$LibraryController {
+  /// 進行中の読み込み。
+  ///
+  /// ネットワーク復帰の合図は**購読した瞬間にも流れる**（`connectivity_plus` の
+  /// `onConnectivityChanged` は購読時に現在の接続状態を 1 件流す）。初回ロードの
+  /// 最中に 2 本目を走らせると、`/api/books` などを ETag 無しで二重に叩いてしまい
+  /// （どちらもキャッシュ書き込み前に読むので `If-None-Match` を送れない）、
+  /// 後から終わった方が古い結果で上書きしかねない（#11 のレビュー指摘）。
+  Future<LibraryData>? _loading;
+
   @override
   Future<LibraryData> build() {
     // ネットワーク復帰で自動的に最新化する（#12 の監視を使い回す）。
@@ -57,14 +66,16 @@ class LibraryController extends _$LibraryController {
         .onRestored
         .listen((_) => unawaited(refreshIfStale()));
     ref.onDispose(subscription.cancel);
-    return _load();
+    return _track(_load());
   }
 
   /// プルリフレッシュ。`If-None-Match` を送らず必ず取り直す。
   Future<void> refresh() async {
     // RefreshIndicator 側が進行表示を出すので loading 状態にはしない
     // （表示中の一覧を消さない）。
-    final next = await AsyncValue.guard(() => _load(forceRefresh: true));
+    final next = await AsyncValue.guard(
+      () => _track(_load(forceRefresh: true)),
+    );
     // 401 → ログイン画面へ戻る途中で破棄されていることがある。
     if (!ref.mounted) return;
     state = next;
@@ -76,11 +87,42 @@ class LibraryController extends _$LibraryController {
   /// 一覧の JSON を作り直させない）。最新を表示しているなら何もしない。
   Future<void> refreshIfStale() async {
     if (!ref.mounted) return;
+    // 進行中のロードがあるなら、その結果を見てから決める（まだ結果が無い状態を
+    // 「圏外」と同じに扱わない）。復帰の合図より前に始まったロードが圏外の内容で
+    // 終わった場合は、このあとの判定で改めて取り直しに行く。
+    var pending = _loading;
+    while (pending != null) {
+      try {
+        await pending;
+      } on Object {
+        // 失敗の扱いは走らせた側（`build` / `refresh`）が済ませている。
+      }
+      if (!ref.mounted) return;
+      pending = _loading;
+    }
+
     final current = state.value;
     if (current != null && !current.isStale) return;
-    final next = await AsyncValue.guard(_load);
+    final next = await AsyncValue.guard(() => _track(_load()));
     if (!ref.mounted) return;
     state = next;
+  }
+
+  /// 進行中の読み込みとして覚えておく（[refreshIfStale] が二重に走らせないため）。
+  Future<LibraryData> _track(Future<LibraryData> task) {
+    _loading = task;
+    unawaited(_forget(task));
+    return task;
+  }
+
+  Future<void> _forget(Future<LibraryData> task) async {
+    try {
+      await task;
+    } on Object {
+      // 結果は呼び出し側が state に入れる。ここでは終わったことだけを見る。
+    }
+    // 後から始まったロードを消さない（Notifier は再構築でも使い回される）。
+    if (identical(_loading, task)) _loading = null;
   }
 
   Future<LibraryData> _load({bool forceRefresh = false}) async {

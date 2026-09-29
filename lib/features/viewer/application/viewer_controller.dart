@@ -12,6 +12,7 @@ import '../../history/application/history_controller.dart';
 import '../../library/application/library_controller.dart';
 import '../../mypage/application/stats_controller.dart';
 import '../../offline/application/offline_metadata_gateway.dart';
+import '../../progress/domain/reading_progress.dart';
 import '../../title/application/book_detail_controller.dart';
 import '../data/progress_recorder.dart';
 
@@ -84,7 +85,10 @@ class ViewerController extends _$ViewerController {
   /// 巻を開く（オンラインなら取得、圏外なら端末の控え）。
   Future<ViewerState> _open() async {
     final loaded = await _loadVolume();
-    final startPage = await _resolveStartPage(loaded.volume);
+    final startPage = await _resolveStartPage(
+      loaded.volume,
+      isStale: loaded.isStale,
+    );
 
     _evictStaleImageCache(loaded.volume);
 
@@ -134,29 +138,45 @@ class ViewerController extends _$ViewerController {
   /// オフラインで読み進めた巻を開き直したときに、送れていない進捗が無かった
   /// ことにされて巻き戻るのを防ぐため。
   ///
-  /// [_lastRecordedPage] は「送信済みのページ」なので、ローカル進捗から再開した
-  /// 場合は `null` のままにしておく（閉じるときに送信を試みさせる）。
-  Future<int> _resolveStartPage(ReadVolume volume) async {
+  /// [isStale] （= 控えた巻情報で開いた）のときは、**送信済み**のローカル進捗も
+  /// 見る（#11 のレビュー指摘）。控えの `current_page` は「最後にオンラインで
+  /// 開いた時点」の値なので、そのあと読んで送信できたページより古い。古い方から
+  /// 再開すると、1 回ページを送っただけで**新しい `read_at`** の未送信行ができ、
+  /// 復帰後の一括同期（クライアント申告の `read_at` 同士で比較する）でサーバーの
+  /// 進捗が巻き戻ってしまう。どちらが新しいかは分からないので、進んでいる方を採る
+  /// （他端末の進捗を取り込んだ控えも巻き戻さない）。
+  ///
+  /// [_lastRecordedPage] は「送信済みのページ」なので、未送信のローカル進捗から
+  /// 再開した場合は `null` のままにしておく（閉じるときに送信を試みさせる）。
+  Future<int> _resolveStartPage(
+    ReadVolume volume, {
+    required bool isStale,
+  }) async {
     _lastRecordedPage = null;
     if (volume.isEmpty) return 1;
 
-    final unsyncedPage = await _readUnsyncedPage(volume.id);
-    if (unsyncedPage != null) return volume.clampPage(unsyncedPage);
+    final local = await _readLocalProgress(volume.id);
+    if (local != null && local.isPending) {
+      return volume.clampPage(local.currentPage);
+    }
 
-    final startPage = volume.clampPage(volume.currentPage);
+    var startPage = volume.clampPage(volume.currentPage);
+    if (isStale && local != null && local.currentPage > startPage) {
+      startPage = volume.clampPage(local.currentPage);
+    }
     _lastRecordedPage = startPage;
     return startPage;
   }
 
-  /// 未送信のローカル進捗を読む。読めなければ `null`（サーバーの値で開く）。
+  /// 端末に残っているこの巻の進捗を読む。読めなければ `null`（サーバーの値で開く）。
   ///
   /// ローカル DB が壊れている / マイグレーションに失敗している場合でも、巻が
   /// 取れているなら読書は続けられるようにする。ここで throw すると build() が
   /// 失敗して「読み込みに失敗しました」のままになり、どの巻も開けなくなる。
   /// 一覧側（`LibraryController._localProgress`）と同じ扱い。
-  Future<int?> _readUnsyncedPage(int volumeId) async {
+  Future<ReadingProgress?> _readLocalProgress(int volumeId) async {
     try {
-      return await _recorder?.unsyncedPage(volumeId);
+      return await _recorder?.localProgress(volumeId);
     } on Object {
       return null;
     }

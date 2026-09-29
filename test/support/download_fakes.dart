@@ -12,6 +12,7 @@ import 'package:comic_laz/features/downloads/data/archive_verifier.dart';
 import 'package:comic_laz/features/downloads/data/download_store.dart';
 import 'package:comic_laz/features/downloads/data/free_space_probe.dart';
 import 'package:comic_laz/features/downloads/domain/volume_download.dart';
+import 'package:comic_laz/features/offline/application/offline_detail_warmer.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
@@ -197,11 +198,19 @@ class DownloadHarness {
   /// バックオフで待った時間。
   final delays = <Duration>[];
 
+  /// 完了後に「オフライン用の詳細を控える」導線が呼ばれたタイトル（#11）。
+  ///
+  /// 本物は `/api/v2/books/{id}` を叩くので、テストでは記録だけにする。
+  final warmedBooks = <int>[];
+
   List<Override> overrides({int concurrency = 1}) => [
     ...cache.overrides(),
     downloadStoreProvider.overrideWith((ref) async => store),
     volumesApiProvider.overrideWithValue(api),
     downloadConcurrencyProvider.overrideWithValue(concurrency),
+    offlineDetailWarmerProvider.overrideWithValue(
+      (bookId) async => warmedBooks.add(bookId),
+    ),
     // 待ち時間は記録だけして進める（テストを実時間で待たせない）。
     downloadRetryDelayProvider.overrideWithValue((duration) async {
       delays.add(duration);
@@ -322,4 +331,20 @@ class StubDownloadQueue extends DownloadQueue {
   void emit(VolumeDownload download) {
     state = AsyncData({...?state.value, download.volumeId: download});
   }
+}
+
+/// 台帳を読み終えないキュー（圏外コールドスタートの読み込み中を模す）。
+///
+/// 台帳の読み込みは `path_provider` とディレクトリ作成を待つので、一覧
+/// （drift の控え）より遅れる。その間に「ダウンロード済みが 0 件」と
+/// 言い切らないことを確かめるために使う（#11）。
+class LoadingDownloadQueue extends DownloadQueue {
+  final _ledger = Completer<Map<int, VolumeDownload>>();
+
+  @override
+  Future<Map<int, VolumeDownload>> build() => _ledger.future;
+
+  /// 読み込みを終わらせる。
+  void finish([Map<int, VolumeDownload> downloads = const {}]) =>
+      _ledger.complete(downloads);
 }

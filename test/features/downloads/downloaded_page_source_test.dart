@@ -91,9 +91,41 @@ void main() {
     );
   });
 
-  test('完了していない巻は使わない（途中のデータを読ませない）', () async {
-    final installed = await installVolume(status: VolumeDownloadStatus.paused);
+  // 「更新あり」の取り直しを始めて（中断して）から圏外に出ても、旧世代の ZIP は
+  // 端末に残っている。status で弾くと手元に完全な ZIP があるのに読めなくなる（#11）。
+  test('取り直しを中断した巻でも、台帳が指す世代の ZIP があれば読める', () async {
+    final installed = await installVolume(
+      status: VolumeDownloadStatus.downloading,
+    );
     final source = ZipDownloadedPageSource(installed.store);
+
+    final bytes = await source.readPage(
+      volumeId: _volumeId,
+      page: 1,
+      filesVersion: _filesVersion,
+    );
+
+    expect(bytes, isNotNull);
+    expect(bytes!.first, 0x43);
+  });
+
+  test('初回の取得中は読めない（台帳がまだ実体を指していない）', () async {
+    final cache = CacheHarness.create();
+    final store = DownloadStore(
+      database: cache.database,
+      directories: cache.directories,
+      now: cache.clock.now,
+    );
+    // 完了するまで世代は書かれないので、台帳の filesVersion は 0 のまま。
+    await store.save(
+      const VolumeDownload(
+        volumeId: _volumeId,
+        bookId: 12,
+        filesVersion: 0,
+        status: VolumeDownloadStatus.downloading,
+      ),
+    );
+    final source = ZipDownloadedPageSource(store);
 
     expect(
       await source.readPage(

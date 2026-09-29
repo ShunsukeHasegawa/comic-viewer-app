@@ -9,13 +9,14 @@ import '../../support/download_fakes.dart';
 
 VolumeDownload _download({
   int filesVersion = 111,
+  int pageCount = 3,
   VolumeDownloadStatus status = VolumeDownloadStatus.completed,
 }) => VolumeDownload(
   volumeId: 340,
   bookId: 12,
   filesVersion: filesVersion,
   status: status,
-  pageCount: 3,
+  pageCount: pageCount,
 );
 
 BookDetail _detail() => const BookDetail(
@@ -33,11 +34,16 @@ BookDetail _detail() => const BookDetail(
 );
 
 void main() {
-  test('ダウンロード済みでない巻は開けない', () {
+  test('実体を指していない台帳の巻は開けない', () {
     expect(
       buildOfflineReadVolume(
         volumeId: 340,
-        download: _download(status: VolumeDownloadStatus.paused),
+        // 初回の取得中 / 中断中。完了するまで世代は書かれないので 0 のまま。
+        download: _download(
+          filesVersion: 0,
+          pageCount: 0,
+          status: VolumeDownloadStatus.paused,
+        ),
         manifest: testManifest(archiveBytes: 100),
       ),
       isNull,
@@ -47,6 +53,21 @@ void main() {
       isNull,
       reason: '台帳に無い巻（未ダウンロード）',
     );
+  });
+
+  // 「更新あり」の取り直し中・中断中は、台帳が旧世代を指したままで ZIP も残って
+  // いる（世代にかかわる項目は検証が通ってからしか書かれない）。status で弾くと
+  // 手元に完全な ZIP があるのに開けなくなる（#11 のレビュー指摘）。
+  test('取り直し中の巻は、台帳が指す旧世代で開ける', () {
+    final volume = buildOfflineReadVolume(
+      volumeId: 340,
+      download: _download(status: VolumeDownloadStatus.downloading),
+      detail: _detail(),
+      manifest: testManifest(archiveBytes: 100),
+    );
+
+    expect(volume?.files, [0, 1, 2]);
+    expect(volume?.filesVersion, 111);
   });
 
   test('保存済みの巻情報が同じ世代ならそれを使う（next_volume_id を持っている）', () {

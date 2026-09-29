@@ -12,7 +12,7 @@ part of 'viewer_page_image.dart';
 ///
 /// **読み込み完了まで画像を出さない**（途中まで描かれた JPEG を見せない）。
 /// 取得元の解決順（ダウンロード済みローカル → キャッシュ → ネットワーク）は
-/// `ComicImageLoader` に集約してあり、#11 はそこへ差し込む。
+/// `ComicImageLoader` に集約してある（#11）。ここは描画だけを受け持つ。
 
 @ProviderFor(viewerImageBuilder)
 final viewerImageBuilderProvider = ViewerImageBuilderProvider._();
@@ -21,7 +21,7 @@ final viewerImageBuilderProvider = ViewerImageBuilderProvider._();
 ///
 /// **読み込み完了まで画像を出さない**（途中まで描かれた JPEG を見せない）。
 /// 取得元の解決順（ダウンロード済みローカル → キャッシュ → ネットワーク）は
-/// `ComicImageLoader` に集約してあり、#11 はそこへ差し込む。
+/// `ComicImageLoader` に集約してある（#11）。ここは描画だけを受け持つ。
 
 final class ViewerImageBuilderProvider
     extends
@@ -35,7 +35,7 @@ final class ViewerImageBuilderProvider
   ///
   /// **読み込み完了まで画像を出さない**（途中まで描かれた JPEG を見せない）。
   /// 取得元の解決順（ダウンロード済みローカル → キャッシュ → ネットワーク）は
-  /// `ComicImageLoader` に集約してあり、#11 はそこへ差し込む。
+  /// `ComicImageLoader` に集約してある（#11）。ここは描画だけを受け持つ。
   ViewerImageBuilderProvider._()
     : super(
         from: null,

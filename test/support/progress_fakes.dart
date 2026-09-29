@@ -225,14 +225,23 @@ class FakeStatusServer {
 
 /// ネットワーク復帰をテストから起こせる [ConnectivityMonitor]。
 class FakeConnectivityMonitor implements ConnectivityMonitor {
-  FakeConnectivityMonitor() {
+  FakeConnectivityMonitor({this.emitsOnListen = false}) {
     addTearDown(close);
   }
+
+  /// 購読した瞬間に 1 件流すか。
+  ///
+  /// 本物（`connectivity_plus`）は購読時に現在の接続状態を必ず 1 件流すので、
+  /// 「一覧を開いた瞬間に復帰通知が来る」状況を再現するために使う（#11）。
+  final bool emitsOnListen;
 
   final _controller = StreamController<void>.broadcast();
 
   @override
-  Stream<void> get onRestored => _controller.stream;
+  Stream<void> get onRestored async* {
+    if (emitsOnListen) yield null;
+    yield* _controller.stream;
+  }
 
   /// 圏外 → 接続あり。
   void restore() => _controller.add(null);
