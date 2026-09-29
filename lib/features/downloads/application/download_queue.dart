@@ -77,6 +77,13 @@ class DownloadQueue extends _$DownloadQueue {
   /// 最後に DB へ書いた受信バイト数。
   final _persistedBytes = <int, int>{};
 
+  /// 取り直しを始めた時点で端末にあった「完了済みの世代」。
+  ///
+  /// 「更新あり」の取り直しが失敗 / 中断しても、台帳はここへ戻す。
+  /// 通信の失敗で手元のキャッシュ（オフラインで読める旧世代）を捨てないため
+  /// （落とし直しに失敗した瞬間に、読める ZIP を指す行が台帳から消えてしまう）。
+  final _installed = <int, VolumeDownload>{};
+
   /// 破棄の世代。[purgeAll] のたびに進む。
   ///
   /// ログアウトより前に始まった取得が、破棄の後に完了して前のユーザーの
@@ -92,6 +99,7 @@ class DownloadQueue extends _$DownloadQueue {
     _cancelAll();
     _running.clear();
     _persistedBytes.clear();
+    _installed.clear();
 
     final store = await ref.watch(downloadStoreProvider.future);
     _store = store;
@@ -123,6 +131,8 @@ class DownloadQueue extends _$DownloadQueue {
 
     final existing = state.value?[volumeId];
     if (existing != null && existing.isActive) return;
+    // 取り直し（完了済みの巻を新しい世代で落とし直す）なら、手元の世代を覚えておく。
+    if (existing != null) _rememberInstalled(existing);
 
     final download =
         (existing ??
@@ -155,7 +165,9 @@ class DownloadQueue extends _$DownloadQueue {
 
     final current = state.value?[volumeId];
     if (current == null || !current.isActive) return;
-    await _save(current.copyWith(status: VolumeDownloadStatus.paused));
+    // 取得はまだ始まっていない（マニフェスト取得中 / 待機中）。ここで中断を
+    // 台帳に書けば、[_run] が続きを流さずに畳む。
+    await _savePaused(current);
   }
 
   /// 中断 / 失敗したダウンロードを続きから再開する。
@@ -190,6 +202,7 @@ class DownloadQueue extends _$DownloadQueue {
     _cancelAll();
     _running.clear();
     _persistedBytes.clear();
+    _installed.clear();
 
     final store = _store;
     if (store != null) {
@@ -247,12 +260,16 @@ class DownloadQueue extends _$DownloadQueue {
 
     download = state.value?[volumeId];
     if (download == null) return;
-    download = download.copyWith(
-      filesVersion: manifest.filesVersion,
-      totalBytes: manifest.archiveBytes,
-      pageCount: manifest.pageCount,
-      archiveEtag: manifest.archiveEtag,
-    );
+    // マニフェスト取得の間は [CancelToken] がまだ無いので、[pause] は台帳の
+    // status だけを書き換えて戻る。ここで status を見ないと「中断中」と表示した
+    // まま数百 MB を落としきってしまう（モバイル回線を勝手に使い切らせない）。
+    if (!download.isActive) return;
+
+    // 世代にかかわる項目（filesVersion / pageCount / archive_etag）は**検証が
+    // 通ってから**台帳に書く（[_complete]）。取り直しの途中で落ちても、台帳は
+    // 端末にある旧世代を指したままにしておきたい（#11 のページ解決が実体の無い
+    // 世代を指さないようにする）。進捗表示に必要な全体バイト数だけ先に入れる。
+    download = download.copyWith(totalBytes: manifest.archiveBytes);
 
     await store.ensureVolumeDirectory(volumeId);
     final archive = store.archiveFile(
@@ -264,49 +281,75 @@ class DownloadQueue extends _$DownloadQueue {
       filesVersion: manifest.filesVersion,
     );
 
-    // 同じ世代が既に手元にある（取り直しの空振り）。落とし直さない。
-    if (archive.existsSync() &&
+    // 同じ世代が既に手元にある（取り直しの空振り / rename 済みで確定前に落ちた）。
+    // 落とし直さないが、マニフェストの保存と旧世代の掃除は下でやり直す。
+    final alreadyHave =
+        archive.existsSync() &&
         (manifest.archiveBytes == 0 ||
-            archive.lengthSync() == manifest.archiveBytes)) {
-      await _complete(download, manifest, generation: generation);
-      return;
-    }
+            archive.lengthSync() == manifest.archiveBytes);
 
-    final received = part.existsSync() ? part.lengthSync() : 0;
-    _persistedBytes[volumeId] = received;
-    await _save(download.copyWith(receivedBytes: received));
+    if (!alreadyHave) {
+      final received = part.existsSync() ? part.lengthSync() : 0;
+      _persistedBytes[volumeId] = received;
+      await _save(download.copyWith(receivedBytes: received));
 
-    if (await _hasNotEnoughSpace(manifest.archiveBytes - received)) {
-      await _fail(
+      // 一時ファイルが既に全長ぶん溜まっている（検証 / rename の直前で OS に
+      // 殺された）場合は取りに行かない。`Range: bytes={全長}-` はサーバー
+      // （Symfony / nginx）が 416 を返し、それは再試行対象外なので再開するたび
+      // 同じ失敗になって永久に完了できなくなる。多すぎる場合も検証へ回す
+      // （サイズ不一致で一時ファイルを捨て、次の取得がやり直せる）。
+      final hasEverything =
+          manifest.archiveBytes > 0 && received >= manifest.archiveBytes;
+
+      if (!hasEverything) {
+        if (await _hasNotEnoughSpace(manifest.archiveBytes - received)) {
+          await _fail(
+            volumeId,
+            '端末の空き容量が足りません（${formatBytes(manifest.archiveBytes - received)} 必要です）。',
+            generation: generation,
+          );
+          return;
+        }
+
+        if (!await _fetch(volumeId, manifest, part, generation: generation)) {
+          return;
+        }
+        if (_isStale(generation)) {
+          await _deleteQuietly(part);
+          return;
+        }
+      }
+
+      final verified = await _verify(
         volumeId,
-        '端末の空き容量が足りません（${formatBytes(manifest.archiveBytes - received)} 必要です）。',
+        manifest,
+        part,
         generation: generation,
       );
-      return;
+      if (!verified) return;
+
+      try {
+        if (archive.existsSync()) await archive.delete();
+        // 検証が通ってから初めて本番のファイル名にする。途中のデータが
+        // 「ダウンロード済み」と認識されることは無い。
+        await part.rename(archive.path);
+      } on FileSystemException catch (error) {
+        await _deleteQuietly(part);
+        await _fail(
+          volumeId,
+          _fileSystemMessage(error),
+          generation: generation,
+        );
+        return;
+      }
     }
 
-    if (!await _fetch(volumeId, manifest, part, generation: generation)) return;
-    if (_isStale(generation)) {
-      await _deleteQuietly(part);
-      return;
-    }
-
-    final verified = await _verify(
-      volumeId,
-      manifest,
-      part,
-      generation: generation,
-    );
-    if (!verified) return;
-
+    // マニフェストは早期完了の経路でも必ず書く。rename 済み・マニフェスト未保存
+    // で落ちた巻をそのまま「ダウンロード済み」に確定させると、{v}.json が無い
+    // まま固定されて #11 のページ解決が恒久的にできなくなる。
     try {
-      if (archive.existsSync()) await archive.delete();
-      // 検証が通ってから初めて本番のファイル名にする。途中のデータが
-      // 「ダウンロード済み」と認識されることは無い。
-      await part.rename(archive.path);
       await store.writeManifest(manifest);
     } on FileSystemException catch (error) {
-      await _deleteQuietly(part);
       await _fail(volumeId, _fileSystemMessage(error), generation: generation);
       return;
     }
@@ -349,7 +392,7 @@ class DownloadQueue extends _$DownloadQueue {
         );
         return true;
       } on RequestCancelledException {
-        await _handleStop(volumeId, part);
+        await _handleStop(volumeId, part, generation: generation);
         return false;
       } on FileSystemException catch (error) {
         // 保存先の失敗（容量不足など）。取り直しても直らないので再試行しない。
@@ -368,7 +411,7 @@ class DownloadQueue extends _$DownloadQueue {
         if (!ref.mounted || _isStale(generation)) return false;
         // 待っている間に止められていたら、再試行せずに後始末する。
         if (_stopIntents.containsKey(volumeId)) {
-          await _handleStop(volumeId, part);
+          await _handleStop(volumeId, part, generation: generation);
           return false;
         }
         _emit(
@@ -436,22 +479,26 @@ class DownloadQueue extends _$DownloadQueue {
 
   // ---------------------------------------------------------------- 後始末
 
-  Future<void> _handleStop(int volumeId, File part) async {
+  Future<void> _handleStop(
+    int volumeId,
+    File part, {
+    required int generation,
+  }) async {
     final intent = _stopIntents.remove(volumeId) ?? _StopIntent.pause;
     if (intent == _StopIntent.cancel) {
       await _deleteEverything(volumeId);
       return;
     }
 
+    // ログアウト（[purgeAll]）と競合した取得もここへ来る。キャンセル例外は破棄の
+    // 途中（`await` の隙）に届くので、世代を見ずに書き戻すと前のユーザーの行が
+    // 削除の後に復活する（次の起動で「中断中」として一覧に出てしまう。#15）。
+    if (_isStale(generation)) return;
+
     final current = state.value?[volumeId];
     if (current == null) return;
     final received = part.existsSync() ? part.lengthSync() : 0;
-    await _save(
-      current.copyWith(
-        status: VolumeDownloadStatus.paused,
-        receivedBytes: received,
-      ),
-    );
+    await _savePaused(current, receivedBytes: received);
   }
 
   Future<void> _deleteEverything(int volumeId) async {
@@ -461,6 +508,7 @@ class DownloadQueue extends _$DownloadQueue {
       await store.deleteFiles(volumeId);
     }
     _persistedBytes.remove(volumeId);
+    _installed.remove(volumeId);
     _forget(volumeId);
   }
 
@@ -468,13 +516,25 @@ class DownloadQueue extends _$DownloadQueue {
     int volumeId,
     String reason, {
     required int generation,
+    bool resetProgress = false,
   }) async {
     if (_isStale(generation)) return;
     final current = state.value?[volumeId];
     if (current == null) return;
+
+    // 取り直しの失敗では、端末に残っている旧世代の「ダウンロード済み」へ戻す。
+    // 通信エラーでオフラインに読めるものを失わせない（CLAUDE.md）。理由は
+    // 残すので、UI は「更新の取得に失敗」として見せられる（黙って隠さない）。
+    final installed = _installed.remove(volumeId);
+    if (installed != null) {
+      await _save(installed.copyWith(failureReason: reason));
+      return;
+    }
+
     await _save(
       current.copyWith(
         status: VolumeDownloadStatus.failed,
+        receivedBytes: resetProgress ? 0 : null,
         failureReason: reason,
       ),
     );
@@ -488,21 +548,8 @@ class DownloadQueue extends _$DownloadQueue {
     required int generation,
   }) async {
     await _deleteQuietly(part);
-    final current = state.value?[volumeId];
-    if (current != null) {
-      _persistedBytes[volumeId] = 0;
-      if (!_isStale(generation)) {
-        await _save(
-          current.copyWith(
-            status: VolumeDownloadStatus.failed,
-            receivedBytes: 0,
-            failureReason: reason,
-          ),
-        );
-        return;
-      }
-    }
-    await _fail(volumeId, reason, generation: generation);
+    _persistedBytes[volumeId] = 0;
+    await _fail(volumeId, reason, generation: generation, resetProgress: true);
   }
 
   Future<void> _complete(
@@ -511,13 +558,54 @@ class DownloadQueue extends _$DownloadQueue {
     required int generation,
   }) async {
     if (_isStale(generation)) return;
+    // 取り消し（[remove]）と競合した取得を書き戻さない。実体を消した後に
+    // completed の行だけ復活すると、読めない「ダウンロード済み」が UI に出る。
+    if (!(state.value?.containsKey(download.volumeId) ?? false)) return;
     _persistedBytes.remove(download.volumeId);
+    _installed.remove(download.volumeId);
     await _save(
       download.copyWith(
         status: VolumeDownloadStatus.completed,
         filesVersion: manifest.filesVersion,
         pageCount: manifest.pageCount,
+        archiveEtag: manifest.archiveEtag,
         clearFailureReason: true,
+      ),
+    );
+  }
+
+  /// 取り直しの起点になる「手元にある完了済みの世代」を覚える。
+  ///
+  /// 台帳が completed でも実体が無ければ戻る先にならないので、ZIP の実在を見る。
+  void _rememberInstalled(VolumeDownload download) {
+    final store = _store;
+    final archive = store?.archiveFile(
+      volumeId: download.volumeId,
+      filesVersion: download.filesVersion,
+    );
+    if (!download.isCompleted || archive == null || !archive.existsSync()) {
+      _installed.remove(download.volumeId);
+      return;
+    }
+    _installed[download.volumeId] = download;
+  }
+
+  /// 中断として台帳を書く。
+  ///
+  /// 取り直しの中断なら「中断中」にはせず手元の旧世代へ戻す。新世代を指す
+  /// 中断行にしてしまうと、実体のある旧世代を指す行が台帳から消えてしまい、
+  /// オフラインで読めるはずの巻が読めなくなる（一時ファイルは残るので、
+  /// もう一度「更新あり」を押せば続きから取り直せる）。
+  Future<void> _savePaused(VolumeDownload current, {int? receivedBytes}) async {
+    final installed = _installed.remove(current.volumeId);
+    if (installed != null) {
+      await _save(installed);
+      return;
+    }
+    await _save(
+      current.copyWith(
+        status: VolumeDownloadStatus.paused,
+        receivedBytes: receivedBytes,
       ),
     );
   }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -53,6 +54,9 @@ class FakeVolumesApi implements VolumesApi {
   /// マニフェスト取得で投げる例外。
   Object? manifestError;
 
+  /// マニフェストを返す前に実行する処理（取得の準備中に中断を差し込む）。
+  Future<void> Function()? onManifest;
+
   int manifestCalls = 0;
   int archiveCalls = 0;
 
@@ -68,6 +72,7 @@ class FakeVolumesApi implements VolumesApi {
   @override
   Future<VolumeManifest> fetchManifest(int volumeId) async {
     manifestCalls++;
+    await onManifest?.call();
     if (manifestError case final error?) throw error;
     return manifests[volumeId] ?? manifest;
   }
@@ -114,6 +119,47 @@ class FakeVolumesApi implements VolumesApi {
   }
 }
 
+/// 後片付けの途中に別の処理を割り込ませられる [DownloadStore]。
+///
+/// ログアウトの破棄や完了の確定は複数の `await` に跨るので、「削除の後に書き戻す」
+/// 「確定の直前に取り消す」といった競合はゲートで作らないと再現しない
+/// （イベントループの順序に任せたテストは落ち方が安定しない）。
+class GatedDownloadStore extends DownloadStore {
+  GatedDownloadStore({
+    required super.database,
+    required super.directories,
+    super.now,
+  });
+
+  /// `deleteAllFiles` に入る前に待たせる（破棄の途中を作る）。
+  Completer<void>? beforeDeleteAllFiles;
+
+  /// `deleteOtherVersions` に入る前に待たせる（rename 済み・確定前を作る）。
+  Completer<void>? beforeDeleteOtherVersions;
+
+  @override
+  Future<void> deleteAllFiles() async {
+    final gate = beforeDeleteAllFiles;
+    beforeDeleteAllFiles = null;
+    if (gate != null) await gate.future;
+    await super.deleteAllFiles();
+  }
+
+  @override
+  Future<void> deleteOtherVersions({
+    required int volumeId,
+    required int keepFilesVersion,
+  }) async {
+    final gate = beforeDeleteOtherVersions;
+    beforeDeleteOtherVersions = null;
+    if (gate != null) await gate.future;
+    await super.deleteOtherVersions(
+      volumeId: volumeId,
+      keepFilesVersion: keepFilesVersion,
+    );
+  }
+}
+
 /// メモリ DB + 一時ディレクトリで動くダウンロード一式。
 class DownloadHarness {
   DownloadHarness._({
@@ -129,7 +175,7 @@ class DownloadHarness {
     final cache = CacheHarness.create();
     return DownloadHarness._(
       cache: cache,
-      store: DownloadStore(
+      store: GatedDownloadStore(
         database: cache.database,
         directories: cache.directories,
         now: cache.clock.now,
@@ -139,7 +185,7 @@ class DownloadHarness {
   }
 
   final CacheHarness cache;
-  final DownloadStore store;
+  final GatedDownloadStore store;
   final FakeVolumesApi api;
 
   /// 空き容量（`null` は「分からない」= 本番の既定と同じ）。

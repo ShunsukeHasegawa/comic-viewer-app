@@ -86,8 +86,11 @@ class VolumeTile extends ConsumerWidget {
 
 /// 行に出すダウンロード状態の文言（未DL / DL中 / DL済み / 更新あり）。
 String downloadLabelOf(BookVolume volume, VolumeDownload? download) {
-  if (!volume.isDownloadable) return 'ダウンロード不可';
-  if (download == null) return '未ダウンロード';
+  // サーバー側のアーカイブが消えていても、端末に落としてあるものは
+  // 「ダウンロード済み」として見せる（削除する導線もここからしか無い）。
+  if (download == null) {
+    return volume.isDownloadable ? '未ダウンロード' : 'ダウンロード不可';
+  }
 
   return switch (download.status) {
     VolumeDownloadStatus.queued => 'ダウンロード待ち',
@@ -95,8 +98,12 @@ String downloadLabelOf(BookVolume volume, VolumeDownload? download) {
     VolumeDownloadStatus.paused => '中断中 ${download.percent}%',
     VolumeDownloadStatus.failed =>
       'ダウンロード失敗: ${download.failureReason ?? 'もう一度お試しください。'}',
-    VolumeDownloadStatus.completed =>
-      download.isOutdated(volume.filesVersion) ? '更新あり' : 'ダウンロード済み',
+    // 取り直しが失敗して旧世代へ戻したものは理由を添える。黙って
+    // 「ダウンロード済み」に見せると、更新が入ったものと誤解される。
+    VolumeDownloadStatus.completed => switch (download.failureReason) {
+      final reason? => 'ダウンロード済み（更新の取得に失敗: $reason）',
+      _ => download.isOutdated(volume.filesVersion) ? '更新あり' : 'ダウンロード済み',
+    },
   };
 }
 
@@ -122,14 +129,14 @@ class VolumeDownloadButton extends ConsumerWidget {
     final queue = ref.read(downloadQueueProvider.notifier);
     final current = download;
 
-    if (!volume.isDownloadable) {
-      return Tooltip(
-        message: 'この巻はダウンロードできません（アーカイブがありません）',
-        child: Icon(Icons.cloud_off_outlined, color: scheme.onSurfaceVariant),
-      );
-    }
-
     if (current == null) {
+      // サーバー側にアーカイブが無い巻。台帳にも無いので操作は何も出せない。
+      if (!volume.isDownloadable) {
+        return Tooltip(
+          message: 'この巻はダウンロードできません（アーカイブがありません）',
+          child: Icon(Icons.cloud_off_outlined, color: scheme.onSurfaceVariant),
+        );
+      }
       return IconButton(
         onPressed: () => _guard(
           context,
@@ -171,28 +178,35 @@ class VolumeDownloadButton extends ConsumerWidget {
           ),
         ],
         VolumeDownloadStatus.paused || VolumeDownloadStatus.failed => [
-          IconButton(
-            onPressed: () => _guard(
-              context,
-              what: 'ダウンロードの再開',
-              action: () => queue.resume(volume.id),
+          // サーバー側にアーカイブが無い巻は再開しても 404 になるだけなので、
+          // 取り消し（端末から消す）だけを残す。
+          if (volume.isDownloadable)
+            IconButton(
+              onPressed: () => _guard(
+                context,
+                what: 'ダウンロードの再開',
+                action: () => queue.resume(volume.id),
+              ),
+              tooltip: current.status == VolumeDownloadStatus.failed
+                  ? 'もう一度ダウンロードする'
+                  : 'ダウンロードを再開',
+              icon: Icon(
+                current.status == VolumeDownloadStatus.failed
+                    ? Icons.refresh
+                    : Icons.play_arrow,
+                color: current.status == VolumeDownloadStatus.failed
+                    ? scheme.error
+                    : null,
+              ),
             ),
-            tooltip: current.status == VolumeDownloadStatus.failed
-                ? 'もう一度ダウンロードする'
-                : 'ダウンロードを再開',
-            icon: Icon(
-              current.status == VolumeDownloadStatus.failed
-                  ? Icons.refresh
-                  : Icons.play_arrow,
-              color: current.status == VolumeDownloadStatus.failed
-                  ? scheme.error
-                  : null,
-            ),
-          ),
           _cancelButton(context, queue),
         ],
         VolumeDownloadStatus.completed => [
-          if (current.isOutdated(volume.filesVersion))
+          // 取り直しに失敗して旧世代へ戻したものにも、もう一度試す導線を出す
+          // （オフラインのまま押したときはサーバーの世代が分からないので、
+          // isOutdated では拾えない）。
+          if (current.isOutdated(volume.filesVersion) ||
+              current.failureReason != null)
             IconButton(
               onPressed: () => _guard(
                 context,
@@ -200,7 +214,9 @@ class VolumeDownloadButton extends ConsumerWidget {
                 action: () =>
                     queue.enqueue(volumeId: volume.id, bookId: bookId),
               ),
-              tooltip: 'サーバー側が更新されています。ダウンロードし直す',
+              tooltip: current.failureReason == null
+                  ? 'サーバー側が更新されています。ダウンロードし直す'
+                  : '更新の取得に失敗しました。もう一度試す',
               icon: Icon(Icons.sync_problem, color: scheme.error),
             )
           else

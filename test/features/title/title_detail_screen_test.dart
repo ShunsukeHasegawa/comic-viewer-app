@@ -302,6 +302,66 @@ void main() {
       await tester.pumpAndSettle();
       expect(queue.enqueued, [(volumeId: 340, bookId: 12)]);
     });
+
+    testWidgets('サーバーから消えた巻でも、端末にあるなら削除できる', (tester) async {
+      // ZIP が移動・削除されて archive_bytes / files_version が null になった巻。
+      // 「ダウンロード不可」だけを出すと、端末の数百 MB を回収する導線が消える。
+      final queue = StubDownloadQueue(
+        initial: {
+          340: const VolumeDownload(
+            volumeId: 340,
+            bookId: 12,
+            filesVersion: 1,
+            status: VolumeDownloadStatus.completed,
+            receivedBytes: 100,
+            totalBytes: 100,
+          ),
+        },
+      );
+      await pumpDetail(
+        tester,
+        booksApi: FakeBooksApi(
+          bookDetail: sampleDetail(
+            volumes: const [BookVolume(id: 340, volume: 1)],
+          ),
+        ),
+        downloadQueue: queue,
+      );
+
+      expect(find.textContaining('ダウンロード済み'), findsOneWidget);
+      expect(find.byIcon(Icons.cloud_off_outlined), findsNothing);
+      await tester.tap(find.byIcon(Icons.delete_outline));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, '削除'));
+      await tester.pumpAndSettle();
+
+      expect(queue.removed, [340]);
+    });
+
+    testWidgets('取り直しに失敗した巻は理由を添えて、もう一度試せる', (tester) async {
+      // 通信エラーで旧世代（ダウンロード済み）へ戻した行。黙って
+      // 「ダウンロード済み」に見せると、更新が入ったと誤解される。
+      final queue = StubDownloadQueue(
+        initial: {
+          340: const VolumeDownload(
+            volumeId: 340,
+            bookId: 12,
+            filesVersion: 1,
+            status: VolumeDownloadStatus.completed,
+            receivedBytes: 100,
+            totalBytes: 100,
+            failureReason: 'ネットワークに接続できません。',
+          ),
+        },
+      );
+      await pumpDetail(tester, downloadQueue: queue);
+
+      expect(find.textContaining('更新の取得に失敗: ネットワークに接続できません。'), findsOneWidget);
+
+      await tester.tap(find.byIcon(Icons.sync_problem));
+      await tester.pumpAndSettle();
+      expect(queue.enqueued, [(volumeId: 340, bookId: 12)]);
+    });
   });
 
   group('お気に入り', () {

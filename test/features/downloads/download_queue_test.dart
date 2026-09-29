@@ -562,5 +562,268 @@ void main() {
       expect(download.failureReason, const NotFoundException().message);
       expect(scope.harness.api.archiveCalls, 0);
     });
+
+    test('取得の準備中に中断したら ZIP は落とさない', () async {
+      final scope = setUpQueue();
+      // マニフェストを待っている間（CancelToken がまだ無い区間）に停止ボタン。
+      scope.harness.api.onManifest = () => scope.queue.pause(volumeId);
+
+      await scope.queue.enqueue(volumeId: volumeId, bookId: bookId);
+      await settle();
+
+      expect(
+        scope.harness.api.archiveCalls,
+        0,
+        reason: '「中断中」と表示したまま数百 MB を落としきってはいけない',
+      );
+      expect(downloadOf(scope.container)!.status, VolumeDownloadStatus.paused);
+    });
+  });
+
+  group('再開の取りこぼし', () {
+    test('一時ファイルが全長ぶん残っていたら取りに行かずに検証へ進む', () async {
+      final scope = setUpQueue();
+      // 検証 / rename の直前で OS に殺された状態（.part が全長ぶんある）。
+      await scope.harness.store.ensureVolumeDirectory(volumeId);
+      scope.harness.partFile().writeAsBytesSync(scope.harness.api.archiveBytes);
+
+      await scope.queue.enqueue(volumeId: volumeId, bookId: bookId);
+      await settle();
+
+      expect(
+        scope.harness.api.archiveCalls,
+        0,
+        reason: 'Range: bytes={全長}- はサーバーが 416 を返し、再開するたび同じ失敗になる',
+      );
+      expect(
+        downloadOf(scope.container)!.status,
+        VolumeDownloadStatus.completed,
+      );
+      expect(scope.harness.archiveFile().existsSync(), isTrue);
+    });
+
+    test('一時ファイルが長すぎる場合は検証で捨てる（やり直せる状態に戻す）', () async {
+      final scope = setUpQueue();
+      await scope.harness.store.ensureVolumeDirectory(volumeId);
+      scope.harness.partFile().writeAsBytesSync([
+        ...scope.harness.api.archiveBytes,
+        ...List<int>.filled(64, 0),
+      ]);
+
+      await scope.queue.enqueue(volumeId: volumeId, bookId: bookId);
+      await settle();
+
+      final download = downloadOf(scope.container)!;
+      expect(download.status, VolumeDownloadStatus.failed);
+      expect(download.failureReason, contains('サイズが一致しません'));
+      expect(
+        scope.harness.partFile().existsSync(),
+        isFalse,
+        reason: '捨てておかないと次の再開も同じところで詰まる',
+      );
+    });
+
+    test('rename 済みでマニフェストが無い巻は確定し直すときに書き直す', () async {
+      final scope = setUpQueue();
+      // rename は済んだが {v}.json を書く前に落ちた状態。
+      await scope.harness.store.ensureVolumeDirectory(volumeId);
+      scope.harness.archiveFile().writeAsBytesSync(
+        scope.harness.api.archiveBytes,
+      );
+
+      await scope.queue.enqueue(volumeId: volumeId, bookId: bookId);
+      await settle();
+
+      expect(scope.harness.api.archiveCalls, 0, reason: '同じ世代が手元にあるので落とし直さない');
+      expect(
+        downloadOf(scope.container)!.status,
+        VolumeDownloadStatus.completed,
+      );
+      expect(
+        await scope.harness.store.readManifest(
+          volumeId: volumeId,
+          filesVersion: 111,
+        ),
+        isNotNull,
+        reason: '{v}.json が無いまま確定すると #11 がページを解決できない',
+      );
+    });
+  });
+
+  group('更新の取り直し', () {
+    /// 111 を落とし終えたあと、サーバー側が 222 に差し替わった状態にする。
+    Future<
+      ({
+        DownloadHarness harness,
+        ProviderContainer container,
+        DownloadQueue queue,
+      })
+    >
+    setUpOutdated() async {
+      final scope = setUpQueue();
+      await scope.queue.enqueue(volumeId: volumeId, bookId: bookId);
+      await settle();
+      expect(
+        downloadOf(scope.container)!.status,
+        VolumeDownloadStatus.completed,
+      );
+
+      scope.harness.api.manifest = testManifest(
+        id: volumeId,
+        bookId: bookId,
+        filesVersion: 222,
+        archiveBytes: scope.harness.api.archiveBytes.length,
+      );
+      return scope;
+    }
+
+    test('マニフェストが取れなくても完了済みを失敗にしない', () async {
+      final scope = await setUpOutdated();
+      // オフラインで「更新あり」を押した状況。
+      scope.harness.api.manifestError = const NetworkException();
+
+      await scope.queue.enqueue(volumeId: volumeId, bookId: bookId);
+      await settle();
+
+      final download = downloadOf(scope.container)!;
+      expect(
+        download.status,
+        VolumeDownloadStatus.completed,
+        reason: '通信エラーで手元のキャッシュ（オフラインで読める旧世代）を捨てない',
+      );
+      expect(download.filesVersion, 111);
+      expect(
+        download.failureReason,
+        const NetworkException().message,
+        reason: '失敗を黙って隠さない（UI が理由を出す）',
+      );
+      expect(scope.harness.archiveFile(filesVersion: 111).existsSync(), isTrue);
+      expect(
+        (await scope.harness.store.find(volumeId))?.status,
+        VolumeDownloadStatus.completed,
+      );
+    });
+
+    test('取得が失敗したら手元の旧世代を「ダウンロード済み」として残す', () async {
+      final scope = await setUpOutdated();
+      scope.harness.api.steps = [
+        const FakeArchiveStep(bytes: 0, error: NotFoundException()),
+      ];
+
+      await scope.queue.enqueue(volumeId: volumeId, bookId: bookId);
+      await settle();
+
+      final download = downloadOf(scope.container)!;
+      expect(download.status, VolumeDownloadStatus.completed);
+      expect(
+        download.filesVersion,
+        111,
+        reason: '失敗した世代（222）を指すと、実体のある 111 を指す行がどこにも無くなる',
+      );
+      expect(download.failureReason, isNotNull);
+      expect(scope.harness.archiveFile(filesVersion: 111).existsSync(), isTrue);
+      expect(
+        scope.harness.archiveFile(filesVersion: 222).existsSync(),
+        isFalse,
+      );
+    });
+
+    test('検証に失敗しても手元の旧世代を「ダウンロード済み」として残す', () async {
+      final scope = await setUpOutdated();
+      // 落とせたが ZIP が壊れていた（差し替え途中の ZIP を掴んだ）。
+      scope.harness.api.archiveBytes = Uint8List.fromList(
+        List<int>.filled(scope.harness.api.archiveBytes.length, 0x41),
+      );
+
+      await scope.queue.enqueue(volumeId: volumeId, bookId: bookId);
+      await settle();
+
+      final download = downloadOf(scope.container)!;
+      expect(download.status, VolumeDownloadStatus.completed);
+      expect(download.filesVersion, 111);
+      expect(scope.harness.archiveFile(filesVersion: 111).existsSync(), isTrue);
+    });
+
+    test('取り直しを中断しても手元の旧世代を指したままにする', () async {
+      final scope = await setUpOutdated();
+      scope.harness.api.steps = [
+        FakeArchiveStep(
+          bytes: 40,
+          onDelivered: () => scope.queue.pause(volumeId),
+        ),
+      ];
+
+      await scope.queue.enqueue(volumeId: volumeId, bookId: bookId);
+      await settle();
+
+      final download = downloadOf(scope.container)!;
+      expect(
+        download.status,
+        VolumeDownloadStatus.completed,
+        reason: '「中断中（222）」にすると、読める 111 を指す行が消える',
+      );
+      expect(download.filesVersion, 111);
+      expect(download.failureReason, isNull, reason: '自分で止めたのは失敗ではない');
+      expect(
+        scope.harness.partFile(filesVersion: 222).existsSync(),
+        isTrue,
+        reason: 'もう一度「更新あり」を押せば続きから取れる',
+      );
+    });
+  });
+
+  group('後片付けとの競合', () {
+    test('破棄の途中で届いた中断を台帳へ書き戻さない', () async {
+      final scope = setUpQueue();
+      final delivered = Completer<void>();
+      scope.harness.api.steps = [
+        FakeArchiveStep(bytes: 40, onDelivered: () => delivered.future),
+      ];
+
+      await scope.queue.enqueue(volumeId: volumeId, bookId: bookId);
+      await settle();
+
+      // 行の削除は終わり、実体の削除で待っている「破棄の途中」を作る。
+      final gate = Completer<void>();
+      scope.harness.store.beforeDeleteAllFiles = gate;
+      final purge = scope.queue.purgeAll();
+      await pumpEventQueue();
+
+      // ここでキャンセル例外が届く（dio のキャンセルは次のループで届く）。
+      delivered.complete();
+      await pumpEventQueue();
+      gate.complete();
+      await purge;
+      await settle();
+
+      expect(
+        await scope.harness.store.find(volumeId),
+        isNull,
+        reason: '前のユーザーの巻が「中断中」として端末に残ってはいけない（#15）',
+      );
+      expect(scope.container.read(downloadQueueProvider).value, isEmpty);
+    });
+
+    test('確定の直前に取り消したら「ダウンロード済み」を復活させない', () async {
+      final scope = setUpQueue();
+      // rename は済み、旧世代の掃除で待っている状態を作る。
+      final gate = Completer<void>();
+      scope.harness.store.beforeDeleteOtherVersions = gate;
+
+      await scope.queue.enqueue(volumeId: volumeId, bookId: bookId);
+      await settle();
+
+      await scope.queue.remove(volumeId);
+      gate.complete();
+      await settle();
+
+      expect(downloadOf(scope.container), isNull);
+      expect(
+        await scope.harness.store.find(volumeId),
+        isNull,
+        reason: '実体を消したあとに completed の行が残ると、読めない「ダウンロード済み」が出る',
+      );
+      expect(scope.harness.archiveFile().existsSync(), isFalse);
+    });
   });
 }

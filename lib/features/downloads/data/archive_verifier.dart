@@ -29,6 +29,12 @@ typedef ArchiveVerifier = Future<int> Function(File archive);
 ///
 /// 数え方がずれるとページ数の突き合わせが常に失敗するので、
 /// 拡張子と除外条件はサーバー側に合わせる。
+///
+/// サーバーは `in_array($pathInfo['extension'], ['jpg','jpeg','png','avif'])` と
+/// **大文字小文字を区別して**数えるため、こちらも小文字化しない。小文字化すると
+/// `002.JPG` のようなエントリを含む ZIP で `page_count` が必ず食い違い、
+/// 数百 MB を落とし切ってから検証で落ちる（何度やり直しても完了しない）。
+/// 大文字拡張子のページはサーバー側も配信対象外なので、ここで数えないのが正。
 const _imageExtensions = {'jpg', 'jpeg', 'png', 'avif'};
 
 /// 既定の検証。
@@ -50,7 +56,7 @@ Future<int> verifyArchivePages(File archive) async {
       final name = file.name;
       // macOS が作るメタデータとドットファイルはページではない。
       if (name.contains('__MACOSX') || name.contains('/.')) continue;
-      final extension = p.extension(name).replaceFirst('.', '').toLowerCase();
+      final extension = p.extension(name).replaceFirst('.', '');
       if (!_imageExtensions.contains(extension)) continue;
       pages++;
     }
