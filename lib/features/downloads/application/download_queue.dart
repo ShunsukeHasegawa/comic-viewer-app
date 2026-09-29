@@ -575,7 +575,12 @@ class DownloadQueue extends _$DownloadQueue {
         // タグが違うので取り込まない（ファイルも残さない）。
         _sessionTag = await store.rotateSessionTag();
       } on Object catch (error) {
+        // 保存できなくても、このプロセスの間は新しいタグで動かす。null の
+        // ままだと投入が黙って何もせず、次のユーザーのダウンロードが
+        // 「ダウンロード待ち」のまま始まらない。前のセッションの転送は
+        // 下の reset で消すので、次の起動で古いタグに戻っても取り込むものは無い。
         debugPrint('[downloads] rotate session tag failed: $error');
+        _sessionTag = ArchiveTaskId.newNonce();
       }
     }
     if (transport != null) {
@@ -1266,6 +1271,18 @@ class DownloadQueue extends _$DownloadQueue {
       download = download.copyWith(status: VolumeDownloadStatus.queued);
       await _save(download);
       if (_isStale(generation)) return;
+    } else if (download != null &&
+        download.isCompleted &&
+        download.filesVersion < task.filesVersion &&
+        _tasks[volumeId] == task) {
+      // 中断した「更新あり」の取り直しが、止める前に書き上がっていた。取り直しの
+      // 中断は台帳を旧世代（完了）へ戻している（[_savePaused]）ので、上の
+      // 「中断」の分岐には来ない。捨てると次の「更新あり」で数百 MB を先頭から
+      // 落とし直すので確定する。検証に落ちたら旧世代へ戻せるよう覚えておく。
+      _installed[volumeId] = download;
+      download = download.copyWith(status: VolumeDownloadStatus.queued);
+      await _save(download);
+      if (_isStale(generation)) return;
     }
     // 既に確定済み（完了の再送）。
     if (download != null &&
@@ -1536,8 +1553,24 @@ class DownloadQueue extends _$DownloadQueue {
       final (task, snapshot) = tasks.first;
       final download = state.value?[volumeId];
 
-      if (download == null || download.isCompleted) {
+      if (download == null) {
         discards.add((snapshot, task));
+        continue;
+      }
+      if (download.isCompleted) {
+        // 中断した「更新あり」の取り直し（台帳は旧世代の完了に戻してある）。
+        // 再開データは「更新あり」から続きを取るために残し、止める前に
+        // 書き上がっていたものは確定する（数百 MB を落とし直させない）。
+        final isPausedRefetch = task.filesVersion > download.filesVersion;
+        if (isPausedRefetch && snapshot.state == TransferState.paused) {
+          _tasks[volumeId] = task;
+        } else if (isPausedRefetch &&
+            snapshot.state == TransferState.completed) {
+          _tasks[volumeId] = task;
+          installs.add(task);
+        } else {
+          discards.add((snapshot, task));
+        }
         continue;
       }
       if (!download.isActive) {

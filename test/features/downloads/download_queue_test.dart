@@ -1539,6 +1539,33 @@ void main() {
     });
   });
 
+  group('更新の取り直しと中断の競合', () {
+    // 取り直しの中断は台帳を旧世代（完了）へ戻すので、「中断」の台帳を見て
+    // 完了を拾う分岐には来ない。捨てると次の「更新あり」で数百 MB を先頭から
+    // 落とし直すことになる。
+    test('中断した取り直しが止める前に書き上がっていたら、新しい世代で確定する', () async {
+      final scope = await setUpOutdated();
+      await enqueueAndSubmit(scope);
+      scope.harness.transport.setState(volumeId, TransferState.running);
+      await settle();
+
+      // 止めようとしたが、ネイティブではもう書き上がっていた。
+      scope.harness.transport.pauseResult = false;
+      await scope.queue.pause(volumeId);
+      await settle();
+      scope.harness.transport.completeWith(
+        volumeId,
+        scope.harness.api.archiveBytes,
+      );
+      await settle();
+
+      final download = downloadOf(scope.container)!;
+      expect(download.status, VolumeDownloadStatus.completed);
+      expect(download.filesVersion, 222);
+      expect(scope.harness.archiveFile(filesVersion: 222).existsSync(), isTrue);
+    });
+  });
+
   group('一時キャッシュとの独立', () {
     test('キャッシュの全削除でも LRU でもダウンロード済みは消えない', () async {
       final scope = await setUpCompleted();
@@ -1855,6 +1882,27 @@ void main() {
       expect(scope.container.read(downloadQueueProvider).value, isEmpty);
       expect(scope.harness.archiveFile().existsSync(), isFalse);
       expect(await scope.harness.store.find(volumeId), isNull);
+    });
+
+    // タグが null のままだと、次のユーザーの投入が黙って何もせず
+    // 「ダウンロード待ち」のまま始まらない。
+    test('タグを保存できなくても、次のダウンロードは新しいタグで始まる', () async {
+      final scope = setUpQueue();
+      await enqueueAndSubmit(scope);
+      final before = scope.harness.transport.taskIdOf(volumeId);
+      scope.harness.store.failRotateSessionTag = true;
+
+      await scope.queue.purgeAll();
+      await settle();
+      await enqueueAndSubmit(scope);
+
+      final after = scope.harness.transport.taskIdOf(volumeId);
+      expect(after, isNot(before));
+      expect(
+        ArchiveTaskId.tryParse(after)!.sessionTag,
+        isNot(ArchiveTaskId.tryParse(before)!.sessionTag),
+        reason: '前のセッションのタグで積むと、前のユーザーの転送と区別できない',
+      );
     });
 
     test('purgeAll は平文のトークンを含むタスクを先に消してからファイルを消す', () async {

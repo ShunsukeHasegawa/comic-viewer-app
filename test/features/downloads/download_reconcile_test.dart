@@ -343,6 +343,39 @@ void main() {
       expect(harness.transport.enqueued, isEmpty);
     });
 
+    // 取り直しの中断は台帳を旧世代の完了へ戻す。「完了の巻の転送」として
+    // 捨てると、「更新あり」で続きから取れず先頭から落とし直しになる。
+    test('中断した取り直しの再開データは、台帳が旧世代の完了でも残す', () async {
+      await saveRow(
+        VolumeDownloadStatus.completed,
+        filesVersion: 100,
+        pageCount: 3,
+      );
+      snapshots({taskIdOf(volumeId): TransferState.paused});
+
+      await start();
+
+      expect(harness.transport.canceled, isEmpty);
+      expect(harness.transport.forgotten, isNot(contains(taskIdOf(volumeId))));
+    });
+
+    test('中断した取り直しがアプリの死んでいる間に書き上がっていたら確定する', () async {
+      await saveRow(
+        VolumeDownloadStatus.completed,
+        filesVersion: 100,
+        pageCount: 3,
+      );
+      await writeManifest();
+      stagingOf(volumeId).writeAsBytesSync(harness.api.archiveBytes);
+      snapshots({taskIdOf(volumeId): TransferState.completed});
+
+      final container = await start();
+
+      final download = downloadOf(container)!;
+      expect(download.status, VolumeDownloadStatus.completed);
+      expect(download.filesVersion, 111);
+    });
+
     test('台帳に無い巻の転送は止めて捨てる', () async {
       await harness.store.ensureVolumeDirectory(999);
       stagingOf(999).writeAsBytesSync([1, 2, 3]);

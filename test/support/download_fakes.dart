@@ -368,6 +368,17 @@ class GatedDownloadStore extends DownloadStore {
   /// （削除の await の隙に別の処理の保存を差し込む）。
   Completer<void>? afterDeleteRow;
 
+  /// `rotateSessionTag` を失敗させる（ログアウト時に DB へ書けなかった）。
+  bool failRotateSessionTag = false;
+
+  @override
+  Future<String> rotateSessionTag() {
+    if (failRotateSessionTag) {
+      return Future.error(const FileSystemException('disk full'));
+    }
+    return super.rotateSessionTag();
+  }
+
   /// 次の `save` に入る前に待たせる（台帳の書き込みの await の隙を作る）。
   /// 使われたら `null` に戻る（入ったことを確かめるのに使える）。
   Completer<void>? beforeSave;
