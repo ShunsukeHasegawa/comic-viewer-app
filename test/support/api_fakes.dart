@@ -117,6 +117,9 @@ class FakeUserApi implements UserApi {
   /// 一括同期で投げる例外（圏外 / サーバーエラーの再現）。
   ApiException? syncError;
 
+  /// 応答の `Date` ヘッダから読めたサーバー時刻（`null` なら読めなかった）。
+  DateTime? serverTime;
+
   /// 応答を返す前に実行する処理（同期中に読み進める状況を作る）。
   Future<void> Function()? beforeSync;
 
@@ -157,25 +160,30 @@ class FakeUserApi implements UserApi {
   }
 
   @override
-  Future<VolumeStatusSyncResult> syncVolumeStatuses(
+  Future<VolumeStatusSyncResponse> syncVolumeStatuses(
     List<VolumeStatusSyncItem> items,
   ) async {
     syncedBatches.add(items);
     await beforeSync?.call();
     if (syncError case final error?) throw error;
-    if (onSync case final onSync?) return onSync(items);
-    return VolumeStatusSyncResult(
-      applied: [
-        for (final item in items)
-          VolumeStatusSnapshot(
-            volumeId: item.volumeId,
-            currentPage: item.currentPage,
-            maxPage: item.maxPage,
-            isFinished: item.currentPage >= item.maxPage,
-            readAt: item.readAt.toUtc(),
-            updatedAt: item.readAt.toUtc(),
-          ),
-      ],
+    if (onSync case final onSync?) {
+      return (result: onSync(items), serverTime: serverTime);
+    }
+    return (
+      result: VolumeStatusSyncResult(
+        applied: [
+          for (final item in items)
+            VolumeStatusSnapshot(
+              volumeId: item.volumeId,
+              currentPage: item.currentPage,
+              maxPage: item.maxPage,
+              isFinished: item.currentPage >= item.maxPage,
+              readAt: item.readAt.toUtc(),
+              updatedAt: item.readAt.toUtc(),
+            ),
+        ],
+      ),
+      serverTime: serverTime,
     );
   }
 }

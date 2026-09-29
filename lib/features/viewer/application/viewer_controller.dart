@@ -94,12 +94,26 @@ class ViewerController extends _$ViewerController {
     _lastRecordedPage = null;
     if (volume.isEmpty) return 1;
 
-    final unsyncedPage = await _recorder?.unsyncedPage(volume.id);
+    final unsyncedPage = await _readUnsyncedPage(volume.id);
     if (unsyncedPage != null) return volume.clampPage(unsyncedPage);
 
     final startPage = volume.clampPage(volume.currentPage);
     _lastRecordedPage = startPage;
     return startPage;
+  }
+
+  /// 未送信のローカル進捗を読む。読めなければ `null`（サーバーの値で開く）。
+  ///
+  /// ローカル DB が壊れている / マイグレーションに失敗している場合でも、巻が
+  /// 取れているなら読書は続けられるようにする。ここで throw すると build() が
+  /// 失敗して「読み込みに失敗しました」のままになり、どの巻も開けなくなる。
+  /// 一覧側（`LibraryController._localProgress`）と同じ扱い。
+  Future<int?> _readUnsyncedPage(int volumeId) async {
+    try {
+      return await _recorder?.unsyncedPage(volumeId);
+    } on Object {
+      return null;
+    }
   }
 
   /// ZIP が差し替わっていたら、この巻の古い世代の画像キャッシュを捨てる（#8）。

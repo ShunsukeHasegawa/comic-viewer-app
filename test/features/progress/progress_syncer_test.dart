@@ -167,4 +167,96 @@ void main() {
     expect(local!.currentPage, 9);
     expect(local.synced, isTrue);
   });
+
+  test('送信の往復中に同じ秒でページを送っても最新ページが消えない', () async {
+    // read_at は秒精度（drift の unix 秒 / MySQL の TIMESTAMP）なので、1 秒以内の
+    // ページ送りは送った行と時刻では区別できない。応答をそのまま書き戻すと
+    // 9 ページ目が消えたうえ「送信済み」になり、二度と送られない。
+    await readOffline(340, page: 5, after: const Duration(milliseconds: 100));
+    var advanced = false;
+    api.beforeSync = () async {
+      if (advanced) return;
+      advanced = true;
+      await readOffline(340, page: 9, after: const Duration(milliseconds: 800));
+    };
+
+    expect(await syncer.sync(), isTrue);
+
+    expect(server.statuses[340]!.currentPage, 9, reason: '最新ページまで送る');
+    final local = await store.find(340);
+    expect(local!.currentPage, 9);
+    expect(local.synced, isTrue);
+  });
+
+  test('同期した直後に同じ秒でページを送っても stale で潰されない', () async {
+    // サーバーの比較は「read_at がより新しいときだけ採用」。同期した秒のうちに
+    // ページ送りが入ると永久に stale になり、サーバーの古い値でローカルが
+    // 上書きされて synced まで立つ（次に開くと古いページから再開する）。
+    await readOffline(340, page: 20);
+    expect(await syncer.sync(), isTrue);
+    await readOffline(340, page: 25, after: const Duration(milliseconds: 700));
+
+    expect(await syncer.sync(), isTrue);
+
+    expect(server.statuses[340]!.currentPage, 25, reason: '25 ページ目がサーバーに届く');
+    final local = await store.find(340);
+    expect(local!.currentPage, 25, reason: 'サーバーの古い値で潰さない');
+    expect(local.synced, isTrue);
+  });
+
+  test('端末時計が進みすぎていてもサーバー時刻に合わせ直して送れる', () async {
+    // サーバーは 300 秒以上未来の read_at を書かない。放置すると進捗は永久に
+    // 届かないのに手元には最新があるので、アプリ上は正常に見えてしまう。
+    // サーバー側のコメントどおり、応答の Date ヘッダで分かった時刻に合わせ直す。
+    final serverNow = base.subtract(const Duration(days: 1));
+    server.now = serverNow;
+    api.serverTime = serverNow;
+    await readOffline(340, page: 10);
+
+    expect(await syncer.sync(), isTrue);
+
+    expect(server.statuses[340]!.currentPage, 10);
+    final local = await store.find(340);
+    expect(local!.synced, isTrue);
+    expect(
+      local.readAt.isAtSameMomentAs(serverNow),
+      isTrue,
+      reason: 'サーバー時刻で送り直す',
+    );
+    expect(api.syncedBatches, hasLength(2), reason: '棄却 → 合わせ直し → 再送');
+  });
+
+  test('受け取られない行が混ざっても、片付いた行のために送り直さない', () async {
+    // 停滞行を除かず「未送信の集合が変わったか」だけで判断すると、flush ごとに
+    // 同じ停滞行を含むリクエストをもう 1 回投げてしまう（HDD への無駄な往復）。
+    await readOffline(340, page: 10);
+    await readOffline(341, page: 4, after: const Duration(seconds: 1));
+    api.onSync = (items) => VolumeStatusSyncResult(
+      applied: [
+        for (final item in items)
+          if (item.volumeId == 340)
+            VolumeStatusSnapshot(
+              volumeId: item.volumeId,
+              currentPage: item.currentPage,
+              maxPage: item.maxPage,
+              readAt: item.readAt.toUtc(),
+              updatedAt: item.readAt.toUtc(),
+            ),
+      ],
+      skipped: [
+        for (final item in items)
+          if (item.volumeId != 340)
+            VolumeStatusSkip(
+              volumeId: item.volumeId,
+              reason: VolumeStatusSkipReason.unknown,
+            ),
+      ],
+    );
+
+    await syncer.sync();
+
+    expect((await store.find(340))!.synced, isTrue);
+    expect((await store.find(341))!.synced, isFalse, reason: '次の同期で送り直す');
+    expect(api.syncedBatches, hasLength(1), reason: '停滞行だけの往復を増やさない');
+  });
 }

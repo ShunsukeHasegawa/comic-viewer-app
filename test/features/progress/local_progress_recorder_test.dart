@@ -114,4 +114,37 @@ void main() {
     expect(server.statuses[341]!.currentPage, 4);
     expect(server.statuses[340]!.currentPage, 9);
   });
+
+  group('ログアウト後', () {
+    // ログアウトは「authStore.clear() → ProgressPurger で全件削除 → 未ログインへ」
+    // の順で走り、未ログインになってからビューアが外れる。その dispose の
+    // flushProgress がここへ来るので、消した後に行を作り直してはいけない。
+    // 残すと、次にログインしたユーザーのトークンで前のユーザーの読書位置が
+    // 一括送信され、読んでいない巻が「続きを読む」に出る。
+    setUp(() => recorder.isSignedIn = false);
+
+    test('ページ送りの保存は行を作らない', () async {
+      await recorder.savePage(
+        volumeId: 340,
+        currentPage: 7,
+        maxPage: 30,
+        readAt: readAt,
+      );
+
+      expect(await store.find(340), isNull);
+    });
+
+    test('record も行を作らず、送信もしない', () async {
+      final sent = await recorder.record(
+        volumeId: 340,
+        currentPage: 7,
+        maxPage: 30,
+        readAt: readAt,
+      );
+
+      expect(sent, isFalse);
+      expect(await store.find(340), isNull);
+      expect(api.syncedBatches, isEmpty, reason: 'トークンが無いので 401 を誘発しない');
+    });
+  });
 }

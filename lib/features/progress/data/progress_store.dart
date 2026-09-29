@@ -31,14 +31,38 @@ abstract interface class ProgressStore {
   /// 採用された（`applied`）行にも、サーバーの方が新しかった（`stale`）行にも
   /// 使う。サーバーの値を正にすれば、丸めや競合の結果で食い違わない。
   ///
-  /// [sentReadAt] と行の `read_at` が一致するときだけ書く。送信の往復中に
-  /// 読み進めていた場合は**新しい進捗を未送信のまま残す**（上書きすると
-  /// 最新ページが消え、送信済み扱いで二度と送られない）。書いたら `true`。
+  /// 送ったときの行（[sentReadAt] と [sentCurrentPage]）から変わっていない
+  /// ときだけ書く。送信の往復中に読み進めていた場合は**新しい進捗を未送信の
+  /// まま残す**（上書きすると最新ページが消え、送信済み扱いで二度と
+  /// 送られない）。書いたら `true`。
+  ///
+  /// `read_at` だけでは守れない。drift も MySQL の TIMESTAMP も秒精度なので、
+  /// **同じ秒に入ったページ送り**は送った行と時刻では区別できない。何ページを
+  /// 送ったかまで見て初めて「往復中に進んだ」と分かる。
   Future<bool> overwriteFromServer({
     required int volumeId,
     required DateTime sentReadAt,
+    required int sentCurrentPage,
     required int currentPage,
     required int maxPage,
+    required DateTime readAt,
+  });
+
+  /// 未送信の行の `read_at` だけを付け替える（ページと `synced` は触らない）。
+  ///
+  /// 秒精度の `read_at` のままでは送れない行を送れるようにするために使う。
+  ///
+  /// - サーバーが**同じ秒**の記録を持っていると、比較が「より新しいときだけ
+  ///   採用」なので何度送っても `stale` になる。1 秒進めて勝たせる。
+  /// - 端末時計が進みすぎていると `future_read_at` で棄却されるので、応答の
+  ///   `Date` ヘッダで分かったサーバー時刻に合わせ直す（サーバーの
+  ///   `UserVolumeStatusService` のコメントが指示している手順）。
+  ///
+  /// 送ったときの行から変わっていたら（往復中に読み進めた）何もせず `false`。
+  Future<bool> rebaseReadAt({
+    required int volumeId,
+    required DateTime sentReadAt,
+    required int sentCurrentPage,
     required DateTime readAt,
   });
 
@@ -107,26 +131,55 @@ class DriftProgressStore implements ProgressStore {
   Future<bool> overwriteFromServer({
     required int volumeId,
     required DateTime sentReadAt,
+    required int sentCurrentPage,
     required int currentPage,
     required int maxPage,
     required DateTime readAt,
   }) async {
-    final updated =
-        await (_database.update(_database.readingProgresses)..where(
-              (table) =>
-                  table.volumeId.equals(volumeId) &
-                  table.readAt.equals(sentReadAt),
-            ))
-            .write(
-              ReadingProgressesCompanion(
-                currentPage: Value(currentPage),
-                maxPage: Value(maxPage),
-                readAt: Value(readAt),
-                synced: const Value(true),
-              ),
-            );
+    final updated = await _updateSentRow(
+      volumeId: volumeId,
+      sentReadAt: sentReadAt,
+      sentCurrentPage: sentCurrentPage,
+      values: ReadingProgressesCompanion(
+        currentPage: Value(currentPage),
+        maxPage: Value(maxPage),
+        readAt: Value(readAt),
+        synced: const Value(true),
+      ),
+    );
     return updated > 0;
   }
+
+  @override
+  Future<bool> rebaseReadAt({
+    required int volumeId,
+    required DateTime sentReadAt,
+    required int sentCurrentPage,
+    required DateTime readAt,
+  }) async {
+    final updated = await _updateSentRow(
+      volumeId: volumeId,
+      sentReadAt: sentReadAt,
+      sentCurrentPage: sentCurrentPage,
+      values: ReadingProgressesCompanion(readAt: Value(readAt)),
+    );
+    return updated > 0;
+  }
+
+  /// 送ったときの内容から変わっていない行だけを書き換える。
+  Future<int> _updateSentRow({
+    required int volumeId,
+    required DateTime sentReadAt,
+    required int sentCurrentPage,
+    required ReadingProgressesCompanion values,
+  }) =>
+      (_database.update(_database.readingProgresses)..where(
+            (table) =>
+                table.volumeId.equals(volumeId) &
+                table.readAt.equals(sentReadAt) &
+                table.currentPage.equals(sentCurrentPage),
+          ))
+          .write(values);
 
   @override
   Future<void> delete(int volumeId) async {

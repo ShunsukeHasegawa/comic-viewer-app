@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:dio/dio.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
@@ -80,7 +82,7 @@ class UserApi {
   /// オフライン中に溜めた進捗を安全に流し込める。
   ///
   /// [items] は 1 件以上 [bulkStatusMaxItems] 件以下（サーバーの検証に合わせる）。
-  Future<VolumeStatusSyncResult> syncVolumeStatuses(
+  Future<VolumeStatusSyncResponse> syncVolumeStatuses(
     List<VolumeStatusSyncItem> items,
   ) async {
     assert(
@@ -94,11 +96,30 @@ class UserApi {
         'items': [for (final item in items) item.toJson()],
       },
     );
-    return ApiClient.parse(
-      ApiClient.asObject(response.data, bulkStatusPath),
-      VolumeStatusSyncResult.fromJson,
-      path: bulkStatusPath,
+    return (
+      result: ApiClient.parse(
+        ApiClient.asObject(response.data, bulkStatusPath),
+        VolumeStatusSyncResult.fromJson,
+        path: bulkStatusPath,
+      ),
+      serverTime: _serverTime(response),
     );
+  }
+
+  /// 応答の `Date` ヘッダから読んだサーバー時刻（読めなければ `null`）。
+  ///
+  /// 端末時計が進みすぎて `future_read_at` で棄却された行を、サーバー時刻へ
+  /// 合わせ直して送り直すために使う（サーバーの `UserVolumeStatusService` の
+  /// コメントが指示している手順）。時刻が分からなければ合わせ直さない。
+  static DateTime? _serverTime(Response<dynamic> response) {
+    final raw = response.headers.value(HttpHeaders.dateHeader);
+    if (raw == null) return null;
+    try {
+      return HttpDate.parse(raw);
+    } on Exception {
+      // 規格外の書式。推測で時刻を作るより、合わせ直さない方が安全。
+      return null;
+    }
   }
 }
 

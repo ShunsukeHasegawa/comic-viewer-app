@@ -8,8 +8,9 @@ import 'package:flutter_test/flutter_test.dart';
 
 /// DB を作らずに [ProgressStore] を差し替える（画面のテスト用）。
 ///
-/// 送信中に読み進めた行を守るガード（`sentReadAt` の一致）まで本物と同じに
-/// しておく。ここが違うと「同期の途中でページを送った」テストが嘘になる。
+/// 送信中に読み進めた行を守るガード（`read_at` とページ番号の一致）と、
+/// `read_at` を秒で切り捨てるところまで本物と同じにしておく。ここが違うと
+/// 「同期の途中でページを送った」テストが嘘になる。
 class InMemoryProgressStore implements ProgressStore {
   InMemoryProgressStore([Iterable<ReadingProgress> initial = const []])
     : _rows = {for (final row in initial) row.volumeId: row};
@@ -50,12 +51,13 @@ class InMemoryProgressStore implements ProgressStore {
   Future<bool> overwriteFromServer({
     required int volumeId,
     required DateTime sentReadAt,
+    required int sentCurrentPage,
     required int currentPage,
     required int maxPage,
     required DateTime readAt,
   }) async {
-    final row = _rows[volumeId];
-    if (row == null || row.readAt != sentReadAt) return false;
+    final row = _sentRow(volumeId, sentReadAt, sentCurrentPage);
+    if (row == null) return false;
     _rows[volumeId] = ReadingProgress(
       volumeId: volumeId,
       currentPage: currentPage,
@@ -64,6 +66,41 @@ class InMemoryProgressStore implements ProgressStore {
       synced: true,
     );
     return true;
+  }
+
+  @override
+  Future<bool> rebaseReadAt({
+    required int volumeId,
+    required DateTime sentReadAt,
+    required int sentCurrentPage,
+    required DateTime readAt,
+  }) async {
+    final row = _sentRow(volumeId, sentReadAt, sentCurrentPage);
+    if (row == null) return false;
+    _rows[volumeId] = ReadingProgress(
+      volumeId: volumeId,
+      currentPage: row.currentPage,
+      maxPage: row.maxPage,
+      readAt: readAt.copyWith(millisecond: 0, microsecond: 0),
+      synced: row.synced,
+    );
+    return true;
+  }
+
+  /// 送ったときから変わっていない行（変わっていれば `null`）。
+  ///
+  /// `read_at` が秒精度なので、同じ秒に入ったページ送りはページ番号まで
+  /// 見ないと区別できない。本物と同じガードにしておく。
+  ReadingProgress? _sentRow(
+    int volumeId,
+    DateTime sentReadAt,
+    int sentCurrentPage,
+  ) {
+    final row = _rows[volumeId];
+    if (row == null) return null;
+    if (!row.readAt.isAtSameMomentAs(sentReadAt)) return null;
+    if (row.currentPage != sentCurrentPage) return null;
+    return row;
   }
 
   @override
@@ -89,6 +126,15 @@ class FakeStatusServer {
 
   /// 存在する（セーフモードで見える）巻。`null` なら全部存在する扱い。
   Set<int>? knownVolumes;
+
+  /// サーバー側の現在時刻。`null` なら未来時刻の検査をしない。
+  ///
+  /// 本物は `read_at` がここから [futureToleranceSeconds] 秒以上未来の行を
+  /// `future_read_at` で棄却する（端末時計が進んでいる状況の再現に使う）。
+  DateTime? now;
+
+  /// `UserVolumeStatusService::FUTURE_TOLERANCE_SECONDS`。
+  static const futureToleranceSeconds = 300;
 
   /// 受け取ったバッチ（何件まとめて送ったかの検証に使う）。
   final batches = <List<VolumeStatusSyncItem>>[];
@@ -130,6 +176,21 @@ class FakeStatusServer {
       final current = statuses[volumeId];
       // サーバーは秒精度でしか保存しない。
       final readAt = _truncate(item.readAt);
+      if (now case final serverNow?
+          when !readAt.isBefore(
+            _truncate(serverNow)
+                .add(const Duration(seconds: futureToleranceSeconds)),
+          )) {
+        // 信用できない時刻は書かない（巻き戻しもしない）。
+        skipped.add(
+          VolumeStatusSkip(
+            volumeId: volumeId,
+            reason: VolumeStatusSkipReason.futureReadAt,
+            current: current,
+          ),
+        );
+        continue;
+      }
       final serverReadAt = current?.readAt ?? current?.updatedAt;
       if (serverReadAt != null && !readAt.isAfter(serverReadAt)) {
         skipped.add(

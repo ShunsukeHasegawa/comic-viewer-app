@@ -1,5 +1,7 @@
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
+import '../../auth/application/auth_controller.dart';
+import '../../auth/domain/auth_state.dart';
 import '../../progress/application/progress_syncer.dart';
 import '../../progress/data/local_progress_recorder.dart';
 import '../../progress/data/progress_store.dart';
@@ -39,7 +41,17 @@ abstract interface class ProgressRecorder {
 }
 
 @Riverpod(keepAlive: true)
-ProgressRecorder progressRecorder(Ref ref) => LocalProgressRecorder(
-  store: ref.watch(progressStoreProvider),
-  syncer: ref.watch(progressSyncerProvider),
-);
+ProgressRecorder progressRecorder(Ref ref) {
+  final recorder = LocalProgressRecorder(
+    store: ref.watch(progressStoreProvider),
+    syncer: ref.watch(progressSyncerProvider),
+    isSignedIn: ref.read(authControllerProvider) is AuthAuthenticated,
+  );
+  // ログアウト後に走るビューアの dispose で行を作り直さないよう、認証状態を
+  // 先に流し込んでおく（記録時に `ref` を読むと、その時点で container が
+  // 片付いていることがある）。
+  ref.listen(authControllerProvider, (previous, next) {
+    recorder.isSignedIn = next is AuthAuthenticated;
+  });
+  return recorder;
+}

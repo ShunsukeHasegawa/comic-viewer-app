@@ -19,6 +19,9 @@ class RecordingProgressRecorder implements ProgressRecorder {
   /// ローカル保存（送信しない）だけを受けたページ。
   final saved = <({int volumeId, int currentPage, int maxPage})>[];
 
+  /// `unsyncedPage` で投げる例外（ローカル DB が読めない状況の再現）。
+  Object? unsyncedPageError;
+
   @override
   Future<void> savePage({
     required int volumeId,
@@ -53,7 +56,10 @@ class RecordingProgressRecorder implements ProgressRecorder {
   }
 
   @override
-  Future<int?> unsyncedPage(int volumeId) async => unsyncedPages[volumeId];
+  Future<int?> unsyncedPage(int volumeId) async {
+    if (unsyncedPageError case final error?) throw error;
+    return unsyncedPages[volumeId];
+  }
 }
 
 /// 呼び出しだけ記録する [ScreenWakeLock]。

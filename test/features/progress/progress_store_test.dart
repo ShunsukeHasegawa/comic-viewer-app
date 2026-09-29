@@ -68,6 +68,7 @@ void main() {
     await store.overwriteFromServer(
       volumeId: 341,
       sentReadAt: synced,
+      sentCurrentPage: 3,
       currentPage: 3,
       maxPage: 20,
       readAt: synced,
@@ -106,6 +107,7 @@ void main() {
     final written = await store.overwriteFromServer(
       volumeId: 340,
       sentReadAt: readAt,
+      sentCurrentPage: 5,
       currentPage: 20,
       maxPage: 30,
       readAt: readAt.add(const Duration(seconds: 10)),
@@ -113,6 +115,90 @@ void main() {
 
     expect(written, isFalse);
     expect((await store.find(340))!.currentPage, 8);
+  });
+
+  test('同じ秒に入ったページ送りもサーバー応答で上書きしない', () async {
+    // drift も MySQL の TIMESTAMP も秒精度なので、送信の往復中（1 秒以内）に
+    // 入ったページ送りは read_at では区別できない。ページ番号まで見ないと、
+    // 最新ページがサーバー値で潰されたうえ「送信済み」になって二度と送られない。
+    await store.save(
+      volumeId: 340,
+      currentPage: 5,
+      maxPage: 30,
+      readAt: readAt.add(const Duration(milliseconds: 100)),
+    );
+    await store.save(
+      volumeId: 340,
+      currentPage: 9,
+      maxPage: 30,
+      readAt: readAt.add(const Duration(milliseconds: 800)),
+    );
+
+    final written = await store.overwriteFromServer(
+      volumeId: 340,
+      // 送ったのは 5 ページ目。read_at は同じ秒に丸められている。
+      sentReadAt: readAt,
+      sentCurrentPage: 5,
+      currentPage: 5,
+      maxPage: 30,
+      readAt: readAt,
+    );
+
+    expect(written, isFalse);
+    final saved = await store.find(340);
+    expect(saved!.currentPage, 9, reason: '往復中に進んだページを残す');
+    expect(saved.synced, isFalse, reason: '未送信のままにして送り直させる');
+  });
+
+  test('read_at の付け替えはページと synced を変えない', () async {
+    // サーバーが同じ秒の記録を持っていると「より新しいときだけ採用」の比較で
+    // 永久に負けるので、1 秒進めて送り直せるようにする。
+    await store.save(
+      volumeId: 340,
+      currentPage: 9,
+      maxPage: 30,
+      readAt: readAt,
+    );
+    final later = readAt.add(const Duration(seconds: 1));
+
+    final written = await store.rebaseReadAt(
+      volumeId: 340,
+      sentReadAt: readAt,
+      sentCurrentPage: 9,
+      readAt: later,
+    );
+
+    expect(written, isTrue);
+    final saved = await store.find(340);
+    expect(saved!.readAt.isAtSameMomentAs(later), isTrue);
+    expect(saved.currentPage, 9);
+    expect(saved.synced, isFalse, reason: 'まだ送れていない');
+  });
+
+  test('付け替えようとした行が進んでいたら何もしない', () async {
+    await store.save(
+      volumeId: 340,
+      currentPage: 9,
+      maxPage: 30,
+      readAt: readAt,
+    );
+    // 同じ秒のうちに読み進めた（read_at では区別できない）。
+    await store.save(
+      volumeId: 340,
+      currentPage: 12,
+      maxPage: 30,
+      readAt: readAt.add(const Duration(milliseconds: 400)),
+    );
+
+    final written = await store.rebaseReadAt(
+      volumeId: 340,
+      sentReadAt: readAt,
+      sentCurrentPage: 9,
+      readAt: readAt.add(const Duration(seconds: 1)),
+    );
+
+    expect(written, isFalse);
+    expect((await store.find(340))!.currentPage, 12);
   });
 
   test('サーバーの方が新しければローカルを上書きして送信済みにする', () async {
@@ -127,6 +213,7 @@ void main() {
     final written = await store.overwriteFromServer(
       volumeId: 340,
       sentReadAt: readAt,
+      sentCurrentPage: 5,
       currentPage: 25,
       maxPage: 30,
       readAt: serverReadAt,

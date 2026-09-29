@@ -33,9 +33,13 @@ ReadVolume volumeFixture({
 
   /// まだ送れていないローカル進捗（巻 ID → ページ）。
   Map<int, int> unsyncedPages = const {},
+
+  /// ローカル進捗の読み出しで投げる例外（ローカル DB が読めない状況）。
+  Object? unsyncedPageError,
 }) {
   final recorder = RecordingProgressRecorder(succeeds: !recordFails)
-    ..unsyncedPages.addAll(unsyncedPages);
+    ..unsyncedPages.addAll(unsyncedPages)
+    ..unsyncedPageError = unsyncedPageError;
   final container = ProviderContainer(
     overrides: [
       ...testOverrides(
@@ -105,6 +109,23 @@ void main() {
       expect(state.currentPage, 1);
     });
 
+    test('ローカル進捗が読めなくても巻は開ける', () async {
+      // DB の破損やマイグレーション失敗でローカル進捗が読めないだけで、巻が
+      // 取れているなら読書は続けられるようにする。ここで throw すると build() が
+      // 失敗して「読み込みに失敗しました」のまま、どの巻も開けなくなる
+      // （一覧側の `LibraryController._localProgress` と同じ扱い）。
+      final fixture = build(
+        volume: volumeFixture(currentPage: 3),
+        unsyncedPageError: StateError('ローカル DB が読めない'),
+      );
+
+      final state = await fixture.container.read(
+        viewerControllerProvider(340).future,
+      );
+
+      expect(state.currentPage, 3, reason: 'サーバーの値で開く');
+    });
+
     test('削除済みの巻は 404 として伝わる', () async {
       final container = ProviderContainer(
         overrides: testOverrides(booksApi: FakeBooksApi()),
@@ -143,6 +164,30 @@ void main() {
           .value!;
       expect(state.currentPage, 6, reason: '巻末オーバーレイまで');
       expect(state.isAtVolumeEnd, isTrue);
+    });
+
+    test('ページ送りのたびに端末へ保存する', () async {
+      // 「OS にアプリを落とされてもページ送りが残る」という #12 の目的は、この
+      // 呼び出しだけで成り立っている。外れても送信側のテストは全部通るので、
+      // ここで配線そのものを見る。
+      final fixture = build(volume: volumeFixture(currentPage: 1));
+      final notifier = fixture.container.read(
+        viewerControllerProvider(340).notifier,
+      );
+      await fixture.container.read(viewerControllerProvider(340).future);
+
+      notifier.goToNextPage();
+      notifier.goToNextPage();
+      // 巻末オーバーレイ（最終ページ + 1）まで送る。
+      notifier.setPage(6);
+      await pumpEventQueue();
+
+      expect(
+        [for (final save in fixture.recorder.saved) save.currentPage],
+        [2, 3, 5],
+        reason: '巻末オーバーレイの番号は保存しない',
+      );
+      expect(fixture.recorder.records, isEmpty, reason: 'ページ送りでは送らない');
     });
 
     test('シークバーからの移動も丸める', () async {

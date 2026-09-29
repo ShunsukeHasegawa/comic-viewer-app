@@ -7,10 +7,21 @@ import '../data/progress_store.dart';
 /// 圏外でも記録は失われない。送信できたかどうかは行の `synced` で判断するので、
 /// ビューアは「送れなかった進捗」を次の機会に送り直せる。
 class LocalProgressRecorder implements ProgressRecorder {
-  const LocalProgressRecorder({required this.store, required this.syncer});
+  LocalProgressRecorder({
+    required this.store,
+    required this.syncer,
+    this.isSignedIn = true,
+  });
 
   final ProgressStore store;
   final ProgressSyncer syncer;
+
+  /// ログイン中か（`progressRecorderProvider` が認証状態を流し込む）。
+  ///
+  /// 記録するときに `ref` を読まずに済むよう、状態を先取りして持っておく。
+  /// 記録はビューアの `onDispose` からも走るので、その時点では
+  /// `ProviderContainer` が片付いていることがある。
+  bool isSignedIn;
 
   @override
   Future<void> savePage({
@@ -21,6 +32,11 @@ class LocalProgressRecorder implements ProgressRecorder {
   }) async {
     // 0 ページ（ZIP が無い）巻は読めないので記録しない。
     if (maxPage < 1) return;
+    // ログアウト後は書かない。`ProgressPurger` が消した**後**にビューアの
+    // dispose（ログアウトで画面が外れる）から呼ばれることがあり、そこで行を
+    // 作り直すと、次にログインしたユーザーのトークンで前のユーザーの読書位置が
+    // 送られてしまう（#15 の破棄が意味を失う）。
+    if (!isSignedIn) return;
     await store.save(
       volumeId: volumeId,
       // `min(page, files.length)`。巻末オーバーレイの番号を保存しない。
@@ -38,6 +54,8 @@ class LocalProgressRecorder implements ProgressRecorder {
     required DateTime readAt,
   }) async {
     if (maxPage < 1) return false;
+    // ログアウト済みなら書かないし送らない（送っても 401 で、行だけが残る）。
+    if (!isSignedIn) return false;
 
     await savePage(
       volumeId: volumeId,

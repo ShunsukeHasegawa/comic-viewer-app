@@ -102,6 +102,16 @@ abstract class VolumeStatusSkip with _$VolumeStatusSkip {
       _$VolumeStatusSkipFromJson(json);
 }
 
+/// 一括同期の応答と、それを返したサーバーの時刻（`Date` ヘッダ）。
+///
+/// サーバー時刻を一緒に配るのは、端末時計が進みすぎて `future_read_at` で
+/// 棄却された行を合わせ直して送り直すため（サーバー側のコメントが指示している
+/// 手順）。ヘッダが読めなければ `null`。
+typedef VolumeStatusSyncResponse = ({
+  VolumeStatusSyncResult result,
+  DateTime? serverTime,
+});
+
 /// 一括同期の応答。
 @freezed
 abstract class VolumeStatusSyncResult with _$VolumeStatusSyncResult {
