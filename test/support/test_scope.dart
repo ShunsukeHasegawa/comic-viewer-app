@@ -4,7 +4,11 @@ import 'package:comic_laz/core/config/app_config.dart';
 import 'package:comic_laz/core/device/app_resume_monitor.dart';
 import 'package:comic_laz/core/device/connectivity_monitor.dart';
 import 'package:comic_laz/core/device/device_name_resolver.dart';
+import 'package:comic_laz/core/device/device_protection.dart';
 import 'package:comic_laz/core/session/session_data_purger.dart';
+import 'package:comic_laz/core/session/session_purge_journal.dart';
+import 'package:comic_laz/core/storage/install_marker.dart';
+import 'package:comic_laz/core/storage/storage_protection.dart';
 import 'package:comic_laz/core/widgets/thumbnail_image.dart';
 import 'package:comic_laz/data/api/books_api.dart';
 import 'package:comic_laz/data/api/taxonomy_api.dart';
@@ -20,6 +24,7 @@ import 'package:comic_laz/features/downloads/application/download_settings.dart'
 import 'package:comic_laz/features/downloads/data/archive_transport.dart';
 import 'package:comic_laz/features/downloads/data/background_archive_transport.dart';
 import 'package:comic_laz/features/downloads/data/free_space_probe.dart';
+import 'package:comic_laz/features/downloads/data/safe_mode_revalidation_store.dart';
 import 'package:comic_laz/features/downloads/domain/volume_download.dart';
 import 'package:comic_laz/features/library/data/library_repository.dart';
 import 'package:comic_laz/features/offline/application/offline_metadata_gateway.dart';
@@ -32,6 +37,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'api_fakes.dart';
 import 'auth_fakes.dart';
+import 'device_fakes.dart';
 import 'download_fakes.dart';
 import 'progress_fakes.dart';
 import 'storage_fakes.dart';
@@ -62,6 +68,10 @@ List<Override> testOverrides({
   DeviceStorageProbe? deviceStorageProbe,
   AutoDeleteSettingsController Function()? autoDeleteSettings,
   OpenVolumeCheck? openVolumeCheck,
+  SessionPurgeJournal? sessionPurgeJournal,
+  SafeModeRevalidationStore? safeModeRevalidationStore,
+  DeviceProtection? deviceProtection,
+  InstallMarker? installMarker,
   String apiBaseUrl = 'http://localhost:8000',
 }) {
   return [
@@ -143,6 +153,26 @@ List<Override> testOverrides({
     ),
     // ビューアで開いている巻の判定（既定は「どれも開いていない」）。
     openVolumeCheckProvider.overrideWithValue(openVolumeCheck ?? (_) => false),
+    // 破棄の印（#15）は drift の Settings。既定はメモリ上に持つ。
+    sessionPurgeJournalProvider.overrideWithValue(
+      sessionPurgeJournal ?? FakeSessionPurgeJournal(),
+    ),
+    // セーフモードの再検証の予約（#15）も drift。既定は「予約なし」。
+    safeModeRevalidationStoreProvider.overrideWithValue(
+      safeModeRevalidationStore ?? InMemorySafeModeRevalidationStore(),
+    ),
+    // バックアップ除外はプラットフォームチャネル（#15）。
+    deviceProtectionProvider.overrideWithValue(
+      deviceProtection ?? FakeDeviceProtection(),
+    ),
+    // 起動時の保護は path_provider（チャネル）で置き場を解決するので、既定では
+    // 走らせない（StorageProtector 自体は storage_protection_test で確かめる）。
+    storageProtectionProvider.overrideWith((ref) async {}),
+    // 入れ直し直後の目印（#15）は drift。既定は「入れ直し直後ではない」（テストの
+    // 保存済みトークンを起動時に消させない）。
+    installMarkerProvider.overrideWithValue(
+      installMarker ?? FakeInstallMarker(),
+    ),
   ];
 }
 
@@ -175,7 +205,11 @@ ProviderContainer createContainer({
   DeviceStorageProbe? deviceStorageProbe,
   AutoDeleteSettingsController Function()? autoDeleteSettings,
   OpenVolumeCheck? openVolumeCheck,
+  SessionPurgeJournal? sessionPurgeJournal,
+  SafeModeRevalidationStore? safeModeRevalidationStore,
+  DeviceProtection? deviceProtection,
   AppResumeMonitor? appResumeMonitor,
+  InstallMarker? installMarker,
   List<Override> overrides = const [],
 }) {
   return ProviderContainer(
@@ -198,7 +232,11 @@ ProviderContainer createContainer({
         deviceStorageProbe: deviceStorageProbe,
         autoDeleteSettings: autoDeleteSettings,
         openVolumeCheck: openVolumeCheck,
+        sessionPurgeJournal: sessionPurgeJournal,
+        safeModeRevalidationStore: safeModeRevalidationStore,
+        deviceProtection: deviceProtection,
         appResumeMonitor: appResumeMonitor,
+        installMarker: installMarker,
       ),
       // Riverpod 3 は同じプロバイダの二重 override を拒むので、testOverrides が
       // 既に差し替えているもの（appResumeMonitor など）は上の引数で渡す。

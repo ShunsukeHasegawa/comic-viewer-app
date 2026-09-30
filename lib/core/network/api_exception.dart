@@ -44,7 +44,7 @@ sealed class ApiException implements Exception {
     return switch (statusCode) {
       401 => const UnauthorizedException(),
       403 => const ForbiddenException(),
-      404 => const NotFoundException(),
+      404 => NotFoundException(serverMessage: _apiErrorMessage(response)),
       422 => ValidationException(errors: _validationErrors(response)),
       429 => TooManyRequestsException(retryAfter: _retryAfter(response)),
       final int code when code >= 500 => ServerException(statusCode: code),
@@ -54,6 +54,23 @@ sealed class ApiException implements Exception {
       ),
       null => const UnexpectedResponseException(),
     };
+  }
+
+  /// API が JSON で返したエラー本文の `message`（それ以外の応答なら `null`）。
+  ///
+  /// 404 の出どころを区別するため（#15）。リバースプロキシ / トンネルの誤設定や
+  /// ルートの欠けで返る 404 は HTML / 空本文 / 別の文言で、「サーバーがその
+  /// リソースは無いと答えた」ことの証拠にはならない。
+  static String? _apiErrorMessage(Response<dynamic>? response) {
+    final contentType = response?.headers.value(Headers.contentTypeHeader);
+    if (contentType == null ||
+        !contentType.toLowerCase().startsWith(Headers.jsonContentType)) {
+      return null;
+    }
+    final data = response?.data;
+    if (data is! Map) return null;
+    final message = data['message'];
+    return message is String ? message : null;
   }
 
   static Map<String, List<String>> _validationErrors(
@@ -122,7 +139,17 @@ final class ForbiddenException extends ApiException {
 
 /// 404。リソースが存在しない（削除済みの巻など）。
 final class NotFoundException extends ApiException {
-  const NotFoundException([super.message = 'お探しのデータは見つかりませんでした。']);
+  const NotFoundException({
+    String message = 'お探しのデータは見つかりませんでした。',
+    this.serverMessage,
+  }) : super(message);
+
+  /// API が JSON で返した本文の `message`（JSON 以外の 404 なら `null`）。
+  ///
+  /// 404 を理由に端末のデータを**まとめて**消す処理（`SafeModeRevalidator`）は、
+  /// これでコントローラ自身の応答かを確かめる。プロキシの HTML 404 や
+  /// ルートの欠けを「非公開」と取り違えて全部消さないため（#15）。
+  final String? serverMessage;
 }
 
 /// 429。レート制限。

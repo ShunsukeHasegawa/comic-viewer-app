@@ -573,15 +573,45 @@ class DownloadQueue extends _$DownloadQueue {
   }
 
   /// 端末内のダウンロードを全部捨てる（ログアウト。#15）。
+  ///
+  /// 手順（転送の記録 → 台帳 → ファイル）は**全部試してから**、最初の失敗を
+  /// 投げ直す。途中で止めると「台帳は消えず ZIP も残る」を作り、投げなければ
+  /// 破棄の印（`SessionPurgeJournal`）が消えて次の起動でやり直されない。
   Future<void> purgeAll() async {
-    await future;
+    Object? firstError;
+    StackTrace? firstStackTrace;
+    void fail(String label, Object error, StackTrace stackTrace) {
+      debugPrint('[downloads] purge $label failed: $error');
+      if (firstError != null) return;
+      firstError = error;
+      firstStackTrace = stackTrace;
+    }
+
+    try {
+      await future;
+    } on Object catch (error) {
+      // 台帳の読み込みなどに失敗してキューを組み立てられなくても、破棄は進める
+      // （ここで投げると前のユーザーの ZIP と転送の記録が何も消えない）。
+      debugPrint('[downloads] purge: queue unavailable: $error');
+    }
+    if (!ref.mounted) return;
     _generation++;
     // タグが決まるまでは、届いたイベントをすべて前のセッションのものとして扱う。
     _sessionTag = null;
     _resetMemory();
 
-    final store = _store;
-    final transport = _transport;
+    var store = _store;
+    if (store == null) {
+      try {
+        store = await ref.read(downloadStoreProvider.future);
+      } on Object catch (error, stackTrace) {
+        fail('store', error, stackTrace);
+      }
+      if (!ref.mounted) return;
+    }
+    // 組み立ての前に失敗していても転送の記録は消す（Bearer が平文で入っている）。
+    final ArchiveTransport transport =
+        _transport ?? ref.read(archiveTransportProvider);
     if (store != null) {
       try {
         // タグを作り直す。前のユーザーの転送の完了が後から届いても、
@@ -595,21 +625,31 @@ class DownloadQueue extends _$DownloadQueue {
         debugPrint('[downloads] rotate session tag failed: $error');
         _sessionTag = ArchiveTaskId.newNonce();
       }
+    } else {
+      _sessionTag = ArchiveTaskId.newNonce();
     }
-    if (transport != null) {
-      try {
-        // ファイルより先に消す。タスクの記録には Bearer が平文で入っている。
-        await transport.reset();
-      } on Object catch (error) {
-        debugPrint('[downloads] transport reset failed: $error');
-      }
+    try {
+      // ファイルより先に消す。タスクの記録には Bearer が平文で入っている。
+      await transport.reset();
+    } on Object catch (error, stackTrace) {
+      fail('transport reset', error, stackTrace);
     }
     if (store != null) {
-      await store.deleteAllRows();
-      await store.deleteAllFiles();
+      try {
+        await store.deleteAllRows();
+      } on Object catch (error, stackTrace) {
+        fail('rows', error, stackTrace);
+      }
+      try {
+        await store.deleteAllFiles();
+      } on Object catch (error, stackTrace) {
+        fail('files', error, stackTrace);
+      }
     }
-    if (!ref.mounted) return;
-    state = const AsyncData({});
+    if (ref.mounted) state = const AsyncData({});
+    if (firstError case final error?) {
+      Error.throwWithStackTrace(error, firstStackTrace ?? StackTrace.current);
+    }
   }
 
   // ---------------------------------------------------------------- 投入

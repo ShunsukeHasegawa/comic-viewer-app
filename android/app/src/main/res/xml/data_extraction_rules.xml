@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- バックアップ / 端末間転送から全部外す（Android 12 以上。#15）。
+     allowBackup="false" だけでは端末間転送（device-transfer）は止まらない。
+
+     downloads / キャッシュ / セキュアストレージだけでなく「全部」にしているのは:
+     - DB（app_flutter/comic_laz.sqlite）だけ復元されると、台帳が「ダウンロード済み」を
+       主張するのに ZIP が無い（hasInstalledArchive はファイルの有無を見ない）。
+       未送信の読書進捗が、復元先の別のユーザーのトークンで送られうる。
+     - filesDir には数 GB の ZIP と、Bearer が平文で入った background_downloader の
+       タスク記録がある。SharedPreferences にもトークン入りのタスクが残りうる。
+     - セキュアストレージの暗号文は Keystore の鍵が移らないので、復元しても読めない。
+     残す価値があるのは端末の設定（キャッシュ上限など）だけで、再設定で足りる。
+     戻すときは台帳と ZIP の整合・トークンの持ち出しを検討すること（CLAUDE.md）。 -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+    </device-transfer>
+</data-extraction-rules>

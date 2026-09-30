@@ -1,8 +1,11 @@
 import 'package:comic_laz/core/network/api_exception.dart';
+import 'package:comic_laz/core/session/session_data_purger.dart';
 import 'package:comic_laz/domain/models/user.dart';
 import 'package:comic_laz/features/auth/application/auth_controller.dart';
 import 'package:comic_laz/features/auth/data/auth_api.dart';
+import 'package:comic_laz/features/auth/data/auth_store.dart';
 import 'package:comic_laz/features/auth/domain/auth_state.dart';
+import 'package:comic_laz/features/auth/domain/session_cleanup_exception.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
@@ -526,4 +529,664 @@ void main() {
       expect(purger.calls, 1, reason: '破棄は 1 回に集約されるべき');
     });
   });
+
+  group('破棄のやり直し（#15）', () {
+    /// ログイン済みの状態を作る（ログアウトの破棄を試すため）。
+    Future<ProviderContainer> signedIn({
+      required FakeSessionPurgeJournal journal,
+      required List<RecordingPurger> purgers,
+      FakeAuthStore? store,
+    }) async {
+      final api = MockAuthApi()..stubCurrentUser();
+      when(api.deleteToken).thenAnswer((_) async {});
+      final container = createContainer(
+        authStore: store ?? FakeAuthStore(token: 'valid', user: testUser),
+        authApi: api,
+        purgers: purgers,
+        sessionPurgeJournal: journal,
+      );
+      addTearDown(container.dispose);
+      await settleAuth(container);
+      return container;
+    }
+
+    test('ログアウトの破棄が 1 つ失敗したら印を残し、次の起動でやり直す（前のユーザーのデータを端末に残さないため）', () async {
+      final journal = FakeSessionPurgeJournal();
+      final failing = RecordingPurger(throwOnPurge: true);
+      final container = await signedIn(journal: journal, purgers: [failing]);
+
+      await container.read(authControllerProvider.notifier).logout();
+      expect(journal.pending, SessionPurgeScope.session);
+
+      // 次の起動: トークンも前のユーザーも無いが、印があるので破棄をやり直す。
+      final retry = RecordingPurger();
+      final next = createContainer(
+        authStore: FakeAuthStore(),
+        authApi: MockAuthApi(),
+        purgers: [retry],
+        sessionPurgeJournal: journal,
+      );
+      addTearDown(next.dispose);
+      expect(await settleAuth(next), const AuthState.unauthenticated());
+
+      expect(retry.calls, 1);
+      expect(journal.pending, isNull, reason: '成功したら起動のたびに消し直さない');
+    });
+
+    test('破棄の途中でアプリが落ちても（印だけ残った状態）、次の起動で破棄をやり直す', () async {
+      final journal = FakeSessionPurgeJournal(
+        pending: SessionPurgeScope.session,
+      );
+      final purger = RecordingPurger(purgesRefetchableOnly: false);
+      final container = createContainer(
+        authStore: FakeAuthStore(),
+        authApi: MockAuthApi(),
+        purgers: [purger],
+        sessionPurgeJournal: journal,
+      );
+      addTearDown(container.dispose);
+
+      await settleAuth(container);
+
+      expect(purger.calls, 1);
+      expect(journal.pending, isNull);
+    });
+
+    test('破棄がすべて成功したら印を消す（起動のたびに消し直さないため）', () async {
+      final journal = FakeSessionPurgeJournal();
+      final container = await signedIn(
+        journal: journal,
+        purgers: [RecordingPurger()],
+      );
+
+      await container.read(authControllerProvider.notifier).logout();
+
+      expect(journal.pending, isNull);
+      expect(journal.log, ['mark session', 'complete session']);
+    });
+
+    test('破棄の印はトークンより先に書く（トークンだけ消えて印が無い状態を作らないため）', () async {
+      final log = <String>[];
+      final journal = FakeSessionPurgeJournal(log: log);
+      final container = await signedIn(
+        journal: journal,
+        purgers: [RecordingPurger()],
+        store: FakeAuthStore(token: 'valid', user: testUser, log: log),
+      );
+
+      await container.read(authControllerProvider.notifier).logout();
+
+      expect(log.indexOf('mark session'), lessThan(log.indexOf('clear token')));
+    });
+
+    test('印を書けなくてもログアウトは完了する', () async {
+      final journal = FakeSessionPurgeJournal()..error = StateError('db');
+      final purger = RecordingPurger();
+      final container = await signedIn(journal: journal, purgers: [purger]);
+
+      await container.read(authControllerProvider.notifier).logout();
+
+      expect(purger.calls, 1);
+      expect(
+        container.read(authControllerProvider),
+        isA<AuthUnauthenticated>(),
+      );
+    });
+
+    test('やり直しの破棄ではトークンを消さない（印はデータを消す意味しか持たないため）', () async {
+      final journal = FakeSessionPurgeJournal(
+        pending: SessionPurgeScope.session,
+      );
+      final store = FakeAuthStore(token: 'valid', user: testUser);
+      final purger = RecordingPurger();
+      final container = createContainer(
+        authStore: store,
+        authApi: MockAuthApi()..stubCurrentUser(),
+        purgers: [purger],
+        sessionPurgeJournal: journal,
+      );
+      addTearDown(container.dispose);
+
+      expect(await settleAuth(container), AuthState.authenticated(testUser));
+      expect(purger.calls, 1);
+      expect(store.token, 'valid');
+      expect(store.clearCount, 0);
+    });
+
+    test(
+      '起動時のユーザー切り替えの破棄が失敗したら、印を残してログイン済みにしない（前のユーザーのデータの上でセッションを始めないため）',
+      () async {
+        final journal = FakeSessionPurgeJournal();
+        final failing = RecordingPurger(
+          throwOnPurge: true,
+          purgesRefetchableOnly: false,
+        );
+        final store = FakeAuthStore(token: 'valid', user: testUser);
+        final container = createContainer(
+          authStore: store,
+          authApi: MockAuthApi()..stubCurrentUser(const User(id: 2, name: '別')),
+          purgers: [failing],
+          sessionPurgeJournal: journal,
+        );
+        addTearDown(container.dispose);
+
+        expect(await settleAuth(container), const AuthState.unauthenticated());
+
+        expect(failing.calls, 1);
+        expect(journal.pending, SessionPurgeScope.session);
+        expect(store.user, testUser, reason: '保存すると次の起動で切り替えに気づけない');
+      },
+    );
+
+    // 残したままだと、次の起動のやり直しが新しいセッションのダウンロードまで消す。
+    test('ログイン時に印が残っていれば、新しいセッションを始める前に破棄する', () async {
+      final journal = FakeSessionPurgeJournal();
+      final api = MockAuthApi();
+      when(
+        () => api.createToken(
+          email: any(named: 'email'),
+          password: any(named: 'password'),
+          deviceName: any(named: 'deviceName'),
+        ),
+      ).thenAnswer(
+        (_) async => const AuthTokenResult(token: 'new', user: testUser),
+      );
+      final purger = RecordingPurger();
+      final container = createContainer(
+        authStore: FakeAuthStore(),
+        authApi: api,
+        purgers: [purger],
+        sessionPurgeJournal: journal,
+      );
+      addTearDown(container.dispose);
+      await settleAuth(container);
+      // 起動後に印が残った（起動時のやり直しも失敗した）状態。
+      journal.pending = SessionPurgeScope.session;
+
+      await container
+          .read(authControllerProvider.notifier)
+          .login(email: 'a@example.com', password: 'secret');
+
+      expect(purger.calls, 1);
+      expect(journal.pending, isNull);
+    });
+  });
+
+  group('セーフモードの再検証の予約（#15）', () {
+    Future<InMemorySafeModeRevalidationStore> restore(
+      User previous,
+      User next, {
+      InMemorySafeModeRevalidationStore? store,
+      FakeAuthStore? authStore,
+    }) async {
+      final revalidation = store ?? InMemorySafeModeRevalidationStore();
+      final container = createContainer(
+        authStore: authStore ?? FakeAuthStore(token: 'valid', user: previous),
+        authApi: MockAuthApi()..stubCurrentUser(next),
+        purgers: [RecordingPurger()],
+        safeModeRevalidationStore: revalidation,
+      );
+      addTearDown(container.dispose);
+      await settleAuth(container);
+      return revalidation;
+    }
+
+    test('セーフモードが ON になったら、ダウンロード済みの巻の再検証を予約する', () async {
+      final store = await restore(testUser, testUser.copyWith(safeMode: true));
+
+      expect(store.pending, isTrue);
+    });
+
+    test('セーフモードが OFF になっただけでは再検証を予約しない（隠すものが増えないため）', () async {
+      final store = await restore(testUser.copyWith(safeMode: true), testUser);
+
+      expect(store.scheduleCalls, 0);
+    });
+
+    test('予約を書けなければユーザーを保存しない（次の起動で同じ差分から予約し直すため）', () async {
+      final authStore = FakeAuthStore(token: 'valid', user: testUser);
+      await restore(
+        testUser,
+        testUser.copyWith(safeMode: true),
+        store: InMemorySafeModeRevalidationStore()
+          ..scheduleError = StateError('db'),
+        authStore: authStore,
+      );
+
+      expect(authStore.user, testUser, reason: '保存すると OFF → ON の差分が消える');
+    });
+  });
+
+  group('前のユーザーを読めないとき（#15）', () {
+    test(
+      'ログイン時に前のユーザーを読めなければ、別のユーザーとみなして全部破棄する（持ち主を確かめられないデータを残さないため）',
+      () async {
+        final api = MockAuthApi();
+        when(
+          () => api.createToken(
+            email: any(named: 'email'),
+            password: any(named: 'password'),
+            deviceName: any(named: 'deviceName'),
+          ),
+        ).thenAnswer(
+          (_) async => const AuthTokenResult(token: 'new', user: testUser),
+        );
+        final store = FakeAuthStore();
+        final localOnly = RecordingPurger(purgesRefetchableOnly: false);
+        final container = createContainer(
+          authStore: store,
+          authApi: api,
+          purgers: [localOnly],
+        );
+        addTearDown(container.dispose);
+        await settleAuth(container);
+        store.readUserError = const FakePlatformException('BAD_DECRYPT');
+
+        await container
+            .read(authControllerProvider.notifier)
+            .login(email: 'a@example.com', password: 'secret');
+
+        expect(localOnly.calls, 1);
+        expect(
+          container.read(authControllerProvider),
+          AuthState.authenticated(testUser),
+          reason: 'ログイン自体は失敗させない',
+        );
+      },
+    );
+
+    test(
+      '起動時の復元で前のユーザーを読めなくても破棄しない（ロック解除前のバックグラウンド起動で同じユーザーのデータを消さないため）',
+      () async {
+        final store = FakeAuthStore(token: 'valid', user: testUser)
+          ..readUserError = const FakePlatformException('locked');
+        final localOnly = RecordingPurger(purgesRefetchableOnly: false);
+        final container = createContainer(
+          authStore: store,
+          authApi: MockAuthApi()..stubCurrentUser(),
+          purgers: [localOnly],
+        );
+        addTearDown(container.dispose);
+
+        await settleAuth(container);
+
+        expect(localOnly.calls, 0);
+        expect(store.token, 'valid');
+      },
+    );
+
+    test('ログイン時に保存済みユーザーを読み解けなければ（アプリの更新で形式が変わった）、持ち主不明として全部破棄する（前のユーザーの巻と未送信の進捗を次のユーザーに渡さないため）', () async {
+      final store = FakeAuthStore(token: 'old')
+        ..readUserError = const StoredUserUnreadableException('schema');
+      final localOnly = RecordingPurger(purgesRefetchableOnly: false);
+      final container = createContainer(
+        authStore: store,
+        authApi: _loginApi(
+          const AuthTokenResult(
+            token: 'new',
+            user: User(id: 2, name: '別の人'),
+          ),
+        )..stubCurrentUser(),
+        purgers: [localOnly],
+      );
+      addTearDown(container.dispose);
+      await settleAuth(container);
+      localOnly.calls = 0;
+
+      await container
+          .read(authControllerProvider.notifier)
+          .login(email: 'b@example.com', password: 'secret');
+
+      expect(localOnly.calls, 1);
+      expect(
+        container.read(authControllerProvider),
+        const AuthState.authenticated(User(id: 2, name: '別の人')),
+      );
+    });
+
+    test('起動時に保存済みユーザーを読み解けなくても、トークンが通れば破棄せずに新しい形式で保存し直す（トークンの持ち主と端末のデータの持ち主は同じため）', () async {
+      final store = FakeAuthStore(token: 'valid')
+        ..readUserError = const StoredUserUnreadableException('schema');
+      final localOnly = RecordingPurger(purgesRefetchableOnly: false);
+      final container = createContainer(
+        authStore: store,
+        authApi: MockAuthApi()..stubCurrentUser(),
+        purgers: [localOnly],
+      );
+      addTearDown(container.dispose);
+
+      expect(await settleAuth(container), AuthState.authenticated(testUser));
+
+      expect(localOnly.calls, 0);
+      expect(store.user, testUser);
+    });
+
+    test(
+      '起動時に保存済みユーザーを読み解けず、セーフモードなら再検証を予約する（前の設定が分からないので OFF → ON を取りこぼさないため）',
+      () async {
+        final store = FakeAuthStore(token: 'valid')
+          ..readUserError = const StoredUserUnreadableException('schema');
+        final revalidation = InMemorySafeModeRevalidationStore();
+        final container = createContainer(
+          authStore: store,
+          authApi: MockAuthApi()
+            ..stubCurrentUser(testUser.copyWith(safeMode: true)),
+          purgers: [RecordingPurger()],
+          safeModeRevalidationStore: revalidation,
+        );
+        addTearDown(container.dispose);
+
+        await settleAuth(container);
+
+        expect(revalidation.pending, isTrue);
+      },
+    );
+
+    test('圏外起動で保存済みユーザーを読み解けなければ、未ログインにしてトークンは残す', () async {
+      final api = MockAuthApi();
+      when(api.fetchCurrentUser).thenThrow(const NetworkException());
+      final store = FakeAuthStore(token: 'valid')
+        ..readUserError = const StoredUserUnreadableException('schema');
+      final localOnly = RecordingPurger(purgesRefetchableOnly: false);
+      final container = createContainer(
+        authStore: store,
+        authApi: api,
+        purgers: [localOnly],
+      );
+      addTearDown(container.dispose);
+
+      expect(await settleAuth(container), const AuthState.unauthenticated());
+
+      expect(store.token, 'valid', reason: '通信エラーでトークンを捨てない');
+      expect(localOnly.calls, 0);
+    });
+
+    test('ログイン時に前のトークンだけが残りユーザーが無ければ、持ち主不明として全部破棄する', () async {
+      final localOnly = RecordingPurger(purgesRefetchableOnly: false);
+      final api = MockAuthApi();
+      when(api.fetchCurrentUser).thenThrow(const NetworkException());
+      final store = FakeAuthStore(token: 'old');
+      final container = createContainer(
+        authStore: store,
+        authApi: api,
+        purgers: [localOnly],
+      );
+      addTearDown(container.dispose);
+      await settleAuth(container);
+      when(
+        () => api.createToken(
+          email: any(named: 'email'),
+          password: any(named: 'password'),
+          deviceName: any(named: 'deviceName'),
+        ),
+      ).thenAnswer(
+        (_) async => const AuthTokenResult(token: 'new', user: testUser),
+      );
+
+      await container
+          .read(authControllerProvider.notifier)
+          .login(email: 'a@example.com', password: 'secret');
+
+      expect(localOnly.calls, 1);
+      expect(store.token, 'new');
+    });
+
+    test('トークンもユーザーも無い初回ログインでは破棄しない（消すものが無いため）', () async {
+      final localOnly = RecordingPurger(purgesRefetchableOnly: false);
+      final container = createContainer(
+        authStore: FakeAuthStore(),
+        authApi: _loginApi(const AuthTokenResult(token: 'new', user: testUser)),
+        purgers: [localOnly],
+      );
+      addTearDown(container.dispose);
+      await settleAuth(container);
+
+      await container
+          .read(authControllerProvider.notifier)
+          .login(email: 'a@example.com', password: 'secret');
+
+      expect(localOnly.calls, 0);
+    });
+  });
+
+  // 片付けが済まないままログイン済みにすると、持ち主の無い未送信の進捗が
+  // 新しいユーザーのトークンで一括同期され、サーバーの読書位置が取り消せない形で
+  // 書き換わる。前のユーザーの巻も見えてしまう。
+  group('前のセッションが片付くまでログインさせない（#15）', () {
+    test('ログアウトの印のやり直しが失敗したらログインを止め、トークンを保存しない', () async {
+      final journal = FakeSessionPurgeJournal(
+        pending: SessionPurgeScope.session,
+      );
+      final failing = RecordingPurger(
+        throwOnPurge: true,
+        purgesRefetchableOnly: false,
+      );
+      final store = FakeAuthStore();
+      final container = createContainer(
+        authStore: store,
+        authApi: _loginApi(const AuthTokenResult(token: 'new', user: testUser)),
+        purgers: [failing],
+        sessionPurgeJournal: journal,
+      );
+      addTearDown(container.dispose);
+      await settleAuth(container);
+
+      await expectLater(
+        container
+            .read(authControllerProvider.notifier)
+            .login(email: 'a@example.com', password: 'secret'),
+        throwsA(isA<SessionCleanupException>()),
+      );
+
+      expect(store.token, isNull);
+      expect(store.user, isNull);
+      expect(
+        container.read(authControllerProvider),
+        isA<AuthUnauthenticated>(),
+      );
+      expect(journal.pending, SessionPurgeScope.session);
+
+      // 破棄が通るようになれば、同じ操作でログインできる（再試行の導線）。
+      failing.throwOnPurge = false;
+      await container
+          .read(authControllerProvider.notifier)
+          .login(email: 'a@example.com', password: 'secret');
+
+      expect(
+        container.read(authControllerProvider),
+        AuthState.authenticated(testUser),
+      );
+      expect(store.token, 'new');
+      expect(journal.pending, isNull);
+    });
+
+    test('破棄の印を読めなければログインを止める（片付いたか分からないまま始めないため）', () async {
+      final journal = FakeSessionPurgeJournal();
+      final store = FakeAuthStore();
+      final container = createContainer(
+        authStore: store,
+        authApi: _loginApi(const AuthTokenResult(token: 'new', user: testUser)),
+        sessionPurgeJournal: journal,
+      );
+      addTearDown(container.dispose);
+      await settleAuth(container);
+      journal.error = StateError('db');
+
+      await expectLater(
+        container
+            .read(authControllerProvider.notifier)
+            .login(email: 'a@example.com', password: 'secret'),
+        throwsA(isA<SessionCleanupException>()),
+      );
+
+      expect(store.token, isNull);
+    });
+
+    test('ログイン時のユーザー切り替えの破棄が失敗したら、新しいトークンもユーザーも残さない', () async {
+      final journal = FakeSessionPurgeJournal();
+      final failing = RecordingPurger(
+        throwOnPurge: true,
+        purgesRefetchableOnly: false,
+      );
+      final store = FakeAuthStore(user: testUser);
+      final container = createContainer(
+        authStore: store,
+        authApi: _loginApi(
+          const AuthTokenResult(
+            token: 'new',
+            user: User(id: 2, name: '別の人'),
+          ),
+        ),
+        purgers: [failing],
+        sessionPurgeJournal: journal,
+      );
+      addTearDown(container.dispose);
+      await settleAuth(container);
+
+      await expectLater(
+        container
+            .read(authControllerProvider.notifier)
+            .login(email: 'b@example.com', password: 'secret'),
+        throwsA(isA<SessionCleanupException>()),
+      );
+
+      expect(store.token, isNull, reason: '残すと次の起動で前のユーザーのデータの上に復元する');
+      expect(
+        container.read(authControllerProvider),
+        isA<AuthUnauthenticated>(),
+      );
+      expect(journal.pending, SessionPurgeScope.session, reason: '次のログインで片付ける');
+    });
+
+    test(
+      '起動時に印のやり直しが失敗したら、トークンがあってもログイン済みにしない（ログイン中のユーザーのデータを起動のたびに消さないため）',
+      () async {
+        final journal = FakeSessionPurgeJournal(
+          pending: SessionPurgeScope.session,
+        );
+        final failing = RecordingPurger(
+          throwOnPurge: true,
+          purgesRefetchableOnly: false,
+        );
+        final store = FakeAuthStore(token: 'valid', user: testUser);
+        final api = MockAuthApi()..stubCurrentUser();
+        final container = createContainer(
+          authStore: store,
+          authApi: api,
+          purgers: [failing],
+          sessionPurgeJournal: journal,
+        );
+        addTearDown(container.dispose);
+
+        expect(await settleAuth(container), const AuthState.unauthenticated());
+
+        verifyNever(api.fetchCurrentUser);
+        expect(store.token, 'valid', reason: '印はデータを消す意味しか持たない');
+        expect(journal.pending, SessionPurgeScope.session);
+      },
+    );
+
+    test('取り直せるものだけの印のやり直しが失敗しても、起動は止めない（同じユーザーのキャッシュなので）', () async {
+      final journal = FakeSessionPurgeJournal(
+        pending: SessionPurgeScope.refetchable,
+      );
+      final container = createContainer(
+        authStore: FakeAuthStore(token: 'valid', user: testUser),
+        authApi: MockAuthApi()..stubCurrentUser(),
+        purgers: [RecordingPurger(throwOnPurge: true)],
+        sessionPurgeJournal: journal,
+      );
+      addTearDown(container.dispose);
+
+      expect(await settleAuth(container), AuthState.authenticated(testUser));
+      expect(journal.pending, SessionPurgeScope.refetchable);
+    });
+  });
+
+  // iOS の Keychain はアプリを削除しても残る。入れ直した端末が前の持ち主の
+  // トークンで自動ログインしないよう、DB を新しく作ったときの目印で片付ける。
+  group('入れ直し直後（#15）', () {
+    test('目印があれば、保存済みのトークンを消して未ログインで始める', () async {
+      final marker = FakeInstallMarker(fresh: true);
+      final store = FakeAuthStore(token: 'previous-owner', user: testUser);
+      final api = MockAuthApi()..stubCurrentUser();
+      final container = createContainer(
+        authStore: store,
+        authApi: api,
+        installMarker: marker,
+      );
+      addTearDown(container.dispose);
+
+      expect(await settleAuth(container), const AuthState.unauthenticated());
+
+      expect(store.token, isNull);
+      expect(store.user, isNull);
+      verifyNever(api.fetchCurrentUser);
+      expect(marker.fresh, isFalse, reason: '次の起動からはログインを保つ');
+    });
+
+    test('目印が無ければ（アップデート）、保存済みのトークンで復元する', () async {
+      final store = FakeAuthStore(token: 'valid', user: testUser);
+      final container = createContainer(
+        authStore: store,
+        authApi: MockAuthApi()..stubCurrentUser(),
+        installMarker: FakeInstallMarker(),
+      );
+      addTearDown(container.dispose);
+
+      expect(await settleAuth(container), AuthState.authenticated(testUser));
+      expect(store.clearCount, 0);
+    });
+
+    test('トークンを消せなければ目印を残し、未ログインで始める（前の持ち主で復元しないため）', () async {
+      final marker = FakeInstallMarker(fresh: true);
+      final store = ThrowingAuthStore(failOnClear: true, failOnRead: false);
+      final api = MockAuthApi()..stubCurrentUser();
+      final container = createContainer(
+        authStore: store,
+        authApi: api,
+        installMarker: marker,
+      );
+      addTearDown(container.dispose);
+
+      expect(await settleAuth(container), const AuthState.unauthenticated());
+
+      expect(marker.fresh, isTrue, reason: '次の起動でやり直す');
+      verifyNever(api.fetchCurrentUser);
+    });
+
+    test('ログイン時に目印を片付けられなければログインを止める（後の起動で新しいトークンを消さないため）', () async {
+      final marker = FakeInstallMarker(fresh: true)..error = StateError('db');
+      final store = FakeAuthStore();
+      final container = createContainer(
+        authStore: store,
+        authApi: _loginApi(const AuthTokenResult(token: 'new', user: testUser)),
+        installMarker: marker,
+      );
+      addTearDown(container.dispose);
+      await settleAuth(container);
+
+      await expectLater(
+        container
+            .read(authControllerProvider.notifier)
+            .login(email: 'a@example.com', password: 'secret'),
+        throwsA(isA<SessionCleanupException>()),
+      );
+
+      expect(store.token, isNull);
+    });
+  });
+}
+
+/// `createToken` が [result] を返す API。
+MockAuthApi _loginApi(AuthTokenResult result) {
+  final api = MockAuthApi();
+  when(
+    () => api.createToken(
+      email: any(named: 'email'),
+      password: any(named: 'password'),
+      deviceName: any(named: 'deviceName'),
+    ),
+  ).thenAnswer((_) async => result);
+  return api;
 }

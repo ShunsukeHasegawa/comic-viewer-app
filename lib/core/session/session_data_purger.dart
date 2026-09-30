@@ -2,6 +2,7 @@ import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../../features/downloads/application/auto_delete_records_purger.dart';
 import '../../features/downloads/data/downloaded_volume_purger.dart';
+import '../../features/downloads/data/safe_mode_revalidation_store.dart';
 import '../../features/offline/data/offline_metadata_purger.dart';
 import '../../features/progress/data/progress_purger.dart';
 import '../cache/image_cache_purger.dart';
@@ -64,4 +65,6 @@ List<SessionDataPurger> sessionDataPurgers(Ref ref) => [
   // 自動削除の記録（前のユーザーの読了に気づいた時刻 / 前回の結果。#13）。
   ref.watch(autoDeleteRecordsPurgerProvider),
   ref.watch(progressPurgerProvider),
+  // セーフモードの再検証の予約（次のユーザーに持ち越さない。#15）。
+  ref.watch(safeModeRevalidationPurgerProvider),
 ];

@@ -89,6 +89,46 @@ void main() {
     expect(offline, isNot(isA<NotFoundException>()));
   });
 
+  group('404 の出どころ（#15: プロキシの 404 を「非公開」と取り違えないため）', () {
+    NotFoundException notFoundWith({
+      Object? data,
+      Map<String, List<String>> headers = const {},
+    }) => ApiException.from(
+      dioError(
+        DioExceptionType.badResponse,
+        response: responseWith(404, data: data, headers: headers),
+      ),
+    ) as NotFoundException;
+
+    test('JSON の本文なら message を持つ', () {
+      final exception = notFoundWith(
+        data: {'message': 'Not Found'},
+        headers: {
+          'content-type': ['application/json; charset=UTF-8'],
+        },
+      );
+
+      expect(exception.serverMessage, 'Not Found');
+    });
+
+    test('HTML の 404 では message を持たない', () {
+      final exception = notFoundWith(
+        data: '<html><body>404 Not Found</body></html>',
+        headers: {
+          'content-type': ['text/html'],
+        },
+      );
+
+      expect(exception.serverMessage, isNull);
+    });
+
+    test('content-type が無ければ本文が Map でも message を持たない（出どころを確かめられないため）', () {
+      final exception = notFoundWith(data: {'message': 'Not Found'});
+
+      expect(exception.serverMessage, isNull);
+    });
+  });
+
   test('422 は errors をフィールドごとに読む', () {
     final exception = ApiException.from(
       dioError(

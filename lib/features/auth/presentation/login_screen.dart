@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/network/api_exception.dart';
 import '../application/auth_controller.dart';
 import '../domain/auth_state.dart';
+import '../domain/session_cleanup_exception.dart';
 
 /// ログイン画面。
 class LoginScreen extends ConsumerStatefulWidget {
@@ -48,6 +49,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           );
       // 成功した場合の画面遷移はルータの redirect が行う。
     } on ApiException catch (error) {
+      if (mounted) setState(() => _errorMessage = error.message);
+    } on SessionCleanupException catch (error) {
+      // 前のセッションを片付けられずログインを止めた（#15）。再試行できるよう知らせる。
       if (mounted) setState(() => _errorMessage = error.message);
     } on Object {
       if (mounted) setState(() => _errorMessage = '予期しないエラーが発生しました。');

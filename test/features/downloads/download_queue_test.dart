@@ -1905,6 +1905,39 @@ void main() {
       );
     });
 
+    test('台帳の削除に失敗しても ZIP は消し、最後に失敗を伝える（破棄の印を残して次の起動でやり直させるため）', () async {
+      final scope = await setUpCompleted();
+      scope.harness.store.failDeleteAllRows = true;
+
+      await expectLater(scope.queue.purgeAll(), throwsA(isA<StateError>()));
+      await settle();
+
+      expect(scope.harness.archiveFile().existsSync(), isFalse);
+      expect(scope.harness.transport.resetCount, 1);
+    });
+
+    test('キューの組み立てに失敗していてもダウンロード領域を空にし、転送の記録も消す', () async {
+      final harness = createHarness();
+      final archive = harness.archiveFile();
+      archive.parent.createSync(recursive: true);
+      archive.writeAsBytesSync([1, 2, 3]);
+      harness.store.failLoadAll = true;
+      final scope = startQueue(harness);
+      await expectLater(
+        scope.container.read(downloadQueueProvider.future),
+        throwsA(isA<StateError>()),
+      );
+
+      await scope.queue.purgeAll();
+
+      expect(archive.existsSync(), isFalse, reason: '前のユーザーの ZIP を端末に残さない');
+      expect(
+        scope.harness.transport.resetCount,
+        1,
+        reason: 'Bearer が平文で入ったタスクの記録を残さない',
+      );
+    });
+
     test('purgeAll は平文のトークンを含むタスクを先に消してからファイルを消す', () async {
       final scope = setUpQueue();
       await enqueueAndSubmit(scope);

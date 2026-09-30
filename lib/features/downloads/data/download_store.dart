@@ -166,16 +166,22 @@ class DownloadStore {
   }
 
   /// ダウンロード領域を丸ごと空にする（ログアウト時）。
+  ///
+  /// 1 件消せなくても残りは消し、最後に最初の失敗を投げる。黙って成功扱いに
+  /// すると、破棄の印（`SessionPurgeJournal`）が消えて前のユーザーの ZIP が
+  /// 端末に残り続ける（#15）。
   Future<void> deleteAllFiles() async {
     final directory = directories.downloads;
     if (!directory.existsSync()) return;
+    FileSystemException? firstError;
     for (final entity in directory.listSync()) {
       try {
         await entity.delete(recursive: true);
-      } on FileSystemException {
-        // 1 件消せなくても残りは消す。
+      } on FileSystemException catch (error) {
+        firstError ??= error;
       }
     }
+    if (firstError != null) throw firstError;
   }
 
   /// 保存先を用意する。

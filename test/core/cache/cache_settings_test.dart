@@ -1,5 +1,6 @@
 import 'package:comic_laz/core/cache/cache_settings.dart';
 import 'package:comic_laz/core/storage/app_database.dart';
+import 'package:drift/drift.dart' show BooleanExpressionOperators;
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../support/cache_fakes.dart';
@@ -46,7 +47,10 @@ void main() {
       const CacheSettings(pageLimit: CacheLimit.gb2),
     );
 
-    final rows = await harness.database.select(harness.database.settings).get();
+    // 入れ直し直後の目印（#15。DB の作成時に書かれる）はキャッシュの設定ではないので数えない。
+    final rows = await (harness.database.select(
+      harness.database.settings,
+    )..where((t) => t.key.equals(AppDatabase.freshInstallKey).not())).get();
     expect(rows.length, 3);
     expect((await harness.settingsStore.read()).pageLimit, CacheLimit.gb2);
   });

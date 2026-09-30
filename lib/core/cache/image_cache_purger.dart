@@ -31,10 +31,15 @@ class ImageCachePurger implements SessionDataPurger {
 
   @override
   Future<void> purgeSessionData() async {
-    final store = await _store();
-    await store.clear();
-    // デコード済みの画像はメモリにも残るため、そちらも捨てる。
-    _clearMemory();
+    try {
+      final store = await _store();
+      await store.clear();
+    } finally {
+      // デコード済みの画像はメモリにも残るため、そちらも捨てる。ディスクの
+      // 削除に失敗しても捨てる（次のユーザーに前のユーザーの表紙を見せない）。
+      // 例外はそのまま返し、破棄の印（`SessionPurgeJournal`）を残させる。
+      _clearMemory();
+    }
   }
 }
 

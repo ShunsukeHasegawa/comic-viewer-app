@@ -151,7 +151,7 @@ final class AutoDeleteRunnerProvider
   }
 }
 
-String _$autoDeleteRunnerHash() => r'3ed2870111e78a478be4a8bcc9415fb422f84bb8';
+String _$autoDeleteRunnerHash() => r'8ed9a2444fd15248a11752f30c235dda9f2fa6c7';
 
 /// ダウンロード済みの巻の自動削除（#13）。**自動削除はここだけが行う**。
 ///

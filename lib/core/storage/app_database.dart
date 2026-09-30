@@ -211,9 +211,19 @@ class AppDatabase extends _$AppDatabase {
   ///
   /// キャッシュのテーブルは作り直しても実害が無いが、ダウンロード済みの巻は
   /// 端末にしか無いデータなので、DB を消す形の移行はしない。
+  /// DB を新しく作ったときにだけ書く目印のキー（`InstallMarker`。#15）。
+  static const freshInstallKey = 'install.fresh';
+
   @override
   MigrationStrategy get migration => MigrationStrategy(
-    onCreate: (m) => m.createAll(),
+    onCreate: (m) async {
+      await m.createAll();
+      // 入れ直し直後の目印。iOS の Keychain はアプリの削除で消えないので、
+      // 前のインストールのトークンで自動ログインさせないために使う
+      // （既存の端末は onUpgrade を通るので書かれない）。
+      await into(settings)
+          .insert(const SettingRow(key: freshInstallKey, value: '1'));
+    },
     onUpgrade: (m, from, to) async {
       // v2: 巻単位のダウンロード管理（#9）。
       if (from < 2) await m.createTable(downloadedVolumes);

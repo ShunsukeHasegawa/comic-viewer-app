@@ -46,4 +46,4 @@ final class AppDirectoriesProvider
   }
 }
 
-String _$appDirectoriesHash() => r'4e5f19407fd5f5a1b794f9c53405d96aa7897165';
+String _$appDirectoriesHash() => r'eaee37c40e378c88fecfcab0b4fcd494fe5adb4f';

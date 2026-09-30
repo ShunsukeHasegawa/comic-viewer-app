@@ -19,11 +19,17 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
     <!-- ComicLazApplication: 通知の許可が後から取り消されたとき、アプリが
-         閉じていてもプロセスの起動時に foreground 実行を切る（#10）。 -->
+         閉じていてもプロセスの起動時に foreground 実行を切る（#10）。
+         バックアップ / 端末間転送は全部外す（#15。理由は data_extraction_rules.xml）。
+         dataExtractionRules は Android 12 以上、fullBackupContent は 11 以下の保険。 -->
     <application
         android:label="comic_laz"
         android:name=".ComicLazApplication"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:allowBackup="false"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        tools:targetApi="31">
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"
             android:foregroundServiceType="dataSync"

@@ -16,13 +16,32 @@ abstract interface class AuthStore {
 
   Future<void> writeToken(String token);
 
-  /// 最後に取得したユーザー。未保存 / 壊れていれば `null`。
+  /// 最後に取得したユーザー。未保存なら `null`。
+  ///
+  /// 保存はされているが読み解けない（アプリの更新で形式が変わった / 壊れている）
+  /// ときは [StoredUserUnreadableException] を投げる。「無い」と区別しないと、
+  /// ログイン時に前のユーザーが居なかったことになり、前のユーザーのデータを
+  /// 次のユーザーに見せてしまう（#15）。
   Future<User?> readUser();
 
   Future<void> writeUser(User user);
 
   /// トークンとユーザーの両方を破棄する。
   Future<void> clear();
+}
+
+/// 保存済みのユーザーを読み解けない（[AuthStore.readUser]）。
+///
+/// セキュアストレージ自体の障害（`PlatformException`）とは別の型にする。
+/// 起動時は同じユーザーのトークンの検証で持ち主が分かるので上書きしてよいが、
+/// ストレージの障害はロック解除前の一時的なものがあり扱いが違うため。
+class StoredUserUnreadableException implements Exception {
+  const StoredUserUnreadableException(this.cause);
+
+  final Object cause;
+
+  @override
+  String toString() => 'StoredUserUnreadableException: $cause';
 }
 
 /// OS のセキュアストレージ（Android: EncryptedSharedPreferences / iOS: Keychain）。
@@ -69,13 +88,21 @@ class SecureAuthStore implements AuthStore {
   Future<User?> readUser() async {
     final raw = await _storage.read(key: _userKey);
     if (raw == null) return null;
+    final Object? decoded;
     try {
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map<String, dynamic>) return null;
+      decoded = jsonDecode(raw);
+    } on FormatException catch (error) {
+      throw StoredUserUnreadableException(error);
+    }
+    if (decoded is! Map<String, dynamic>) {
+      throw StoredUserUnreadableException('not an object');
+    }
+    try {
       return User.fromJson(decoded);
-    } on Object {
-      // 形式が変わった / 壊れている場合は「無い」とみなす（起動を妨げない）。
-      return null;
+    } on Object catch (error) {
+      // 必須項目が増えた / 型が変わった。起動側は「無い」と同じに扱い、
+      // ログイン側は「持ち主不明」として扱う（AuthController）。
+      throw StoredUserUnreadableException(error);
     }
   }
 

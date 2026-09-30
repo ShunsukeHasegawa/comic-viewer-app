@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:comic_laz/core/cache/image_cache_purger.dart';
 import 'package:comic_laz/core/cache/image_cache_store.dart';
 import 'package:comic_laz/core/cache/memory_image_cache.dart';
@@ -40,6 +42,21 @@ void main() {
       isTrue,
       reason: '明示的にダウンロードしたデータ（#9）は別領域なので消さない',
     );
+  });
+
+  test('ディスクの削除に失敗しても、メモリ上の画像は捨てる（次のユーザーに前の表紙を見せないため）', () async {
+    var memoryCleared = 0;
+    final purger = ImageCachePurger(
+      () async => throw const FileSystemException('disk broken'),
+      () => memoryCleared++,
+    );
+
+    // 失敗は呼び出し元へ返す（破棄の印を残して、次の起動でやり直させるため）。
+    await expectLater(
+      purger.purgeSessionData(),
+      throwsA(isA<FileSystemException>()),
+    );
+    expect(memoryCleared, 1);
   });
 
   test('ログアウトの破棄対象として登録されている', () {

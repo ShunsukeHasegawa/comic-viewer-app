@@ -9,9 +9,14 @@ part 'app_directories.g.dart';
 /// アプリ専用のデータ置き場。
 ///
 /// コミック画像は**アプリ専用領域**に置く（共有ストレージやギャラリーに出さない）。
-/// 詳細な保護（`.nomedia` / バックアップ除外）は #15 で詰める。
+/// `.nomedia` とバックアップ除外は `StorageProtector`（#15）が起動のたびに掛ける。
+/// 新しい置き場を足したら、そちらの除外対象にも足すこと。
 class AppDirectories {
-  const AppDirectories({required this.support, required this.cache});
+  const AppDirectories({
+    required this.support,
+    required this.cache,
+    this.documents,
+  });
 
   /// 明示的にダウンロードしたデータ（自動削除しない）。
   ///
@@ -22,6 +27,13 @@ class AppDirectories {
   ///
   /// Android: `getApplicationCacheDirectory()` / iOS: `Library/Caches`
   final Directory cache;
+
+  /// drift の DB（`comic_laz.sqlite`）の置き場（drift_flutter の既定）。
+  ///
+  /// Android: `app_flutter/` / iOS: `Documents`。アプリは直接ファイルを
+  /// 置かないが、iOS のバックアップ除外（#15）の対象にするために持つ。
+  /// テストでは `null`（DB はメモリ上）。
+  final Directory? documents;
 
   /// ページ / サムネイルの一時キャッシュ置き場。
   Directory get imageCache => Directory(p.join(cache.path, 'images'));
@@ -42,6 +54,7 @@ Future<AppDirectories> appDirectories(Ref ref) async {
   final directories = AppDirectories(
     support: await getApplicationSupportDirectory(),
     cache: await getApplicationCacheDirectory(),
+    documents: await getApplicationDocumentsDirectory(),
   );
   await directories.ensureCreated();
   return directories;

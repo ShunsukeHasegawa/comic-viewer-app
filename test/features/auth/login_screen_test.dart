@@ -4,6 +4,7 @@ import 'package:comic_laz/core/network/api_exception.dart';
 import 'package:comic_laz/features/auth/application/auth_controller.dart';
 import 'package:comic_laz/features/auth/data/auth_api.dart';
 import 'package:comic_laz/features/auth/domain/auth_state.dart';
+import 'package:comic_laz/features/auth/domain/session_cleanup_exception.dart';
 import 'package:comic_laz/features/auth/presentation/login_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -17,10 +18,12 @@ Future<ProviderContainer> pumpLoginScreen(
   WidgetTester tester, {
   required MockAuthApi api,
   FakeAuthStore? store,
+  FakeSessionPurgeJournal? journal,
 }) async {
   final container = createContainer(
     authStore: store ?? FakeAuthStore(),
     authApi: api,
+    sessionPurgeJournal: journal,
   );
   addTearDown(container.dispose);
   await tester.pumpWidget(
@@ -135,6 +138,34 @@ void main() {
     await fillAndSubmit(tester);
 
     expect(find.text('ネットワークに接続できませんでした。'), findsOneWidget);
+  });
+
+  // 前のセッションを片付けられずにログインを止めたとき（#15）。黙って失敗させず、
+  // 再試行できることを伝える。
+  testWidgets('前のセッションを片付けられなければ、その旨を表示して再試行できる', (tester) async {
+    when(
+      () => api.createToken(
+        email: any(named: 'email'),
+        password: any(named: 'password'),
+        deviceName: any(named: 'deviceName'),
+      ),
+    ).thenAnswer(
+      (_) async => const AuthTokenResult(token: 'new', user: testUser),
+    );
+    final store = FakeAuthStore();
+    await pumpLoginScreen(
+      tester,
+      api: api,
+      store: store,
+      journal: FakeSessionPurgeJournal()..error = StateError('db'),
+    );
+
+    await fillAndSubmit(tester);
+
+    expect(find.text(const SessionCleanupException().message), findsOneWidget);
+    expect(store.token, isNull);
+    final button = tester.widget<FilledButton>(find.byType(FilledButton));
+    expect(button.onPressed, isNotNull);
   });
 
   testWidgets('送信中はボタンを無効化し、二重送信しない', (tester) async {

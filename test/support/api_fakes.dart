@@ -10,6 +10,9 @@ import 'package:comic_laz/domain/models/read_volume.dart';
 import 'package:comic_laz/domain/models/reading_book.dart';
 import 'package:comic_laz/domain/models/volume_status_sync.dart';
 
+/// 本物のサーバー（`V2\BookController::show`）が返す詳細の 404（JSON の本文つき）。
+const _detailNotFound = NotFoundException(serverMessage: 'Not Found');
+
 /// ネットワークを触らない [BooksApi]。
 ///
 /// 既定は空の一覧。[error] を設定するとその例外を投げる。
@@ -92,11 +95,11 @@ class FakeBooksApi implements BooksApi {
     if (bookDetailError case final error?) throw error;
     if (bookDetails.isNotEmpty) {
       final detail = bookDetails[bookId];
-      if (detail == null) throw const NotFoundException();
+      if (detail == null) throw _detailNotFound;
       return detail;
     }
     final detail = bookDetail;
-    if (detail == null) throw const NotFoundException();
+    if (detail == null) throw _detailNotFound;
     return detail;
   }
 

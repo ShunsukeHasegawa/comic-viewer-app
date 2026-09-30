@@ -371,6 +371,25 @@ class GatedDownloadStore extends DownloadStore {
   /// `rotateSessionTag` を失敗させる（ログアウト時に DB へ書けなかった）。
   bool failRotateSessionTag = false;
 
+  /// `deleteAllRows` を失敗させる（ログアウト時に台帳を消せなかった）。
+  bool failDeleteAllRows = false;
+
+  /// `loadAll` を失敗させる（台帳が読めず、キューを組み立てられない）。
+  bool failLoadAll = false;
+
+  @override
+  Future<void> deleteAllRows() {
+    log.add('deleteAllRows');
+    if (failDeleteAllRows) return Future.error(StateError('db locked'));
+    return super.deleteAllRows();
+  }
+
+  @override
+  Future<Map<int, VolumeDownload>> loadAll() {
+    if (failLoadAll) return Future.error(StateError('db broken'));
+    return super.loadAll();
+  }
+
   @override
   Future<String> rotateSessionTag() {
     if (failRotateSessionTag) {

@@ -54,13 +54,10 @@ class DownloadThumbnail extends StatelessWidget {
 
 /// 進行中（取得中 / 待機中 / 中断）の 1 行。
 ///
-/// 並び替えは #13 では実装せず、別 Issue に切り出す（未起票。起票したら番号を
-/// ここに書く。それまで #13 のチェックリストの「並び替え」は未完了のまま残す）。
-/// OS の holding queue は priority → creationTime の順で取り出すので、待機中の
-/// 巻を前へ動かすには取り消して優先度付きで積み直す必要があり、`DownloadQueue`
-/// の `_tasks` / `_cancelling` / `_reservedBytes` / 起動時の照合と絡む。#10 の
-/// レビューで何度も直した箇所なので、`DownloadQueue` 側の API
-/// （例: `prioritize(volumeId)`）として設計する。
+/// 並び替えは作らない（個人用アプリで決めたこと）。巻は巻順に 1 冊ずつ落ちれば
+/// 足り、OS の holding queue は priority → creationTime の順で取り出すので、待機中の
+/// 巻を前へ動かすには取り消して積み直す必要があり、`DownloadQueue` の照合まわりを
+/// 複雑にするだけの見返りが無い。
 class DownloadProgressTile extends StatelessWidget {
   const DownloadProgressTile({
     required this.entry,

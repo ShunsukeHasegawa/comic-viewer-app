@@ -63,6 +63,40 @@ test/         lib と同じ構成。共通フェイクは test/support/
   取り直せないデータ（ダウンロード済み ZIP / 未送信の進捗）を消すものは
   `purgesRefetchableOnly = false` にする。`safe_mode` の変更だけでは走らせない
   （同じユーザーの数 GB と、サーバーにも無い読書位置を黙って消さない）。
+- 破棄は `SessionPurgeJournal`（drift の Settings）の印を**先に**書き、全 purger が
+  成功したときだけ消す。ログアウトでは印 → トークン削除 → 破棄の順。印が残っていれば
+  起動時（`restoreSession` の先頭）とログイン時にやり直す（#15）。purger は失敗を
+  握らずに投げる（握ると印が消えて二度とやり直されない）。
+- **セッション全体の印が片付くまでログイン済みにしない**（fail closed）。ログインは
+  やり直し / ユーザー切り替えの破棄が失敗したらトークンを保存せず
+  `SessionCleanupException`（画面はエラー + 再試行）。起動時も印が残ればトークンが
+  あっても未ログインにする。進捗の行には持ち主が無く、通すと前のユーザーの未送信の
+  進捗が新しいユーザーのトークンで送られる（サーバー側で取り消せない）。
+- `AuthStore.readUser` は「未保存」なら `null`、「保存はあるが読み解けない」なら
+  `StoredUserUnreadableException`。ログイン時は持ち主不明として全部破棄し、起動時は
+  トークンの持ち主と同じなので上書きする。ログイン時に前のトークンだけ残りユーザーが
+  無いときも持ち主不明として扱う。
+- iOS の Keychain はアプリの削除で消えない。drift の `onCreate` が書く目印
+  （`InstallMarker`）があれば、起動 / ログインの前に `AuthStore.clear()` する
+  （入れ直した端末が前の持ち主で自動ログインしないため。既存の端末は `onUpgrade` を
+  通るので目印は無い）。テストでは `FakeInstallMarker`（既定は目印なし）。
+- セーフモードの OFF → ON では一括削除せず、`SafeModeRevalidator` がダウンロード済みの
+  タイトルを 1 件ずつ `GET /api/v2/books/{id}` で確かめ、**404 のタイトルだけ**消す。
+  通信エラー・5xx・429・401 では消さずに予約（`SafeModeRevalidationStore`）を残し、
+  403 は飛ばす。開いている巻は消さない。404 は「本文がコントローラの JSON
+  `{"message": "Not Found"}`（`NotFoundException.serverMessage`）」「その回が通信エラー
+  無しで終わった」「`/api/books`（セーフモード版）が空でなく、そのタイトルが載って
+  いない」の 3 つが揃ったときだけ消す（プロキシの誤設定などで全部消さないため）。
+- 端末内のファイルは `AppDirectories`（support / cache）配下に置く。新しい置き場を
+  作ったら `StorageProtector` の iOS バックアップ除外に足す。`.nomedia` は support /
+  cache の**直下**（images / downloads に置くと孤児の掃除とログアウトの全削除で消える）。
+- Android はバックアップ / 端末間転送を**全部**除外している（`data_extraction_rules.xml`
+  / `backup_rules.xml` / `allowBackup="false"`）。戻すときは「DB だけ復元されて台帳と
+  ZIP が食い違う」「Bearer 入りの転送記録が持ち出される」を先に検討する。
+  `test/platform/platform_config_test.dart` が退行を止める。
+- OS の保護機能はチャネル `com.lazgram.comic_laz/device_protection`（`DeviceProtection`。
+  iOS は `AppDelegate.swift`、Android は `MainActivity.kt`）だけ。プラグインは足さない。
+  チャネルが無い環境でも落とさない。テストでは `FakeDeviceProtection`。
 - 「オフラインで読めるか」は台帳の `status` ではなく
   `VolumeDownload.hasInstalledArchive` で判断する。「更新あり」の取り直し中も
   旧世代の ZIP は端末に残っていて読める。
@@ -86,6 +120,24 @@ test/         lib と同じ構成。共通フェイクは test/support/
 - テストはネットワークとプラットフォームチャネルを触らない。`test/support/test_scope.dart`
   の `testOverrides` / `createContainer` を使い、必要なフェイクは `test/support/` に足す。
 - テスト名・コメントは日本語で、「なぜ」を書く（「何を」はコードを読めば分かる）。
+
+## 端末内データの保護で決めたこと（#15）
+
+- **ファイル単位の暗号化・起動時の生体認証ロック・画面の保護（スクリーンショット禁止 /
+  `FLAG_SECURE`）は作らない**（個人用アプリのため意図して見送り。再提案・再実装しない）。
+  保存時の暗号化は OS（Android の FBE / iOS の Data Protection）に任せ、端末のロック画面を
+  一次防御とする。アプリ側の暗号化はページ送りのたびの復号で ZIP のランダムアクセス（#11）も壊す。
+  Android の `MainActivity` はチャネルを持たない（プレーンな `FlutterActivity`）。
+- **バックアップ / 端末間転送からは全部外す**（iOS: support / downloads / Documents（DB）/
+  画像キャッシュに `isExcludedFromBackup`。Android: 上記の XML）。
+- 残存リスク: iOS の `UserDefaults`（background_downloader のネイティブ状態）はバックアップ
+  から外せない。Dart が繋がっていない間（アプリ終了中）に届いた転送の状態 / 再開データは
+  `com.bbflight.background_downloader.{statusUpdateMap,progressUpdateMap,resumeDataMap}.v2`
+  に Task の JSON ごと入り、**Bearer 入りのヘッダを含む**。次の起動の
+  `ArchiveTransport.start` で取り出されるまでの間はバックアップに載りうる（取り出す前に
+  消すと完了を失うので消さない。根本対策は巻単位の短命トークンで、サーバー側の変更が要る）。
+  nsurlsessiond の一時ファイルは OS 管理。SQLite の削除済みページは VACUUM
+  まで残りうる。圏外起動中の `safe_mode` 変更は次にサーバーへ届くまで気づけない。
 
 ## サーバー API（comic-viewer）で確認済みの事実
 
