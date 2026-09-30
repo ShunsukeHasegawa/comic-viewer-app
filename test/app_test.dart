@@ -1,10 +1,12 @@
 import 'package:comic_laz/app.dart';
 import 'package:comic_laz/domain/models/book.dart';
 import 'package:comic_laz/domain/models/user.dart';
+import 'package:comic_laz/features/auth/application/session_cleanup_notice.dart';
 import 'package:comic_laz/features/auth/presentation/login_screen.dart';
 import 'package:comic_laz/features/downloads/domain/volume_download.dart';
 import 'package:comic_laz/features/library/presentation/library_screen.dart';
 import 'package:comic_laz/main.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'support/api_fakes.dart';
@@ -67,6 +69,25 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('セーフモードで表示できない 1 巻のダウンロードを削除しました'), findsOneWidget);
+  });
+
+  testWidgets('ログイン時に前回のデータを消し切れなかったら SnackBar で知らせる（止めずに通す代わりに黙らないため）', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      wrapWithScope(
+        const ComicLazApp(),
+        overrides: testOverrides(authApi: MockAuthApi()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    ProviderScope.containerOf(tester.element(find.byType(ComicLazApp)))
+        .read(sessionCleanupNoticeProvider.notifier)
+        .report();
+    await tester.pump();
+
+    expect(find.text(SessionCleanupNotice.message), findsOneWidget);
   });
 
   testWidgets('設定エラー画面はメッセージを表示する', (tester) async {

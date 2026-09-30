@@ -18,12 +18,12 @@ Future<ProviderContainer> pumpLoginScreen(
   WidgetTester tester, {
   required MockAuthApi api,
   FakeAuthStore? store,
-  FakeSessionPurgeJournal? journal,
+  FakeInstallMarker? installMarker,
 }) async {
   final container = createContainer(
     authStore: store ?? FakeAuthStore(),
     authApi: api,
-    sessionPurgeJournal: journal,
+    installMarker: installMarker,
   );
   addTearDown(container.dispose);
   await tester.pumpWidget(
@@ -140,9 +140,9 @@ void main() {
     expect(find.text('ネットワークに接続できませんでした。'), findsOneWidget);
   });
 
-  // 前のセッションを片付けられずにログインを止めたとき（#15）。黙って失敗させず、
-  // 再試行できることを伝える。
-  testWidgets('前のセッションを片付けられなければ、その旨を表示して再試行できる', (tester) async {
+  // 入れ直し直後の認証情報を片付けられずにログインを止めたとき（#15）。黙って
+  // 失敗させず、再試行できることを伝える（データの消し残しでは止めない）。
+  testWidgets('入れ直し直後の片付けができなければ、その旨を表示して再試行できる', (tester) async {
     when(
       () => api.createToken(
         email: any(named: 'email'),
@@ -157,7 +157,7 @@ void main() {
       tester,
       api: api,
       store: store,
-      journal: FakeSessionPurgeJournal()..error = StateError('db'),
+      installMarker: FakeInstallMarker(fresh: true)..error = StateError('db'),
     );
 
     await fillAndSubmit(tester);

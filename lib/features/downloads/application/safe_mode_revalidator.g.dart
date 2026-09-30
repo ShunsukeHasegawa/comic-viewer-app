@@ -8,6 +8,55 @@ part of 'safe_mode_revalidator.dart';
 
 // GENERATED CODE - DO NOT MODIFY BY HAND
 // ignore_for_file: type=lint, type=warning
+
+@ProviderFor(safeModeRevalidationClock)
+final safeModeRevalidationClockProvider = SafeModeRevalidationClockProvider._();
+
+final class SafeModeRevalidationClockProvider
+    extends
+        $FunctionalProvider<
+          SafeModeRevalidationClock,
+          SafeModeRevalidationClock,
+          SafeModeRevalidationClock
+        >
+    with $Provider<SafeModeRevalidationClock> {
+  SafeModeRevalidationClockProvider._()
+    : super(
+        from: null,
+        argument: null,
+        retry: null,
+        name: r'safeModeRevalidationClockProvider',
+        isAutoDispose: false,
+        dependencies: null,
+        $allTransitiveDependencies: null,
+      );
+
+  @override
+  String debugGetCreateSourceHash() => _$safeModeRevalidationClockHash();
+
+  @$internal
+  @override
+  $ProviderElement<SafeModeRevalidationClock> $createElement(
+    $ProviderPointer pointer,
+  ) => $ProviderElement(pointer);
+
+  @override
+  SafeModeRevalidationClock create(Ref ref) {
+    return safeModeRevalidationClock(ref);
+  }
+
+  /// {@macro riverpod.override_with_value}
+  Override overrideWithValue(SafeModeRevalidationClock value) {
+    return $ProviderOverride(
+      origin: this,
+      providerOverride: $SyncValueProvider<SafeModeRevalidationClock>(value),
+    );
+  }
+}
+
+String _$safeModeRevalidationClockHash() =>
+    r'88879202e480c1586dd0c68cc2911a0f9900a552';
+
 /// セーフモードが ON になったあと、ダウンロード済みの巻を確かめ直す（#15）。
 ///
 /// **自動削除（`AutoDeleteRunner`）とは別物**。あちらはユーザーが選んだ規則で
@@ -28,6 +77,7 @@ part of 'safe_mode_revalidator.dart';
 ///
 /// - 通信エラー・タイムアウト・5xx・429・401・想定外の 404 では何も消さず、
 ///   予約を残して次の機会（前面復帰 / 回線復帰 / 次の起動・ログイン）にやり直す。
+///   前面復帰 / 回線復帰は [resumeInterval] に 1 回までに間引く。
 ///   「オフラインか」は実際の通信結果で判断する（回線の監視は合図だけ）。
 /// - 403 はリソース単位の権限エラーで、セーフモードの判定ではないので消さない。
 /// - 200 なら、一覧に無い巻があっても消さない（`is_unsafe` はタイトル単位。
@@ -62,6 +112,7 @@ final safeModeRevalidatorProvider = SafeModeRevalidatorProvider._();
 ///
 /// - 通信エラー・タイムアウト・5xx・429・401・想定外の 404 では何も消さず、
 ///   予約を残して次の機会（前面復帰 / 回線復帰 / 次の起動・ログイン）にやり直す。
+///   前面復帰 / 回線復帰は [resumeInterval] に 1 回までに間引く。
 ///   「オフラインか」は実際の通信結果で判断する（回線の監視は合図だけ）。
 /// - 403 はリソース単位の権限エラーで、セーフモードの判定ではないので消さない。
 /// - 200 なら、一覧に無い巻があっても消さない（`is_unsafe` はタイトル単位。
@@ -95,6 +146,7 @@ final class SafeModeRevalidatorProvider
   ///
   /// - 通信エラー・タイムアウト・5xx・429・401・想定外の 404 では何も消さず、
   ///   予約を残して次の機会（前面復帰 / 回線復帰 / 次の起動・ログイン）にやり直す。
+  ///   前面復帰 / 回線復帰は [resumeInterval] に 1 回までに間引く。
   ///   「オフラインか」は実際の通信結果で判断する（回線の監視は合図だけ）。
   /// - 403 はリソース単位の権限エラーで、セーフモードの判定ではないので消さない。
   /// - 200 なら、一覧に無い巻があっても消さない（`is_unsafe` はタイトル単位。
@@ -133,7 +185,7 @@ final class SafeModeRevalidatorProvider
 }
 
 String _$safeModeRevalidatorHash() =>
-    r'42d4d86fcadd0267d40bb813a00db7a63a67f0d0';
+    r'805780be76e176c1c6ec6530e6c01bc863047e60';
 
 /// セーフモードが ON になったあと、ダウンロード済みの巻を確かめ直す（#15）。
 ///
@@ -155,6 +207,7 @@ String _$safeModeRevalidatorHash() =>
 ///
 /// - 通信エラー・タイムアウト・5xx・429・401・想定外の 404 では何も消さず、
 ///   予約を残して次の機会（前面復帰 / 回線復帰 / 次の起動・ログイン）にやり直す。
+///   前面復帰 / 回線復帰は [resumeInterval] に 1 回までに間引く。
 ///   「オフラインか」は実際の通信結果で判断する（回線の監視は合図だけ）。
 /// - 403 はリソース単位の権限エラーで、セーフモードの判定ではないので消さない。
 /// - 200 なら、一覧に無い巻があっても消さない（`is_unsafe` はタイトル単位。

@@ -15,6 +15,7 @@ import 'package:mocktail/mocktail.dart';
 
 import '../../support/api_fakes.dart';
 import '../../support/auth_fakes.dart';
+import '../../support/cache_fakes.dart';
 import '../../support/progress_fakes.dart';
 import '../../support/storage_fakes.dart';
 import '../../support/test_scope.dart';
@@ -85,6 +86,7 @@ class _Harness {
   final gateway = RecordingOfflineMetadataGateway();
   final lifecycle = FakeAppResumeMonitor();
   final connectivity = FakeConnectivityMonitor();
+  final clock = TestClock(DateTime.utc(2026, 9, 30, 12));
   final open = <int>{};
 
   late final ProviderContainer container;
@@ -103,6 +105,9 @@ class _Harness {
       appResumeMonitor: lifecycle,
       connectivityMonitor: connectivity,
       safeModeRevalidationStore: store,
+      overrides: [
+        safeModeRevalidationClockProvider.overrideWithValue(clock.now),
+      ],
     );
     addTearDown(container.dispose);
     // アプリと同じく購読しておく（ComicLazApp が listen している）。
@@ -315,6 +320,37 @@ void main() {
 
     expect(harness.queue.removed, [1]);
   });
+
+  test(
+    '予約が残っていても、前面復帰 / 回線復帰での問い合わせ直しは 1 時間に 1 回まで（自宅サーバーの HDD を叩き続けないため）',
+    () async {
+      // 開いている巻があるので、問い合わせを終えても予約が残り続ける状況。
+      final harness = _Harness(
+        ledger: {1: _completed(1, bookId: 7), 2: _completed(2, bookId: 8)},
+        responses: {7: _hidden},
+      );
+      harness.open.add(1);
+      await harness.start();
+      expect(harness.store.pending, isTrue);
+      expect(harness.api.fetchBookDetailCalls, [7, 8]);
+
+      harness.lifecycle.resume();
+      harness.connectivity.restore();
+      await harness.settle();
+      harness.clock.advance(const Duration(minutes: 59));
+      harness.lifecycle.resume();
+      await harness.settle();
+      expect(harness.api.fetchBookDetailCalls, [
+        7,
+        8,
+      ], reason: '1 時間以内は問い合わせない');
+
+      harness.clock.advance(const Duration(minutes: 1));
+      harness.lifecycle.resume();
+      await harness.settle();
+      expect(harness.api.fetchBookDetailCalls, [7, 8, 7, 8]);
+    },
+  );
 
   group('404 の出どころの確認（経路の障害で全部消さない）', () {
     test('JSON でない 404（プロキシの HTML など）では何も消さず、予約を残す', () async {

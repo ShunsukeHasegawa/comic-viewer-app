@@ -51,7 +51,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     } on ApiException catch (error) {
       if (mounted) setState(() => _errorMessage = error.message);
     } on SessionCleanupException catch (error) {
-      // 前のセッションを片付けられずログインを止めた（#15）。再試行できるよう知らせる。
+      // 入れ直し直後の認証情報を片付けられずログインを止めた（#15）。
+      // 再試行できるよう知らせる（データの消し残しではログインは止まらない）。
       if (mounted) setState(() => _errorMessage = error.message);
     } on Object {
       if (mounted) setState(() => _errorMessage = '予期しないエラーが発生しました。');

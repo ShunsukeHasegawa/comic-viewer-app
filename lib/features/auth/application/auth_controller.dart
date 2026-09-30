@@ -14,6 +14,7 @@ import '../data/auth_api.dart';
 import '../data/auth_store.dart';
 import '../domain/auth_state.dart';
 import '../domain/session_cleanup_exception.dart';
+import 'session_cleanup_notice.dart';
 
 part 'auth_controller.g.dart';
 
@@ -22,12 +23,18 @@ part 'auth_controller.g.dart';
 /// 端末内のコミックデータはログイン中のユーザーのものなので、
 /// ログアウト / トークン失効では必ず [SessionDataPurger] を通して破棄する（#15）。
 ///
-/// **セッション全体の破棄（[SessionPurgeScope.session]）が済んでいない間は
-/// ログイン済みにしない**（#15 のレビュー指摘）。進捗の行には持ち主が無いので、
-/// 前のユーザーの未送信の進捗が新しいユーザーのトークンでサーバーへ送られ
-/// （取り消せない）、前のユーザーの巻も新しいユーザーに見えてしまうため。
-/// これにより「ログイン中なのに破棄の印が残っている」状態も生まれず、起動の
-/// たびのやり直しがログイン中のユーザーの進捗やダウンロードを消すこともない。
+/// 前のセッションの破棄（[SessionPurgeScope.session]）の印が残っていれば、
+/// 起動時とログイン時にセッションを始める**前に**やり直す。
+///
+/// **やり直しが失敗してもログイン / 復元は止めない**（#15 のレビュー指摘）。
+/// これは個人用（利用者 1 人）のアプリとしての判断で、厳密なユーザー間の分離より
+/// 使えることを優先した。止める（fail closed）と、毎回失敗する purger が 1 つ
+/// あるだけ（例: 転送の記録の `reset` が投げ続ける）で二度とログインできなくなる。
+/// 端末を使うのは同じ人なので、消し残るのはほぼ自分のデータで、締め出される
+/// 損の方が大きい。止めない代わりに:
+///   - 印は捨てる（残すと次の起動のやり直しが新しいセッションのデータまで消す）。
+///   - ログイン時は [SessionCleanupNotice] で画面に知らせる（黙って通さない）。
+///     起動時は同じユーザーのトークンで再開するだけなのでログに残す。
 @Riverpod(keepAlive: true)
 class AuthController extends _$AuthController {
   /// セッション終了処理（破棄）が走っている間だけ非 null。
@@ -109,11 +116,13 @@ class AuthController extends _$AuthController {
     }
 
     if (!purged) {
-      // 持ち主を確かめられないデータが残っている。その上でセッションを
-      // 再開しない（ログインし直すときに、もう一度片付けてから始める）。
-      debugPrint('[session] purge still pending; not restoring session');
-      state = const AuthState.unauthenticated();
-      return;
+      // 消し残しがあっても、保存済みトークン（= 同じユーザー）で再開する。
+      // 個人用アプリなので、消えない purger 1 つで締め出されるより使える方を
+      // 取る（クラスの説明）。印は捨てる。残すと起動のたびにログイン中の
+      // ユーザーの進捗やダウンロードを消しにいく。
+      debugPrint('[session] purge replay failed; resuming session anyway');
+      await _abandonPendingPurge();
+      if (_isStale(generation)) return;
     }
 
     try {
@@ -122,7 +131,11 @@ class AuthController extends _$AuthController {
       // 起動時は前のユーザーを読めなくても破棄しない（atLogin: false）。
       // ロック解除前のバックグラウンド起動では Keychain が読めず、同じユーザーの
       // データを消してしまうため（例外は restoreSession が未ログインにする）。
-      final saveUser = await _purgeIfUserChanged(user, atLogin: false);
+      // 破棄の失敗（cleaned: false）はログだけ（起動時は画面に知らせない）。
+      final (:saveUser, cleaned: _) = await _purgeIfUserChanged(
+        user,
+        atLogin: false,
+      );
       if (_isStale(generation)) return;
       if (saveUser) await store.writeUser(user);
       if (_isStale(generation)) return;
@@ -154,8 +167,11 @@ class AuthController extends _$AuthController {
 
   /// メール / パスワードでログインする。
   ///
-  /// 通信の失敗は [ApiException]、前のセッションを片付けられなかったときは
-  /// [SessionCleanupException] を投げる（どちらもトークンは保存しない）。
+  /// 通信の失敗は [ApiException]、入れ直し直後の認証情報を片付けられなかった
+  /// ときは [SessionCleanupException] を投げる（どちらもトークンは保存しない）。
+  ///
+  /// 前のセッションのデータを消し切れなかったときはログインを止めず、印を
+  /// 捨てて [SessionCleanupNotice] で知らせる（クラスの説明）。
   Future<void> login({required String email, required String password}) async {
     // 起動時の検証が走っていても、こちらの結果を優先させる。
     final generation = ++_generation;
@@ -165,16 +181,21 @@ class AuthController extends _$AuthController {
         .read(authApiProvider)
         .createToken(email: email, password: password, deviceName: deviceName);
     if (_isStale(generation)) return;
-    // 新しいセッションを始める前に、端末に残った前のセッションを片付ける。
-    // 片付けられなければトークンを保存せずに止める（fail closed）。発行された
-    // トークンはメモリ上で捨てるだけにする（サーバー側は期限で失効する）。
+    // 入れ直し直後の目印を片付けられなければ止める。片付けないまま通すと、
+    // 次の起動が目印を見て新しいトークンを消す（ログインが保たれない）。発行
+    // されたトークンはメモリ上で捨てるだけにする（サーバー側は期限で失効する）。
     final installChecked = await _forgetPreviousInstall();
     if (_isStale(generation)) return;
     if (!installChecked) throw const SessionCleanupException();
-    // ここで片付けないと、次の起動のやり直しが新しいセッションのデータまで消す。
+    // 新しいセッションを始める前に、端末に残った前のセッションを片付ける。
     final purged = await _replayPendingPurge();
     if (_isStale(generation)) return;
-    if (!purged) throw const SessionCleanupException();
+    if (!purged) {
+      // 消し切れなくてもログインは止めない（個人用アプリの判断。クラスの説明）。
+      // 印は捨てる。残すと次の起動のやり直しが新しいセッションのデータまで消す。
+      await _abandonPendingPurge();
+      if (_isStale(generation)) return;
+    }
     // 上書きする前に、前のトークンが残っていたかを見ておく（下の
     // `_purgeIfUserChanged` で「持ち主の分からないセッション」を見分ける）。
     final hadPreviousToken = await _hasStoredToken();
@@ -185,31 +206,20 @@ class AuthController extends _$AuthController {
     final user =
         result.user ?? await ref.read(authApiProvider).fetchCurrentUser();
     if (_isStale(generation)) return;
-    final bool saveUser;
-    try {
-      saveUser = await _purgeIfUserChanged(
-        user,
-        atLogin: true,
-        hadPreviousToken: hadPreviousToken,
-      );
-    } on SessionCleanupException {
-      // 前のユーザーのデータを消せなかった。新しいトークンを残すと、次の起動で
-      // 前のユーザーのデータの上にセッションを復元してしまう。前のユーザーの
-      // 記録も一緒に消えるが、破棄の印が残っているので次のログインで片付く。
-      if (!_isStale(generation)) {
-        try {
-          await store.clear();
-        } on Object catch (error) {
-          debugPrint('[session] clear token after failed purge: $error');
-        }
-      }
-      rethrow;
-    }
+    final (:saveUser, :cleaned) = await _purgeIfUserChanged(
+      user,
+      atLogin: true,
+      hadPreviousToken: hadPreviousToken,
+    );
     if (_isStale(generation)) return;
     if (saveUser) await store.writeUser(user);
     if (_isStale(generation)) return;
     _sessionCleared = false;
     state = AuthState.authenticated(user);
+    // 消し残しがあっても黙って通さない（`ComicLazApp` が SnackBar で 1 回知らせる）。
+    if (!purged || !cleaned) {
+      ref.read(sessionCleanupNoticeProvider.notifier).report();
+    }
   }
 
   /// 明示的なログアウト。サーバーへの通知が失敗しても端末内は必ず片付ける。
@@ -269,7 +279,7 @@ class AuthController extends _$AuthController {
       // ストレージが壊れていても、メモリ上のトークンは破棄済みなので続行する。
     }
     if (!ref.mounted) return;
-    // 失敗しても印が残り、次のログインは片付くまで始まらない（上のクラスの説明）。
+    // 失敗しても印が残り、次の起動 / ログインでもう一度やり直す。
     await _purgeAndComplete(SessionPurgeScope.session);
     if (!ref.mounted) return;
     _sessionCleared = true;
@@ -302,51 +312,52 @@ class AuthController extends _$AuthController {
   /// 起動時（トークンは置き換わっていない）に形式だけが読めないときは、
   /// トークンの持ち主 = 端末のデータの持ち主なので捨てずに上書きする。
   ///
-  /// 新しいユーザーを保存してよいかを返す。再検証の予約を書けなかったときは
-  /// 保存しない（次の起動で同じ差分を見つけて予約し直すため）。
-  /// セッション全体の破棄に失敗したら [SessionCleanupException] を投げる
-  /// （呼び出し側はログイン済みにしない）。
-  Future<bool> _purgeIfUserChanged(
+  /// `saveUser` は新しいユーザーを保存してよいか。再検証の予約を書けなかった
+  /// ときは保存しない（次の起動で同じ差分を見つけて予約し直すため）。
+  /// `cleaned` は、セッション全体の破棄が要ったならそれが済んだか。失敗しても
+  /// セッションは止めず印を捨てる（クラスの説明。知らせるのは呼び出し側）。
+  Future<({bool saveUser, bool cleaned})> _purgeIfUserChanged(
     User next, {
     required bool atLogin,
     bool hadPreviousToken = false,
   }) async {
+    const aborted = (saveUser: false, cleaned: true);
     final User? previous;
     try {
       previous = await ref.read(authStoreProvider).readUser();
     } on StoredUserUnreadableException catch (error) {
       debugPrint('[session] previous user undecodable: $error');
-      if (!ref.mounted) return false;
-      if (atLogin) {
-        await _purgeSession();
-        return true;
-      }
+      if (!ref.mounted) return aborted;
+      if (atLogin) return (saveUser: true, cleaned: await _purgeSession());
       // 前の設定が分からないので、セーフモードなら OFF → ON とみなす
       // （再検証の予約を取りこぼさない。取り直せるものを 1 回捨てるだけ）。
-      return _applySafeModeChange(previousSafeMode: false, next: next);
+      final saveUser = await _applySafeModeChange(
+        previousSafeMode: false,
+        next: next,
+      );
+      return (saveUser: saveUser, cleaned: true);
     } on Object catch (error) {
       if (!atLogin) rethrow;
       debugPrint('[session] previous user unreadable: $error');
-      if (!ref.mounted) return false;
-      await _purgeSession();
-      return true;
+      if (!ref.mounted) return aborted;
+      return (saveUser: true, cleaned: await _purgeSession());
     }
-    if (!ref.mounted) return false;
+    if (!ref.mounted) return aborted;
     if (previous == null) {
       if (atLogin && hadPreviousToken) {
         debugPrint('[session] token without user; purging as unknown owner');
-        await _purgeSession();
+        return (saveUser: true, cleaned: await _purgeSession());
       }
-      return true;
+      return (saveUser: true, cleaned: true);
     }
     if (previous.id != next.id) {
-      await _purgeSession();
-      return true;
+      return (saveUser: true, cleaned: await _purgeSession());
     }
-    return _applySafeModeChange(
+    final saveUser = await _applySafeModeChange(
       previousSafeMode: previous.safeMode,
       next: next,
     );
+    return (saveUser: saveUser, cleaned: true);
   }
 
   /// 同じユーザーのまま `safe_mode` が変わったときの片付け。
@@ -373,10 +384,30 @@ class AuthController extends _$AuthController {
   }
 
   /// ユーザーが替わった / 持ち主不明のときのセッション全体の破棄。
-  /// 失敗したら [SessionCleanupException] を投げる（印は残る）。
-  Future<void> _purgeSession() async {
-    if (!await _purgeWithJournal(SessionPurgeScope.session)) {
-      throw const SessionCleanupException();
+  ///
+  /// 済んだら `true`。失敗してもセッションは止めないので印は捨てる（残すと
+  /// 次の起動のやり直しが新しいセッションのデータまで消す。クラスの説明）。
+  Future<bool> _purgeSession() async {
+    if (await _purgeWithJournal(SessionPurgeScope.session)) return true;
+    debugPrint('[session] purge on user change failed; continuing anyway');
+    if (ref.mounted) await _abandonPendingPurge();
+    return false;
+  }
+
+  /// 消し切れなかった破棄の印を捨てる（セッションを止めない代わり。#15）。
+  ///
+  /// 個人用アプリなので、消し残しより「始めたセッションのデータを後の起動で
+  /// 消してしまう」方を避ける（クラスの説明）。捨てられなくても続行する
+  /// （次の機会にもう一度やり直し、失敗すればまた捨てにいくだけ）。
+  Future<void> _abandonPendingPurge() async {
+    try {
+      // セッション全体の完了はどの範囲の印も覆う（`purgeScopeCovers`）。
+      await ref
+          .read(sessionPurgeJournalProvider)
+          .complete(SessionPurgeScope.session);
+      debugPrint('[session] abandoned pending purge after failure');
+    } on Object catch (error) {
+      debugPrint('[session] abandon purge journal failed: $error');
     }
   }
 
@@ -424,7 +455,7 @@ class AuthController extends _$AuthController {
   /// 前回の破棄の印が残っていれば、その範囲の破棄をやり直す（#15）。
   ///
   /// セッション全体の印が片付いた（または無かった）ら `true`。印を読めない /
-  /// やり直しが失敗したら `false` で、呼び出し側はログイン済みにしない。
+  /// やり直しが失敗したら `false` で、呼び出し側は印を捨ててから続行する。
   /// 取り直せるものだけの印（同じユーザーの `safe_mode` の変更）は、消し残っても
   /// 前のユーザーのデータを見せることにはならないので `true` とする。
   /// 印はデータを消す意味しか持たないので、トークンには触らない。

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'core/router/app_router.dart';
 import 'core/storage/storage_protection.dart';
 import 'core/theme/app_theme.dart';
+import 'features/auth/application/session_cleanup_notice.dart';
 import 'features/downloads/application/auto_delete_runner.dart';
 import 'features/downloads/application/download_queue.dart';
 import 'features/downloads/application/safe_mode_revalidator.dart';
@@ -43,6 +44,14 @@ class _ComicLazAppState extends ConsumerState<ComicLazApp> {
         SnackBar(
           content: Text('セーフモードで表示できない ${next.volumes} 巻のダウンロードを削除しました'),
         ),
+      );
+    });
+    // ログイン時に前回のデータを消し切れなかった（#15）。個人用アプリなので
+    // ログインは止めないが、黙って通さずに知らせる（`AuthController` の説明）。
+    ref.listen(sessionCleanupNoticeProvider, (previous, next) {
+      if (next <= (previous ?? 0)) return;
+      _messengerKey.currentState?.showSnackBar(
+        const SnackBar(content: Text(SessionCleanupNotice.message)),
       );
     });
     // 未送信の読書進捗の同期は画面に依らないので、ルータより外側で面倒を見る

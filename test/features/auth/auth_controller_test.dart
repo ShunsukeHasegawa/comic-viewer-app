@@ -2,6 +2,7 @@ import 'package:comic_laz/core/network/api_exception.dart';
 import 'package:comic_laz/core/session/session_data_purger.dart';
 import 'package:comic_laz/domain/models/user.dart';
 import 'package:comic_laz/features/auth/application/auth_controller.dart';
+import 'package:comic_laz/features/auth/application/session_cleanup_notice.dart';
 import 'package:comic_laz/features/auth/data/auth_api.dart';
 import 'package:comic_laz/features/auth/data/auth_store.dart';
 import 'package:comic_laz/features/auth/domain/auth_state.dart';
@@ -653,30 +654,33 @@ void main() {
       expect(store.clearCount, 0);
     });
 
-    test(
-      '起動時のユーザー切り替えの破棄が失敗したら、印を残してログイン済みにしない（前のユーザーのデータの上でセッションを始めないため）',
-      () async {
-        final journal = FakeSessionPurgeJournal();
-        final failing = RecordingPurger(
-          throwOnPurge: true,
-          purgesRefetchableOnly: false,
-        );
-        final store = FakeAuthStore(token: 'valid', user: testUser);
-        final container = createContainer(
-          authStore: store,
-          authApi: MockAuthApi()..stubCurrentUser(const User(id: 2, name: '別')),
-          purgers: [failing],
-          sessionPurgeJournal: journal,
-        );
-        addTearDown(container.dispose);
+    test('起動時のユーザー切り替えの破棄が失敗しても、印を捨ててセッションを再開する（個人用アプリなので、消えない purger 1 つで締め出さないため）', () async {
+      final journal = FakeSessionPurgeJournal();
+      final failing = RecordingPurger(
+        throwOnPurge: true,
+        purgesRefetchableOnly: false,
+      );
+      const other = User(id: 2, name: '別');
+      final store = FakeAuthStore(token: 'valid', user: testUser);
+      final container = createContainer(
+        authStore: store,
+        authApi: MockAuthApi()..stubCurrentUser(other),
+        purgers: [failing],
+        sessionPurgeJournal: journal,
+      );
+      addTearDown(container.dispose);
 
-        expect(await settleAuth(container), const AuthState.unauthenticated());
+      expect(await settleAuth(container), const AuthState.authenticated(other));
 
-        expect(failing.calls, 1);
-        expect(journal.pending, SessionPurgeScope.session);
-        expect(store.user, testUser, reason: '保存すると次の起動で切り替えに気づけない');
-      },
-    );
+      expect(failing.calls, 1);
+      expect(journal.pending, isNull, reason: '残すと次の起動で今のセッションのデータを消す');
+      expect(store.token, 'valid');
+      expect(
+        container.read(sessionCleanupNoticeProvider),
+        0,
+        reason: '起動時は同じトークンで再開するだけなのでログに残すだけ',
+      );
+    });
 
     // 残したままだと、次の起動のやり直しが新しいセッションのダウンロードまで消す。
     test('ログイン時に印が残っていれば、新しいセッションを始める前に破棄する', () async {
@@ -952,8 +956,10 @@ void main() {
   // 片付けが済まないままログイン済みにすると、持ち主の無い未送信の進捗が
   // 新しいユーザーのトークンで一括同期され、サーバーの読書位置が取り消せない形で
   // 書き換わる。前のユーザーの巻も見えてしまう。
-  group('前のセッションが片付くまでログインさせない（#15）', () {
-    test('ログアウトの印のやり直しが失敗したらログインを止め、トークンを保存しない', () async {
+  // 個人用アプリなので、消し残しがあってもログイン / 復元は止めない。止めると
+  // 毎回失敗する purger が 1 つあるだけで二度とログインできなくなる。
+  group('前のセッションを消し切れなくても締め出さない（#15）', () {
+    test('ログアウトの印のやり直しが失敗してもログインし、印を捨てて知らせる', () async {
       final journal = FakeSessionPurgeJournal(
         pending: SessionPurgeScope.session,
       );
@@ -970,24 +976,9 @@ void main() {
       );
       addTearDown(container.dispose);
       await settleAuth(container);
-
-      await expectLater(
-        container
-            .read(authControllerProvider.notifier)
-            .login(email: 'a@example.com', password: 'secret'),
-        throwsA(isA<SessionCleanupException>()),
-      );
-
-      expect(store.token, isNull);
-      expect(store.user, isNull);
-      expect(
-        container.read(authControllerProvider),
-        isA<AuthUnauthenticated>(),
-      );
+      // 起動時のやり直しも失敗し、印は残っている（トークンが無いので捨てない）。
       expect(journal.pending, SessionPurgeScope.session);
 
-      // 破棄が通るようになれば、同じ操作でログインできる（再試行の導線）。
-      failing.throwOnPurge = false;
       await container
           .read(authControllerProvider.notifier)
           .login(email: 'a@example.com', password: 'secret');
@@ -997,10 +988,60 @@ void main() {
         AuthState.authenticated(testUser),
       );
       expect(store.token, 'new');
+      expect(store.user, testUser);
+      expect(failing.calls, 2, reason: 'ログイン前にもう一度やり直してはいる');
+      expect(journal.pending, isNull, reason: '残すと次の起動で新しいセッションのデータを消す');
+      expect(
+        container.read(sessionCleanupNoticeProvider),
+        1,
+        reason: '黙って通さない',
+      );
+    });
+
+    // 回帰: `transport.reset` が毎回投げるような purger 1 つで締め出されていた。
+    test('常に失敗する purger があっても、ログインも次の起動の復元もできる', () async {
+      final journal = FakeSessionPurgeJournal(
+        pending: SessionPurgeScope.session,
+      );
+      final broken = RecordingPurger(
+        throwOnPurge: true,
+        purgesRefetchableOnly: false,
+      );
+      final store = FakeAuthStore();
+      final api = _loginApi(const AuthTokenResult(token: 'new', user: testUser))
+        ..stubCurrentUser();
+      final container = createContainer(
+        authStore: store,
+        authApi: api,
+        purgers: [broken],
+        sessionPurgeJournal: journal,
+      );
+      addTearDown(container.dispose);
+      await settleAuth(container);
+
+      await container
+          .read(authControllerProvider.notifier)
+          .login(email: 'a@example.com', password: 'secret');
+      expect(
+        container.read(authControllerProvider),
+        AuthState.authenticated(testUser),
+      );
+
+      // 次の起動（ログアウト失敗の印がまた残った状態でも）同じトークンで再開する。
+      journal.pending = SessionPurgeScope.session;
+      final next = createContainer(
+        authStore: store,
+        authApi: api,
+        purgers: [broken],
+        sessionPurgeJournal: journal,
+      );
+      addTearDown(next.dispose);
+      expect(await settleAuth(next), AuthState.authenticated(testUser));
+      expect(store.token, 'new');
       expect(journal.pending, isNull);
     });
 
-    test('破棄の印を読めなければログインを止める（片付いたか分からないまま始めないため）', () async {
+    test('破棄の印を読めなくてもログインし、知らせる（DB の障害で締め出さないため）', () async {
       final journal = FakeSessionPurgeJournal();
       final store = FakeAuthStore();
       final container = createContainer(
@@ -1012,17 +1053,39 @@ void main() {
       await settleAuth(container);
       journal.error = StateError('db');
 
-      await expectLater(
-        container
-            .read(authControllerProvider.notifier)
-            .login(email: 'a@example.com', password: 'secret'),
-        throwsA(isA<SessionCleanupException>()),
-      );
+      await container
+          .read(authControllerProvider.notifier)
+          .login(email: 'a@example.com', password: 'secret');
 
-      expect(store.token, isNull);
+      expect(
+        container.read(authControllerProvider),
+        AuthState.authenticated(testUser),
+      );
+      expect(store.token, 'new');
+      expect(container.read(sessionCleanupNoticeProvider), 1);
     });
 
-    test('ログイン時のユーザー切り替えの破棄が失敗したら、新しいトークンもユーザーも残さない', () async {
+    test('前のセッションが片付けば知らせない（消し残しが無いのに不安にさせないため）', () async {
+      final journal = FakeSessionPurgeJournal(
+        pending: SessionPurgeScope.session,
+      );
+      final container = createContainer(
+        authStore: FakeAuthStore(),
+        authApi: _loginApi(const AuthTokenResult(token: 'new', user: testUser)),
+        purgers: [RecordingPurger(purgesRefetchableOnly: false)],
+        sessionPurgeJournal: journal,
+      );
+      addTearDown(container.dispose);
+      await settleAuth(container);
+
+      await container
+          .read(authControllerProvider.notifier)
+          .login(email: 'a@example.com', password: 'secret');
+
+      expect(container.read(sessionCleanupNoticeProvider), 0);
+    });
+
+    test('ログイン時のユーザー切り替えの破棄が失敗してもログインし、印を捨てて知らせる', () async {
       final journal = FakeSessionPurgeJournal();
       final failing = RecordingPurger(
         throwOnPurge: true,
@@ -1043,48 +1106,45 @@ void main() {
       addTearDown(container.dispose);
       await settleAuth(container);
 
-      await expectLater(
-        container
-            .read(authControllerProvider.notifier)
-            .login(email: 'b@example.com', password: 'secret'),
-        throwsA(isA<SessionCleanupException>()),
-      );
+      await container
+          .read(authControllerProvider.notifier)
+          .login(email: 'b@example.com', password: 'secret');
 
-      expect(store.token, isNull, reason: '残すと次の起動で前のユーザーのデータの上に復元する');
       expect(
         container.read(authControllerProvider),
-        isA<AuthUnauthenticated>(),
+        const AuthState.authenticated(User(id: 2, name: '別の人')),
       );
-      expect(journal.pending, SessionPurgeScope.session, reason: '次のログインで片付ける');
+      expect(store.token, 'new');
+      expect(store.user, const User(id: 2, name: '別の人'));
+      expect(failing.calls, 1);
+      expect(journal.pending, isNull, reason: '残すと次の起動で新しいセッションのデータを消す');
+      expect(container.read(sessionCleanupNoticeProvider), 1);
     });
 
-    test(
-      '起動時に印のやり直しが失敗したら、トークンがあってもログイン済みにしない（ログイン中のユーザーのデータを起動のたびに消さないため）',
-      () async {
-        final journal = FakeSessionPurgeJournal(
-          pending: SessionPurgeScope.session,
-        );
-        final failing = RecordingPurger(
-          throwOnPurge: true,
-          purgesRefetchableOnly: false,
-        );
-        final store = FakeAuthStore(token: 'valid', user: testUser);
-        final api = MockAuthApi()..stubCurrentUser();
-        final container = createContainer(
-          authStore: store,
-          authApi: api,
-          purgers: [failing],
-          sessionPurgeJournal: journal,
-        );
-        addTearDown(container.dispose);
+    test('起動時に印のやり直しが失敗しても、トークンがあれば印を捨ててセッションを再開する（同じユーザーを締め出さないため）', () async {
+      final journal = FakeSessionPurgeJournal(
+        pending: SessionPurgeScope.session,
+      );
+      final failing = RecordingPurger(
+        throwOnPurge: true,
+        purgesRefetchableOnly: false,
+      );
+      final store = FakeAuthStore(token: 'valid', user: testUser);
+      final api = MockAuthApi()..stubCurrentUser();
+      final container = createContainer(
+        authStore: store,
+        authApi: api,
+        purgers: [failing],
+        sessionPurgeJournal: journal,
+      );
+      addTearDown(container.dispose);
 
-        expect(await settleAuth(container), const AuthState.unauthenticated());
+      expect(await settleAuth(container), AuthState.authenticated(testUser));
 
-        verifyNever(api.fetchCurrentUser);
-        expect(store.token, 'valid', reason: '印はデータを消す意味しか持たない');
-        expect(journal.pending, SessionPurgeScope.session);
-      },
-    );
+      expect(failing.calls, 1, reason: '再開の前に 1 回はやり直す');
+      expect(store.token, 'valid', reason: '印はデータを消す意味しか持たない');
+      expect(journal.pending, isNull, reason: '残すと起動のたびにログイン中のデータを消しにいく');
+    });
 
     test('取り直せるものだけの印のやり直しが失敗しても、起動は止めない（同じユーザーのキャッシュなので）', () async {
       final journal = FakeSessionPurgeJournal(

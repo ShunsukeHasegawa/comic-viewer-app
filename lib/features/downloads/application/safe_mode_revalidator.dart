@@ -24,6 +24,12 @@ part 'safe_mode_revalidator.g.dart';
 /// 404 は HTML なので、これと一致しない 404 は「非公開」の証拠として扱わない。
 const hiddenBookMessage = 'Not Found';
 
+/// 再検証の時計（テストから時刻を決められるようにする）。
+typedef SafeModeRevalidationClock = DateTime Function();
+
+@Riverpod(keepAlive: true)
+SafeModeRevalidationClock safeModeRevalidationClock(Ref ref) => DateTime.now;
+
 /// セーフモードの再検証で消した結果（画面が 1 回だけ知らせる）。
 @immutable
 class SafeModeRevalidationResult {
@@ -53,6 +59,7 @@ class SafeModeRevalidationResult {
 ///
 /// - 通信エラー・タイムアウト・5xx・429・401・想定外の 404 では何も消さず、
 ///   予約を残して次の機会（前面復帰 / 回線復帰 / 次の起動・ログイン）にやり直す。
+///   前面復帰 / 回線復帰は [resumeInterval] に 1 回までに間引く。
 ///   「オフラインか」は実際の通信結果で判断する（回線の監視は合図だけ）。
 /// - 403 はリソース単位の権限エラーで、セーフモードの判定ではないので消さない。
 /// - 200 なら、一覧に無い巻があっても消さない（`is_unsafe` はタイトル単位。
@@ -65,6 +72,21 @@ class SafeModeRevalidationResult {
 /// state は直近に消した結果（何も消していなければ `null`）。
 @Riverpod(keepAlive: true)
 class SafeModeRevalidator extends _$SafeModeRevalidator {
+  /// 前面復帰 / 回線復帰で問い合わせ直すまでの間隔。
+  ///
+  /// 予約が残っている間（開いている巻がある / 一覧と詳細が食い違う）は、
+  /// 復帰のたびにタイトル数ぶんの詳細を順に問い合わせることになる。自宅
+  /// サーバーの HDD を叩き続けないよう、`AutoDeleteRunner.resumeInterval` と
+  /// 同じく 1 時間に 1 回までにする。ログイン直後は間引かない（予約はそこで
+  /// 立つので、すぐ確かめたい）。
+  static const resumeInterval = Duration(hours: 1);
+
+  /// 最後にサーバーへ問い合わせ始めた時刻（前面復帰 / 回線復帰の間引き用）。
+  ///
+  /// 予約が無い回・サーバーに届かなかった（圏外）回は数えない。サーバーの
+  /// 負荷になっておらず、数えると圏外明けの回線復帰でやり直せなくなるため。
+  DateTime? _lastQueriedAt;
+
   /// 走っている実行（1 本ずつにする。同じタイトルを重ねて問い合わせない）。
   Future<SafeModeRevalidationResult?>? _running;
 
@@ -74,12 +96,12 @@ class SafeModeRevalidator extends _$SafeModeRevalidator {
     final resumed = ref
         .read(appResumeMonitorProvider)
         .onResumed
-        .listen((_) => _runQuietly('resumed'));
+        .listen((_) => _runQuietly('resumed', throttled: true));
     ref.onDispose(resumed.cancel);
     final restored = ref
         .read(connectivityMonitorProvider)
         .onRestored
-        .listen((_) => _runQuietly('restored'));
+        .listen((_) => _runQuietly('restored', throttled: true));
     ref.onDispose(restored.cancel);
     // 起動時の復元・ログインで予約が立つので、ログイン済みになったら走らせる
     // （起動時にすでにログイン済みなら最初の 1 回もここで拾う）。
@@ -92,10 +114,13 @@ class SafeModeRevalidator extends _$SafeModeRevalidator {
   }
 
   /// 背景の実行。画面が無いので失敗はログに残すだけにする（次の契機でやり直す）。
-  void _runQuietly(String trigger) {
+  ///
+  /// [throttled] なら、前回の問い合わせから [resumeInterval] 以内は走らせない。
+  void _runQuietly(String trigger, {bool throttled = false}) {
     // build の中で state を触らないよう、次のマイクロタスクへ回す。
     scheduleMicrotask(() {
       if (!ref.mounted) return;
+      if (throttled && _queriedRecently()) return;
       unawaited(
         run().then<void>(
           (_) {},
@@ -104,6 +129,13 @@ class SafeModeRevalidator extends _$SafeModeRevalidator {
         ),
       );
     });
+  }
+
+  bool _queriedRecently() {
+    final last = _lastQueriedAt;
+    if (last == null) return false;
+    final now = ref.read(safeModeRevalidationClockProvider)();
+    return now.difference(last) < resumeInterval;
   }
 
   /// 再検証を 1 回走らせる。消した結果（何も消さなければ `null`）を返す。
@@ -144,6 +176,7 @@ class SafeModeRevalidator extends _$SafeModeRevalidator {
     // 1. 問い合わせだけを先に済ませる。途中で通信が崩れた回の結果では
     //    1 件も消さない（不安定な接続での判断を半端に適用しない）。
     final notFound = <int>[];
+    _lastQueriedAt = ref.read(safeModeRevalidationClockProvider)();
     // 1 件ずつ順に問い合わせる（自宅サーバーの HDD を叩き続けない）。
     for (final bookId in ledgerBookIds(ledger).toList()..sort()) {
       if (!ref.mounted || !_isSameSession(user.id)) {
@@ -171,6 +204,8 @@ class SafeModeRevalidator extends _$SafeModeRevalidator {
         // 通信 / タイムアウト / 5xx / 429 / 401 など。何も消さず予約を残す
         // （401 は AuthInterceptor の失効処理に任せる）。
         debugPrint('[safe-mode] stopped at book $bookId: $error');
+        // サーバーに届かなかった回は間引きに数えない（回線復帰ですぐやり直す）。
+        if (error is NetworkException) _lastQueriedAt = null;
         return null;
       }
     }
