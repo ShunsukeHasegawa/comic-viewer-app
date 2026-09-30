@@ -104,6 +104,25 @@ void main() {
     expect(harness.gateway.readDetails, [7], reason: '起動時の 1 回だけ');
   });
 
+  // 取り直しの中断は台帳を旧世代の完了に戻すので、完了行だけを見ると
+  // 候補に入る。消すと取り直しの続き（再開データ）と旧世代がまとめて失われる。
+  test('「更新あり」の取り直しを中断した巻は期限切れでも消さない', () async {
+    final harness = _Harness(
+      ledger: {1: _completed(1), 2: _completed(2)},
+      progress: [
+        _Harness.finishedAt(1, _longAgo),
+        _Harness.finishedAt(2, _longAgo),
+      ],
+    );
+    harness.queue.pendingTransfers.add(1);
+    final container = harness.container();
+
+    container.read(autoDeleteRunnerProvider);
+    await pumpEventQueue();
+
+    expect(harness.queue.removed, [2]);
+  });
+
   test('設定がすべてオフなら台帳も控えも読まない', () async {
     final harness = _Harness(
       ledger: {1: _completed(1)},

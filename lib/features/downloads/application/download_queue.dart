@@ -483,6 +483,19 @@ class DownloadQueue extends _$DownloadQueue {
     await _cancelTask(task);
   }
 
+  /// OS 側にこの巻の転送（待機・走行・一時停止中の再開データ・確定待ち）が
+  /// 残っているか。
+  ///
+  /// 「更新あり」の取り直しを中断した巻は、台帳が旧世代の完了に戻っていても
+  /// 転送は残っている。自動削除（#13）は完了行しか見ないので、これで除く
+  /// （消すと取り直しの続きと旧世代がまとめて失われる）。
+  bool hasPendingTransfer(int volumeId) => _tasks.containsKey(volumeId);
+
+  /// 起動時の照合（OS 側の転送と台帳の突き合わせ）が終わったとき完了する。
+  ///
+  /// それまでは [hasPendingTransfer] が OS 側に残った転送を知らない。
+  Future<void> get reconciled => _ready.future;
+
   Future<bool> _hasResumeData(ArchiveTaskId task) async {
     try {
       return await _transport!.hasResumeData(task.toString());

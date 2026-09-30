@@ -130,8 +130,14 @@ class AutoDeleteRunner extends _$AutoDeleteRunner {
 
     // 台帳の読み込みと起動時の照合の開始を待つ（読み込み中に「台帳が空」と
     // 判断しない）。
-    final ledger = await ref.read(downloadQueueProvider.future);
+    await ref.read(downloadQueueProvider.future);
     if (!ref.mounted) return null;
+    // 照合が終わるまでは、OS 側に残った取り直しの転送（中断中）が分からない
+    // （[DownloadQueue.hasPendingTransfer]）。照合で台帳も書き換わるので、
+    // 終わってから読み直す。
+    await ref.read(downloadQueueProvider.notifier).reconciled;
+    if (!ref.mounted) return null;
+    final ledger = ref.read(downloadQueueProvider).value ?? const {};
 
     final store = ref.read(autoDeleteSettingsStoreProvider);
     final gateway = ref.read(offlineMetadataGatewayProvider);
@@ -198,6 +204,9 @@ class AutoDeleteRunner extends _$AutoDeleteRunner {
         continue;
       }
       if (isOpen(volumeId)) continue;
+      // 「更新あり」の取り直しを中断した巻（台帳は旧世代の完了に戻っている）。
+      // ユーザーは更新してまで持っておくつもりなので消さない。
+      if (queue.hasPendingTransfer(volumeId)) continue;
       try {
         await queue.remove(volumeId);
         volumes++;

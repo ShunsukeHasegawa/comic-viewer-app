@@ -628,6 +628,15 @@ class StubDownloadQueue extends DownloadQueue {
   /// `remove` を失敗させる巻。
   final Set<int> failingRemovals;
 
+  /// OS 側に転送が残っている巻（[hasPendingTransfer] が返す）。
+  final pendingTransfers = <int>{};
+
+  @override
+  bool hasPendingTransfer(int volumeId) => pendingTransfers.contains(volumeId);
+
+  @override
+  Future<void> get reconciled => Future.value();
+
   final enqueued = <({int volumeId, int bookId})>[];
   final paused = <int>[];
   final resumed = <int>[];
