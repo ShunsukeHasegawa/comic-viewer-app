@@ -1,18 +1,24 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../../core/cache/cache_settings.dart';
+import '../../../core/router/app_routes.dart';
 import '../../../core/storage/app_database.dart';
 import '../../../core/utils/format.dart';
 import '../../../core/widgets/app_back_button.dart';
 import '../../../core/widgets/error_view.dart';
 import '../../downloads/application/download_settings.dart';
+import '../../downloads/application/download_storage_summary_provider.dart';
+import '../application/clear_all_data.dart';
+import '../application/device_storage_provider.dart';
 import '../application/storage_settings_controller.dart';
+import 'widgets/auto_delete_section.dart';
+import 'widgets/setting_tiles.dart';
+import 'widgets/storage_usage_section.dart';
 
-/// ストレージ設定（キャッシュの可視化・上限・保持期間・手動削除）。
-///
-/// 端末の空き容量チェック（プラグインが必要）は、ダウンロード前チェックとして
-/// #9 で扱うためここには置かない。
+/// ストレージ設定（使用量の内訳・キャッシュの上限・保持期間・ダウンロードの
+/// 自動削除・手動削除）。
 class StorageSettingsScreen extends ConsumerWidget {
   const StorageSettingsScreen({super.key});
 
@@ -21,6 +27,8 @@ class StorageSettingsScreen extends ConsumerWidget {
   static const thumbnailLimitKey = Key('storage-settings-thumbnail-limit');
   static const retentionKey = Key('storage-settings-retention');
   static const wifiOnlyKey = Key('storage-settings-wifi-only');
+  static const manageDownloadsKey = Key('storage-settings-manage-downloads');
+  static const clearAllKey = Key('storage-settings-clear-all');
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -53,6 +61,8 @@ class StorageSettingsScreen extends ConsumerWidget {
 
 /// 使用量を取り直し、失敗したらその場で知らせる。
 Future<void> _refresh(BuildContext context, WidgetRef ref) async {
+  // 空き容量は投げないので、キャッシュの集計と並べて測り直す。
+  ref.invalidate(deviceStorageProvider);
   final error = await ref
       .read(storageSettingsControllerProvider.notifier)
       .refresh();
@@ -69,38 +79,17 @@ class _Body extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final usage = state.usage;
     final settings = state.settings;
+    final errorColor = Theme.of(context).colorScheme.error;
 
     return ListView(
       children: [
-        const _SectionTitle('使用量'),
-        _UsageTile(
-          label: 'ページ画像（一時キャッシュ）',
-          bytes: usage.pageBytes,
-          count: usage.pageCount,
-        ),
-        _UsageTile(
-          label: 'サムネイル（一時キャッシュ）',
-          bytes: usage.thumbnailBytes,
-          count: usage.thumbnailCount,
-        ),
-        // ダウンロード済み容量の集計と削除導線は #13（ダウンロード管理画面）。
-        // ここで集計すると設定画面が巻の台帳まで読むことになるので枠だけ残す。
-        const ListTile(
-          title: Text('ダウンロード済み'),
-          subtitle: Text('一時キャッシュとは別に管理します（集計は #13）'),
-          trailing: Text('—'),
-        ),
-        ListTile(
-          title: const Text('一時キャッシュ合計'),
-          trailing: Text(
-            formatBytes(usage.totalBytes),
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
-        ),
+        const SettingsSectionTitle('使用量'),
+        StorageUsageSection(usage: usage),
         const Divider(),
 
-        const _SectionTitle('上限'),
-        _ChoiceTile<CacheLimit>(
+        const SettingsSectionTitle('上限'),
+        const SettingsNote('一時キャッシュのみが対象です。ダウンロード済みのコミックは対象外です。'),
+        SettingChoiceTile<CacheLimit>(
           dropdownKey: StorageSettingsScreen.pageLimitKey,
           title: 'ページ画像の上限',
           // ページは 1 枚 1MB 超になるため、サムネイルとは別枠で管理する。
@@ -111,7 +100,7 @@ class _Body extends ConsumerWidget {
           onChanged: (limit) =>
               _update(context, ref, settings.copyWith(pageLimit: limit)),
         ),
-        _ChoiceTile<CacheLimit>(
+        SettingChoiceTile<CacheLimit>(
           dropdownKey: StorageSettingsScreen.thumbnailLimitKey,
           title: 'サムネイルの上限',
           subtitle: '小さく数が多いので、ページ画像とは別枠です',
@@ -121,7 +110,7 @@ class _Body extends ConsumerWidget {
           onChanged: (limit) =>
               _update(context, ref, settings.copyWith(thumbnailLimit: limit)),
         ),
-        _ChoiceTile<CacheRetention>(
+        SettingChoiceTile<CacheRetention>(
           dropdownKey: StorageSettingsScreen.retentionKey,
           title: '保持期間',
           subtitle: '最後に使ってからこの期間を過ぎたものは削除されます',
@@ -133,11 +122,22 @@ class _Body extends ConsumerWidget {
         ),
         const Divider(),
 
-        const _SectionTitle('ダウンロード'),
+        const SettingsSectionTitle('ダウンロード'),
         const _WifiOnlyTile(),
+        ListTile(
+          key: StorageSettingsScreen.manageDownloadsKey,
+          leading: const Icon(Icons.download_done_outlined),
+          title: const Text('ダウンロードを管理'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => context.push(AppRoutes.downloadManager),
+        ),
         const Divider(),
 
-        const _SectionTitle('削除'),
+        const SettingsSectionTitle('自動削除（ダウンロード済み）'),
+        const AutoDeleteSection(),
+        const Divider(),
+
+        const SettingsSectionTitle('削除'),
         ListTile(
           leading: const Icon(Icons.delete_outline),
           title: const Text('キャッシュを削除'),
@@ -154,6 +154,16 @@ class _Body extends ConsumerWidget {
             kind: CachedImageKind.thumbnail,
             done: 'サムネイルのキャッシュを削除しました',
           ),
+        ),
+        ListTile(
+          key: StorageSettingsScreen.clearAllKey,
+          leading: Icon(Icons.delete_forever_outlined, color: errorColor),
+          title: Text('すべてのデータを削除', style: TextStyle(color: errorColor)),
+          subtitle: const Text(
+            'ダウンロード済みのコミックと一時キャッシュを削除します'
+            '（読書進捗・設定・ログイン状態は残ります）',
+          ),
+          onTap: () => _confirmClearAll(context, ref),
         ),
         const Padding(
           padding: EdgeInsets.fromLTRB(16, 8, 16, 32),
@@ -217,99 +227,67 @@ class _Body extends ConsumerWidget {
     final controller = ref.read(storageSettingsControllerProvider.notifier);
     final error = await controller.clearCache(kind: kind);
     if (!context.mounted) return;
+    // キャッシュが空けた分を空き容量の表示にも反映する。
+    ref.invalidate(deviceStorageProvider);
     if (error != null) {
       showActionFailure(context, error, what: 'キャッシュの削除');
       return;
     }
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(done)));
   }
-}
 
-class _SectionTitle extends StatelessWidget {
-  const _SectionTitle(this.title);
-
-  final String title;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
-      child: Text(
-        title,
-        style: theme.textTheme.titleSmall?.copyWith(
-          color: theme.colorScheme.primary,
-        ),
-      ),
-    );
-  }
-}
-
-class _UsageTile extends StatelessWidget {
-  const _UsageTile({
-    required this.label,
-    required this.bytes,
-    required this.count,
-  });
-
-  final String label;
-  final int bytes;
-  final int count;
-
-  @override
-  Widget build(BuildContext context) {
-    return ListTile(
-      title: Text(label),
-      subtitle: Text('$count 件'),
-      trailing: Text(
-        formatBytes(bytes),
-        style: Theme.of(context).textTheme.titleMedium,
-      ),
-    );
-  }
-}
-
-/// 選択肢を 1 つ選ぶ設定項目。
-class _ChoiceTile<T> extends StatelessWidget {
-  const _ChoiceTile({
-    required this.dropdownKey,
-    required this.title,
-    required this.subtitle,
-    required this.value,
-    required this.values,
-    required this.labelOf,
-    required this.onChanged,
-  });
-
-  final Key dropdownKey;
-  final String title;
-  final String subtitle;
-  final T value;
-  final List<T> values;
-  final String Function(T value) labelOf;
-  final void Function(T value) onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return ListTile(
-      title: Text(title),
-      subtitle: Text(subtitle),
-      trailing: DropdownButton<T>(
-        key: dropdownKey,
-        value: value,
-        items: [
-          for (final candidate in values)
-            DropdownMenuItem<T>(
-              value: candidate,
-              child: Text(labelOf(candidate)),
+  /// 「すべてのデータを削除」。何が消えて何が残るかを示してから消す
+  /// （数 GB のダウンロードの取り直しになるため）。
+  Future<void> _confirmClearAll(BuildContext context, WidgetRef ref) async {
+    final downloads = ref.read(downloadStorageSummaryProvider).value;
+    final cache = formatBytes(state.usage.totalBytes);
+    final target = downloads == null
+        ? 'ダウンロード済みのコミックと一時キャッシュ（$cache）'
+        : 'ダウンロード済み ${downloads.installedVolumes} 巻'
+              '（${formatBytes(downloads.totalBytes)}）と一時キャッシュ（$cache）';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        final colors = Theme.of(context).colorScheme;
+        return AlertDialog(
+          title: const Text('すべてのデータを削除しますか？'),
+          content: Text(
+            '$targetを削除します。ダウンロード中のものも取り消します。\n'
+            '読書進捗・設定・ログイン状態は残ります。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('キャンセル'),
             ),
-        ],
-        onChanged: (selected) {
-          if (selected == null || selected == value) return;
-          onChanged(selected);
-        },
-      ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: colors.error,
+                foregroundColor: colors.onError,
+              ),
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('削除する'),
+            ),
+          ],
+        );
+      },
     );
+    if (confirmed != true || !context.mounted) return;
+
+    // keepAlive なので、画面を離れても削除は最後まで走らせる。
+    final clearAll = ref.read(clearAllDataProvider);
+    final controller = ref.read(storageSettingsControllerProvider.notifier);
+    final error = await clearAll();
+    // 一部が失敗しても消えた分はあるので、表示は必ず取り直す。
+    await controller.refresh();
+    if (!context.mounted) return;
+    ref.invalidate(deviceStorageProvider);
+    if (error != null) {
+      showActionFailure(context, error, what: 'データの削除');
+      return;
+    }
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('すべてのデータを削除しました')));
   }
 }
 

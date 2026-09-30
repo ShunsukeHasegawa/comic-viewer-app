@@ -1,5 +1,6 @@
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
+import '../../features/downloads/application/auto_delete_records_purger.dart';
 import '../../features/downloads/data/downloaded_volume_purger.dart';
 import '../../features/offline/data/offline_metadata_purger.dart';
 import '../../features/progress/data/progress_purger.dart';
@@ -60,5 +61,7 @@ List<SessionDataPurger> sessionDataPurgers(Ref ref) => [
   ref.watch(offlineMetadataPurgerProvider),
   ref.watch(imageCachePurgerProvider),
   ref.watch(downloadedVolumePurgerProvider),
+  // 自動削除の記録（前のユーザーの読了に気づいた時刻 / 前回の結果。#13）。
+  ref.watch(autoDeleteRecordsPurgerProvider),
   ref.watch(progressPurgerProvider),
 ];

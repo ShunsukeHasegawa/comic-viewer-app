@@ -18,6 +18,8 @@ dependencies:
   # HTTP クライアント（Bearer 付与・ETag・リトライのインターセプタを載せる）
   device_info_plus: ^13.2.0
   dio: ^5.11.1
+  # 端末の空き容量（ダウンロード前の容量チェックと設定画面の表示。#13）
+  disk_space_2: ^1.0.13
   drift: ^2.35.0
   drift_flutter: ^0.3.1
   flutter:

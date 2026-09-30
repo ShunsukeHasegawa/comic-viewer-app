@@ -212,4 +212,27 @@ void main() {
       expect(second.existsSync(), isFalse);
     });
   });
+
+  test('確定時刻は書き直しても進めない（自動削除の時計が完了行の保存のたびに振り出しへ戻らない）', () async {
+    final installedAt = cache.clock.now();
+    await store.save(completed(1, 3).copyWith(completedAt: installedAt));
+    cache.clock.advance(const Duration(days: 10));
+
+    // 取り直しの失敗で旧世代へ戻すなど、同じ完了行をもう一度書く。
+    final loaded = (await store.loadAll())[1]!;
+    await store.save(loaded.copyWith(failureReason: '更新の取得に失敗'));
+
+    expect((await store.loadAll())[1]!.completedAt?.toUtc(), installedAt);
+  });
+
+  test('完了していない行には確定時刻を残さない（待機中の行の時刻で消さない）', () async {
+    await store.save(
+      completed(1, 3).copyWith(
+        status: VolumeDownloadStatus.queued,
+        completedAt: cache.clock.now(),
+      ),
+    );
+
+    expect((await store.loadAll())[1]!.completedAt, isNull);
+  });
 }

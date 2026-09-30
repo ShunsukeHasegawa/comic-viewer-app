@@ -5,10 +5,11 @@ import 'package:go_router/go_router.dart';
 import '../../../core/router/app_routes.dart';
 import '../../../core/utils/format.dart';
 import '../../../core/widgets/error_view.dart';
-import '../../../core/widgets/feature_placeholder.dart';
 import '../../../domain/models/reading_book.dart';
 import '../../auth/application/auth_controller.dart';
 import '../../auth/domain/auth_state.dart';
+import '../../downloads/application/download_queue.dart';
+import '../../downloads/domain/volume_download.dart';
 import '../application/stats_controller.dart';
 
 /// マイページ（ユーザー情報・読書統計・設定入口）。
@@ -20,6 +21,10 @@ class MyPageScreen extends ConsumerWidget {
     final authState = ref.watch(authControllerProvider);
     final user = authState is AuthAuthenticated ? authState.user : null;
     final stats = ref.watch(statsControllerProvider);
+    // 件数と容量だけを select する（進捗が届くたびにマイページを描き直さない）。
+    final downloads = ref.watch(
+      downloadQueueProvider.select((ledger) => _downloadSummary(ledger.value)),
+    );
 
     return Scaffold(
       appBar: AppBar(title: const Text('マイページ')),
@@ -51,10 +56,19 @@ class MyPageScreen extends ConsumerWidget {
               trailing: const Icon(Icons.chevron_right),
               onTap: () => context.push(AppRoutes.storageSettings),
             ),
-            // ダウンロード管理（一覧・削除・自動更新）は #13。
-            const SizedBox(
-              height: 160,
-              child: FeaturePlaceholder(title: 'ダウンロード管理', issue: 13),
+            ListTile(
+              leading: const Icon(Icons.download_for_offline_outlined),
+              title: const Text('ダウンロード'),
+              subtitle: Text(switch (downloads) {
+                null => 'ダウンロードしたコミックの管理',
+                (installed: 0, bytes: _, active: 0) => 'ダウンロードしたコミックはありません',
+                (:final installed, :final bytes, :final active) => [
+                  '$installed 巻・${formatBytes(bytes)}',
+                  if (active > 0) '（進行中 $active）',
+                ].join(),
+              }),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => context.push(AppRoutes.downloadManager),
             ),
             const Divider(),
             ListTile(
@@ -100,6 +114,29 @@ class MyPageScreen extends ConsumerWidget {
       );
     }
   }
+}
+
+/// マイページの「ダウンロード」に出す件数（台帳を読み終えるまでは `null`）。
+///
+/// 容量はダウンロード管理画面・ストレージ設定と同じ規則（読める巻の
+/// totalBytes）で数える。画面ごとに数字が食い違わないようにするため。
+({int installed, int bytes, int active})? _downloadSummary(
+  Map<int, VolumeDownload>? ledger,
+) {
+  if (ledger == null) return null;
+  var installed = 0;
+  var bytes = 0;
+  var active = 0;
+  for (final download in ledger.values) {
+    if (download.hasInstalledArchive) {
+      installed++;
+      bytes += download.totalBytes;
+    }
+    if (download.isActive || download.status == VolumeDownloadStatus.paused) {
+      active++;
+    }
+  }
+  return (installed: installed, bytes: bytes, active: active);
 }
 
 /// 統計を取り直し、失敗したらその場で知らせる。

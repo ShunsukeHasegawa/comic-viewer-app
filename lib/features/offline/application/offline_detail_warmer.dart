@@ -24,4 +24,18 @@ OfflineDetailWarmer offlineDetailWarmer(Ref ref) => (bookId) async {
   // 圏外でその巻へ到達できない（詳細から `ReadVolume` を組み立てるため）。
   final detail = await ref.read(booksApiProvider).fetchBookDetail(bookId);
   await ref.read(offlineMetadataGatewayProvider).saveBookDetail(detail);
+  // 初めて落としたタイトルの控えは、最初の巻が完了した後のここで初めて
+  // できる。開いたままのダウンロード管理画面は台帳のタイトル集合が
+  // 変わらないので作り直されず、巻数の代わりに ID を出し続けてしまう。
+  // 読み直すきっかけを渡す（画面の側は端末の控えを読むだけ）。
+  if (ref.mounted) ref.read(offlineDetailRevisionProvider.notifier).bump();
 };
+
+/// ダウンロード完了で詳細の控えを書いた回数（読み直しの合図）。
+@Riverpod(keepAlive: true)
+class OfflineDetailRevision extends _$OfflineDetailRevision {
+  @override
+  int build() => 0;
+
+  void bump() => state++;
+}

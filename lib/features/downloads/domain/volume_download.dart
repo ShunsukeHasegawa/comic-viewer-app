@@ -20,6 +20,7 @@ class VolumeDownload {
     this.pageCount = 0,
     this.archiveEtag,
     this.failureReason,
+    this.completedAt,
   });
 
   factory VolumeDownload.fromRow(DownloadedVolumeRow row) => VolumeDownload(
@@ -32,6 +33,7 @@ class VolumeDownload {
     pageCount: row.pageCount,
     archiveEtag: row.archiveEtag,
     failureReason: row.failureReason,
+    completedAt: row.completedAt,
   );
 
   final int volumeId;
@@ -46,6 +48,17 @@ class VolumeDownload {
   final int pageCount;
   final String? archiveEtag;
   final String? failureReason;
+
+  /// [filesVersion] の世代を端末に確定した時刻（一度も完了していなければ `null`）。
+  ///
+  /// 自動削除の時計の起点に使う（#13）。読了の記録（進捗の `readAt` / 他端末の
+  /// 読了に気づいた時刻）が**前回のダウンロード**や前のセッションのものでも、
+  /// 落とし直した直後に消さないため。「更新あり」の取り直しが失敗 / 中断して
+  /// 旧世代へ戻るときは、旧世代の確定時刻をそのまま持ち越す。
+  ///
+  /// `==` には含めない。保存の時刻であって、表示や状態の遷移の判断には使わない
+  /// ため（同じ状態の行を、時刻の違いだけで別物として扱わない）。
+  final DateTime? completedAt;
 
   /// 0〜1。全体のバイト数が分からないうちは `null`（不定の進捗表示にする）。
   double? get progress {
@@ -65,8 +78,9 @@ class VolumeDownload {
 
   /// 端末に「読める実体」（[filesVersion] の ZIP とマニフェスト）があるか。
   ///
-  /// 「更新あり」の取り直し中（queued / downloading）も、その途中でアプリが
-  /// 落ちた後（paused）も、台帳の行は**旧世代**を指したままで ZIP も残っている
+  /// 「更新あり」の取り直し中（queued / downloading）も、台帳の行は**旧世代**を
+  /// 指したままで ZIP も残っている。取り直しの中断 / 失敗は旧世代の完了行へ戻すが、
+  /// それ以前のキューが再起動後に書いた中断 / 失敗の行（paused / failed）も同じ
   /// （`DownloadQueue` は世代にかかわる項目 [filesVersion] / [pageCount] /
   /// [archiveEtag] を**検証が通ってから**しか書かない）。そのため status だけで
   /// 「オフラインで読めるか」を判断すると、手元に完全な ZIP があるのに読めない
@@ -104,6 +118,7 @@ class VolumeDownload {
     String? archiveEtag,
     String? failureReason,
     bool clearFailureReason = false,
+    DateTime? completedAt,
   }) => VolumeDownload(
     volumeId: volumeId,
     bookId: bookId,
@@ -116,6 +131,7 @@ class VolumeDownload {
     failureReason: clearFailureReason
         ? null
         : (failureReason ?? this.failureReason),
+    completedAt: completedAt ?? this.completedAt,
   );
 
   @override

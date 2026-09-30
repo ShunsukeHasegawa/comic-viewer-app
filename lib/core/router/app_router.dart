@@ -7,6 +7,7 @@ import '../../features/auth/application/auth_controller.dart';
 import '../../features/auth/domain/auth_state.dart';
 import '../../features/auth/presentation/login_screen.dart';
 import '../../features/auth/presentation/splash_screen.dart';
+import '../../features/downloads/presentation/download_manager_screen.dart';
 import '../../features/history/presentation/history_screen.dart';
 import '../../features/library/presentation/library_screen.dart';
 import '../../features/mypage/presentation/my_page_screen.dart';
@@ -51,6 +52,10 @@ List<RouteBase> buildRoutes() => [
               GoRoute(
                 path: 'storage',
                 builder: (context, state) => const StorageSettingsScreen(),
+              ),
+              GoRoute(
+                path: 'downloads',
+                builder: (context, state) => const DownloadManagerScreen(),
               ),
             ],
           ),

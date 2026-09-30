@@ -2016,4 +2016,117 @@ void main() {
       expect(scope.container.read(downloadQueueProvider).value, isEmpty);
     });
   });
+
+  group('ダウンロード管理（#13）', () {
+    test('確定した時刻を台帳に残す（自動削除は、これより前の読了の記録で落とし直した巻を消さない）', () async {
+      final scope = await setUpCompleted();
+      final now = scope.harness.cache.clock.now();
+
+      expect(downloadOf(scope.container)!.completedAt, now);
+      expect(
+        (await scope.harness.store.loadAll())[volumeId]!.completedAt?.toUtc(),
+        now,
+      );
+    });
+
+    /// 取り直しの途中でアプリが落ちた後の台帳（旧世代 111 を指す待機中の行と、
+    /// 111 の ZIP）を用意して、キューを組み立て直す。
+    Future<QueueScope> restartDuringRefetch({Object? manifestError}) async {
+      final harness = createHarness();
+      final bytes = harness.api.archiveBytes;
+      final old = harness.archiveFile(filesVersion: 111)
+        ..parent.createSync(recursive: true)
+        ..writeAsBytesSync(bytes);
+      expect(old.existsSync(), isTrue);
+      await harness.store.save(
+        VolumeDownload(
+          volumeId: volumeId,
+          bookId: bookId,
+          filesVersion: 111,
+          status: VolumeDownloadStatus.queued,
+          pageCount: 3,
+          // 進捗は新しい世代（222）の大きさで上書きされている。
+          receivedBytes: 10,
+          totalBytes: bytes.length * 2,
+        ),
+      );
+      harness.api.manifest = testManifest(
+        id: volumeId,
+        bookId: bookId,
+        filesVersion: 222,
+        archiveBytes: bytes.length,
+      );
+      harness.api.manifestError = manifestError;
+      final scope = startQueue(harness);
+      await settle();
+      return scope;
+    }
+
+    test('再起動後に「更新を中止」しても、旧世代の完了行へ戻す（中断中のまま取り残さない）', () async {
+      final scope = await restartDuringRefetch();
+      expect(downloadOf(scope.container)!.isActive, isTrue);
+
+      await scope.queue.pause(volumeId);
+      await settle();
+
+      final download = downloadOf(scope.container)!;
+      expect(download.status, VolumeDownloadStatus.completed);
+      expect(download.filesVersion, 111);
+      expect(
+        download.totalBytes,
+        scope.harness.api.archiveBytes.length,
+        reason: '新しい世代の大きさのままだと容量の表示がずれる',
+      );
+      expect(download.receivedBytes, download.totalBytes);
+      expect(download.completedAt, isNotNull);
+      expect(
+        (await scope.harness.store.loadAll())[volumeId]!.status,
+        VolumeDownloadStatus.completed,
+      );
+    });
+
+    test('再起動後の取り直しが失敗しても、旧世代の完了行へ戻して理由を残す', () async {
+      final scope = await restartDuringRefetch(
+        manifestError: const NotFoundException(),
+      );
+
+      final download = downloadOf(scope.container)!;
+      expect(download.status, VolumeDownloadStatus.completed);
+      expect(download.filesVersion, 111);
+      expect(download.failureReason, const NotFoundException().message);
+    });
+
+    test('中断した巻の残りは空き容量の予約に数えない（止めた巻のせいで次の巻を断らない）', () async {
+      final scope = setUpQueue();
+      final size = scope.harness.api.archiveBytes.length;
+      scope.harness.api.manifests[341] = testManifest(
+        id: 341,
+        bookId: bookId,
+        archiveBytes: size,
+      );
+      // 1 巻なら入るが、止めた巻の残りを足すと入らない空き。
+      scope.harness.freeSpace = freeSpaceMarginBytes + size + size ~/ 2;
+      await enqueueAndSubmit(scope);
+      final taskId = scope.harness.transport.taskIdOf(volumeId);
+      scope.harness.transport
+        ..setState(volumeId, TransferState.running)
+        ..emit(TransferProgressed(taskId, received: 1, total: size));
+      await settle();
+      await scope.queue.pause(volumeId);
+      scope.harness.transport.setState(volumeId, TransferState.paused);
+      await settle();
+      expect(downloadOf(scope.container)!.status, VolumeDownloadStatus.paused);
+
+      await enqueueAndSubmit(scope, 341);
+
+      final second = downloadOf(scope.container, 341)!;
+      expect(second.status, isNot(VolumeDownloadStatus.failed));
+      expect(
+        scope.harness.transport.enqueued.map(
+          (r) => ArchiveTaskId.tryParse(r.taskId)!.volumeId,
+        ),
+        contains(341),
+      );
+    });
+  });
 }

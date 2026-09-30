@@ -597,11 +597,36 @@ VolumeManifest testManifest({
 
 /// ネットワークもディスクも触らないダウンロードキュー（画面のテスト用）。
 class StubDownloadQueue extends DownloadQueue {
-  StubDownloadQueue({Map<int, VolumeDownload> initial = const {}})
-    : initial = {...initial};
+  StubDownloadQueue({
+    Map<int, VolumeDownload> initial = const {},
+    this.applyRemovals = false,
+    this.removeError,
+    Set<int> failingRemovals = const {},
+  }) : initial = {...initial},
+       failingRemovals = {...failingRemovals};
 
   /// 画面へ配る初期状態（`purgeAll` で空にするので変更可能な複製を持つ）。
   final Map<int, VolumeDownload> initial;
+
+  /// 操作を `state` にも反映する（削除後に容量表示が減ることを画面で
+  /// 確かめるため）。既定は記録だけ（既存のテストの前提を変えない）。
+  ///
+  /// - `remove` は行を消す
+  /// - `pause` は取得中 / 待機中を中断に（取り直しなら旧世代の completed に戻す）
+  /// - `resume` / `enqueue` は待機中に
+  /// - `purgeAll` は空に
+  final bool applyRemovals;
+
+  /// `remove` で投げる例外（`null` なら [failingRemovals] に既定の例外）。
+  ///
+  /// [failingRemovals] が空なら全巻、そうでなければその巻だけで投げる。
+  final Object? removeError;
+
+  /// `remove` の途中で待たせる（削除の途中で画面を離れる操作の再現）。
+  Future<void> Function(int volumeId)? onRemove;
+
+  /// `remove` を失敗させる巻。
+  final Set<int> failingRemovals;
 
   final enqueued = <({int volumeId, int bookId})>[];
   final paused = <int>[];
@@ -614,19 +639,79 @@ class StubDownloadQueue extends DownloadQueue {
   @override
   Future<void> enqueue({required int volumeId, required int bookId}) async {
     enqueued.add((volumeId: volumeId, bookId: bookId));
+    if (!applyRemovals) return;
+    final existing = state.value?[volumeId];
+    _put(
+      (existing ??
+              VolumeDownload(
+                volumeId: volumeId,
+                bookId: bookId,
+                filesVersion: 0,
+                status: VolumeDownloadStatus.queued,
+              ))
+          .copyWith(
+            status: VolumeDownloadStatus.queued,
+            clearFailureReason: true,
+          ),
+    );
   }
 
   @override
-  Future<void> pause(int volumeId) async => paused.add(volumeId);
+  Future<void> pause(int volumeId) async {
+    paused.add(volumeId);
+    if (!applyRemovals) return;
+    final existing = state.value?[volumeId];
+    if (existing == null || !existing.isActive) return;
+    // 本物は取り直しの中断で旧世代の completed へ戻す（`_savePaused`）。
+    _put(
+      existing.copyWith(
+        status: existing.hasInstalledArchive
+            ? VolumeDownloadStatus.completed
+            : VolumeDownloadStatus.paused,
+      ),
+    );
+  }
 
   @override
-  Future<void> resume(int volumeId) async => resumed.add(volumeId);
+  Future<void> resume(int volumeId) async {
+    resumed.add(volumeId);
+    if (!applyRemovals) return;
+    final existing = state.value?[volumeId];
+    if (existing == null) return;
+    _put(
+      existing.copyWith(
+        status: VolumeDownloadStatus.queued,
+        clearFailureReason: true,
+      ),
+    );
+  }
 
   @override
-  Future<void> remove(int volumeId) async => removed.add(volumeId);
+  Future<void> remove(int volumeId) async {
+    await onRemove?.call(volumeId);
+    final error =
+        removeError ??
+        (failingRemovals.isEmpty
+            ? null
+            : const FileSystemException('remove failed'));
+    if (error != null &&
+        (failingRemovals.isEmpty || failingRemovals.contains(volumeId))) {
+      throw error;
+    }
+    removed.add(volumeId);
+    if (!applyRemovals) return;
+    state = AsyncData({...?state.value}..remove(volumeId));
+  }
 
   @override
-  Future<void> purgeAll() async => initial.clear();
+  Future<void> purgeAll() async {
+    initial.clear();
+    if (applyRemovals) state = const AsyncData({});
+  }
+
+  void _put(VolumeDownload download) {
+    state = AsyncData({...?state.value, download.volumeId: download});
+  }
 
   /// ダウンロードの状態変化をテストから流す（完了を契機にする導線の検証用）。
   void emit(VolumeDownload download) {

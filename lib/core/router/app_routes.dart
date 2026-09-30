@@ -18,6 +18,9 @@ abstract final class AppRoutes {
   /// ストレージ設定（キャッシュの可視化・上限・削除）。
   static const storageSettings = '/mypage/storage';
 
+  /// ダウンロード管理（#13）。
+  static const downloadManager = '/mypage/downloads';
+
   /// タイトル詳細のパスパターン。
   static const bookDetailPattern = '/book/:bookId';
 

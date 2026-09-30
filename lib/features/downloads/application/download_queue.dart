@@ -725,8 +725,15 @@ class DownloadQueue extends _$DownloadQueue {
       return;
     }
 
+    // 中断中（台帳が中断 / 取り直しの中断で完了に戻したもの）の巻は、再開
+    // されるか分からないので空きを押さえない。押さえたままだと、止めた巻の
+    // 残りのせいで入るはずの巻が「空き容量が足りません」になる（起動時の照合も
+    // 中断中の転送は数えない）。9 分の時間切れなどの一時的な停止は台帳が
+    // 待機中 / 取得中のままなので、引き続き押さえる。
+    final ledger = state.value ?? const <int, VolumeDownload>{};
     final reservedByOthers = _reservedBytes.entries
         .where((entry) => entry.key != volumeId)
+        .where((entry) => ledger[entry.key]?.isActive ?? false)
         .fold<int>(0, (sum, entry) => sum + entry.value);
     if (await _hasNotEnoughSpace(manifest.archiveBytes + reservedByOthers)) {
       await _fail(
@@ -1815,7 +1822,7 @@ class DownloadQueue extends _$DownloadQueue {
     // 取り直しの失敗では、端末に残っている旧世代の「ダウンロード済み」へ戻す。
     // 通信エラーでオフラインに読めるものを失わせない（CLAUDE.md）。理由は
     // 残すので、UI は「更新の取得に失敗」として見せられる（黙って隠さない）。
-    final installed = _installed.remove(volumeId);
+    final installed = _takeInstalled(current);
     if (installed != null) {
       await _save(installed.copyWith(failureReason: reason));
       return;
@@ -1849,6 +1856,9 @@ class DownloadQueue extends _$DownloadQueue {
         pageCount: manifest.pageCount,
         archiveEtag: manifest.archiveEtag,
         clearFailureReason: true,
+        // この世代の確定時刻。自動削除は、これより前の読了の記録（前回の
+        // ダウンロードや前のセッションのもの）で落とし直した巻を消さない。
+        completedAt: _store?.now() ?? DateTime.now(),
       ),
     );
     _warmOfflineDetail(download.bookId);
@@ -1889,12 +1899,50 @@ class DownloadQueue extends _$DownloadQueue {
   /// オフラインで読めるはずの巻が読めなくなる（転送の再開データは残るので、
   /// もう一度「更新あり」を押せば続きから取り直せる）。
   Future<void> _savePaused(VolumeDownload current) async {
-    final installed = _installed.remove(current.volumeId);
+    final installed = _takeInstalled(current);
     if (installed != null) {
       await _save(installed);
       return;
     }
     await _save(current.copyWith(status: VolumeDownloadStatus.paused));
+  }
+
+  /// 取り直しの戻り先（手元にある旧世代の完了行）を取り出す。
+  ///
+  /// 普段は取り直しを始めたときに覚えた [_installed] を使う。アプリの再起動で
+  /// それを忘れた後も、台帳の行は世代の項目（filesVersion / pageCount /
+  /// archive_etag）を検証が通ってからしか書かないので旧世代を指したまま。
+  /// その ZIP が実在すれば、そこから完了行を作り直す。作り直さないと、
+  /// 再起動後の「更新を中止」や失敗で「中断中 / 失敗（旧世代が読める）」という
+  /// 行になり、完了に戻る道が「再開」しか無くなる（「更新あり」も自動削除も
+  /// 完了行しか見ない）。
+  VolumeDownload? _takeInstalled(VolumeDownload current) {
+    final remembered = _installed.remove(current.volumeId);
+    if (remembered != null) return remembered;
+    if (current.isCompleted || !current.hasInstalledArchive) return null;
+    final store = _store;
+    if (store == null) return null;
+    final archive = store.archiveFile(
+      volumeId: current.volumeId,
+      filesVersion: current.filesVersion,
+    );
+    final int bytes;
+    try {
+      if (!archive.existsSync()) return null;
+      bytes = archive.lengthSync();
+    } on FileSystemException {
+      return null;
+    }
+    return current.copyWith(
+      status: VolumeDownloadStatus.completed,
+      // 進捗が新しい世代の大きさで上書きされているので、実体の大きさに戻す。
+      receivedBytes: bytes,
+      totalBytes: bytes,
+      clearFailureReason: true,
+      // 旧世代の確定時刻は再起動で失われている（完了以外の行には残さない）。
+      // 早く消す側に倒さないよう、戻した時刻から数える。
+      completedAt: store.now(),
+    );
   }
 
   // ---------------------------------------------------------------- 小道具

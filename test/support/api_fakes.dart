@@ -24,7 +24,8 @@ class FakeBooksApi implements BooksApi {
     this.userStatusError,
     this.bookDetailError,
     this.readVolumeError,
-  });
+    Map<int, BookDetail>? bookDetails,
+  }) : bookDetails = {...?bookDetails};
 
   List<Book> books;
   UserStatus userStatus;
@@ -32,11 +33,23 @@ class FakeBooksApi implements BooksApi {
   BookDetail? bookDetail;
   ReadVolume? readVolume;
 
+  /// タイトルごとの詳細（あれば [bookDetail] より優先）。
+  ///
+  /// 空でないときに載っていないタイトルは 404 にする（複数タイトルの
+  /// 「更新を確認」で一部だけ失敗する状況を作るため）。
+  final Map<int, BookDetail> bookDetails;
+
+  /// `fetchBookDetail` を呼ばれたタイトル（ネットワークに出たかの検証）。
+  final fetchBookDetailCalls = <int>[];
+
   /// `fetchBooks` で投げる例外。
   ApiException? error;
 
   /// `fetchUserStatus` で投げる例外。
   ApiException? userStatusError;
+
+  /// `fetchBookDetail` の応答を待たせる（問い合わせ中の連打・競合の再現）。
+  Future<void> Function(int bookId)? onFetchBookDetail;
 
   /// `fetchBookDetail` で投げる例外（圏外の再現）。
   ApiException? bookDetailError;
@@ -74,7 +87,14 @@ class FakeBooksApi implements BooksApi {
 
   @override
   Future<BookDetail> fetchBookDetail(int bookId) async {
+    fetchBookDetailCalls.add(bookId);
+    await onFetchBookDetail?.call(bookId);
     if (bookDetailError case final error?) throw error;
+    if (bookDetails.isNotEmpty) {
+      final detail = bookDetails[bookId];
+      if (detail == null) throw const NotFoundException();
+      return detail;
+    }
     final detail = bookDetail;
     if (detail == null) throw const NotFoundException();
     return detail;

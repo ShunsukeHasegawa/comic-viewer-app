@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  アプリのプライバシーマニフェスト（#13）。
+
+  disk_space_2（端末の空き容量。ダウンロード前の空き容量の確認と、ストレージ設定の
+  表示に使う）は iOS で volumeAvailableCapacityForImportantUsageKey /
+  FileManager.attributesOfFileSystem(.systemSize) を呼ぶ。どちらも Apple の
+  "required reason API"（DiskSpace）だが、プラグインは PrivacyInfo.xcprivacy を
+  同梱していないので、ここで宣言する（宣言が無いと App Store Connect への
+  アップロードが ITMS-91053 で弾かれる）。
+
+  E174.1: ファイルを書き込む前に空き容量を確かめる / 空き容量をユーザーに表示する。
+  プラグインを差し替えるときも、この宣言は外さないこと。
+-->
+<plist version="1.0">
+<dict>
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>E174.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

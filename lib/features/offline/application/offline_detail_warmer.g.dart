@@ -55,4 +55,63 @@ final class OfflineDetailWarmerProvider
 }
 
 String _$offlineDetailWarmerHash() =>
-    r'402ba5a4c8e446ddbf743dca46ba5a6fe8e66cf7';
+    r'a9543b3d95a6c92ffdaa7f20d17d43663b90fbec';
+
+/// ダウンロード完了で詳細の控えを書いた回数（読み直しの合図）。
+
+@ProviderFor(OfflineDetailRevision)
+final offlineDetailRevisionProvider = OfflineDetailRevisionProvider._();
+
+/// ダウンロード完了で詳細の控えを書いた回数（読み直しの合図）。
+final class OfflineDetailRevisionProvider
+    extends $NotifierProvider<OfflineDetailRevision, int> {
+  /// ダウンロード完了で詳細の控えを書いた回数（読み直しの合図）。
+  OfflineDetailRevisionProvider._()
+    : super(
+        from: null,
+        argument: null,
+        retry: null,
+        name: r'offlineDetailRevisionProvider',
+        isAutoDispose: false,
+        dependencies: null,
+        $allTransitiveDependencies: null,
+      );
+
+  @override
+  String debugGetCreateSourceHash() => _$offlineDetailRevisionHash();
+
+  @$internal
+  @override
+  OfflineDetailRevision create() => OfflineDetailRevision();
+
+  /// {@macro riverpod.override_with_value}
+  Override overrideWithValue(int value) {
+    return $ProviderOverride(
+      origin: this,
+      providerOverride: $SyncValueProvider<int>(value),
+    );
+  }
+}
+
+String _$offlineDetailRevisionHash() =>
+    r'38b44bc3a7ca9ea06853c17e7e01d39a339139e5';
+
+/// ダウンロード完了で詳細の控えを書いた回数（読み直しの合図）。
+
+abstract class _$OfflineDetailRevision extends $Notifier<int> {
+  int build();
+  @$mustCallSuper
+  @override
+  WhenComplete runBuild() {
+    final ref = this.ref as $Ref<int, int>;
+    final element =
+        ref.element
+            as $ClassProviderElement<
+              AnyNotifier<int, int>,
+              int,
+              Object?,
+              Object?
+            >;
+    return element.handleCreate(ref, build);
+  }
+}

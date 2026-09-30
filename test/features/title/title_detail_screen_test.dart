@@ -392,6 +392,94 @@ void main() {
       expect(queue.removed, [340]);
     });
 
+    testWidgets('取り直し待ちの巻の取り消しは中断にして旧世代を残す（remove で読める ZIP を消さない）', (
+      tester,
+    ) async {
+      // 「更新あり」の取り直しを積んだ直後（待機中）。台帳は旧世代を指したまま。
+      final queue = StubDownloadQueue(
+        initial: {
+          340: const VolumeDownload(
+            volumeId: 340,
+            bookId: 12,
+            filesVersion: 1,
+            status: VolumeDownloadStatus.queued,
+            receivedBytes: 100,
+            totalBytes: 100,
+            pageCount: 190,
+          ),
+        },
+      );
+      await pumpDetail(tester, downloadQueue: queue);
+
+      await tester.tap(find.byTooltip('更新を中止'));
+      await tester.pumpAndSettle();
+
+      expect(queue.paused, [340]);
+      expect(queue.removed, isEmpty);
+    });
+
+    testWidgets('初回の待機中の取り消しは remove（読める実体が無いので残すものが無い）', (tester) async {
+      final queue = StubDownloadQueue(
+        initial: {
+          340: const VolumeDownload(
+            volumeId: 340,
+            bookId: 12,
+            filesVersion: 0,
+            status: VolumeDownloadStatus.queued,
+          ),
+        },
+      );
+      await pumpDetail(tester, downloadQueue: queue);
+
+      await tester.tap(find.byTooltip('ダウンロードを取り消す'));
+      await tester.pumpAndSettle();
+
+      expect(queue.removed, [340]);
+      expect(queue.paused, isEmpty);
+    });
+
+    for (final status in [
+      VolumeDownloadStatus.paused,
+      VolumeDownloadStatus.failed,
+    ]) {
+      testWidgets(
+        '旧世代が読める${status.name}の行の×は、確認してから削除する（黙って remove で読める ZIP を消さない）',
+        (tester) async {
+          // 以前のキューが、再起動後の取り直しの中断 / 失敗で書いた行
+          // （旧世代の ZIP を指したまま）。
+          final queue = StubDownloadQueue(
+            initial: {
+              340: VolumeDownload(
+                volumeId: 340,
+                bookId: 12,
+                filesVersion: 3,
+                status: status,
+                receivedBytes: 100,
+                totalBytes: 100,
+                pageCount: 10,
+              ),
+            },
+          );
+          await pumpDetail(tester, downloadQueue: queue);
+
+          expect(find.byTooltip('ダウンロードを取り消す'), findsNothing);
+          await tester.tap(find.byTooltip('ダウンロードを削除'));
+          await tester.pumpAndSettle();
+          expect(queue.removed, isEmpty, reason: '確認を出した時点ではまだ消さない');
+
+          await tester.tap(find.widgetWithText(TextButton, 'キャンセル'));
+          await tester.pumpAndSettle();
+          expect(queue.removed, isEmpty);
+
+          await tester.tap(find.byTooltip('ダウンロードを削除'));
+          await tester.pumpAndSettle();
+          await tester.tap(find.widgetWithText(FilledButton, '削除'));
+          await tester.pumpAndSettle();
+          expect(queue.removed, [340]);
+        },
+      );
+    }
+
     testWidgets('取り直しに失敗した巻は理由を添えて、もう一度試せる', (tester) async {
       // 通信エラーで旧世代（ダウンロード済み）へ戻した行。黙って
       // 「ダウンロード済み」に見せると、更新が入ったと誤解される。

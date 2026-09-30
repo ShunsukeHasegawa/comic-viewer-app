@@ -132,7 +132,12 @@ class DownloadStore {
             archiveEtag: download.archiveEtag,
             failureReason: download.failureReason,
             updatedAt: timestamp,
-            completedAt: download.isCompleted ? timestamp : null,
+            // 確定時刻は世代ごとに 1 回だけ決める（キューが確定時に入れる）。
+            // 同じ完了行を書き直すたびに進めると、自動削除の時計が進まない。
+            // 入っていない完了行は今を使う（早く消す側には倒れない）。
+            completedAt: download.isCompleted
+                ? (download.completedAt ?? timestamp)
+                : null,
           ),
         );
   }

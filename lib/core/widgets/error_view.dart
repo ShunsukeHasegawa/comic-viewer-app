@@ -134,7 +134,11 @@ void showActionFailure(
   Object error, {
   required String what,
 }) {
-  ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-    SnackBar(content: Text('$whatに失敗しました: ${localErrorMessage(error)}')),
-  );
+  ScaffoldMessenger.maybeOf(context)
+      ?.showSnackBar(actionFailureSnackBar(error, what: what));
 }
+
+/// [showActionFailure] の SnackBar。画面を離れた後に終わった操作の結果を、
+/// 先に取っておいた `ScaffoldMessenger` で知らせるときに使う。
+SnackBar actionFailureSnackBar(Object error, {required String what}) =>
+    SnackBar(content: Text('$whatに失敗しました: ${localErrorMessage(error)}'));

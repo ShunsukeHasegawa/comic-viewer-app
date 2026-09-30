@@ -7,6 +7,7 @@ import 'package:comic_laz/core/widgets/app_back_button.dart';
 import 'package:comic_laz/data/api/books_api.dart';
 import 'package:comic_laz/domain/models/book.dart';
 import 'package:comic_laz/domain/models/read_volume.dart';
+import 'package:comic_laz/features/downloads/presentation/download_manager_screen.dart';
 import 'package:comic_laz/features/history/presentation/history_screen.dart';
 import 'package:comic_laz/features/library/presentation/library_screen.dart';
 import 'package:comic_laz/features/mypage/presentation/my_page_screen.dart';
@@ -67,6 +68,14 @@ void main() {
     expect(screen.bookId, 12);
     // 全画面表示なのでボトムナビは出さない
     expect(find.byType(NavigationBar), findsNothing);
+  });
+
+  testWidgets('/mypage/downloads はボトムナビを残したまま開く', (tester) async {
+    await pumpRouterAt(tester, AppRoutes.downloadManager);
+
+    expect(find.byType(DownloadManagerScreen), findsOneWidget);
+    // マイページ配下（設定画面から行き来する）なのでタブは残す。
+    expect(find.byType(NavigationBar), findsOneWidget);
   });
 
   testWidgets('/book/view/{id} は詳細ではなくビューアに解決される', (tester) async {

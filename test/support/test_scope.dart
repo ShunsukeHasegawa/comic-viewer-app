@@ -13,10 +13,13 @@ import 'package:comic_laz/features/auth/application/auth_controller.dart';
 import 'package:comic_laz/features/auth/data/auth_api.dart';
 import 'package:comic_laz/features/auth/data/auth_store.dart';
 import 'package:comic_laz/features/auth/domain/auth_state.dart';
+import 'package:comic_laz/features/downloads/application/auto_delete_runner.dart';
+import 'package:comic_laz/features/downloads/application/auto_delete_settings.dart';
 import 'package:comic_laz/features/downloads/application/download_queue.dart';
 import 'package:comic_laz/features/downloads/application/download_settings.dart';
 import 'package:comic_laz/features/downloads/data/archive_transport.dart';
 import 'package:comic_laz/features/downloads/data/background_archive_transport.dart';
+import 'package:comic_laz/features/downloads/data/free_space_probe.dart';
 import 'package:comic_laz/features/downloads/domain/volume_download.dart';
 import 'package:comic_laz/features/library/data/library_repository.dart';
 import 'package:comic_laz/features/offline/application/offline_metadata_gateway.dart';
@@ -31,6 +34,7 @@ import 'api_fakes.dart';
 import 'auth_fakes.dart';
 import 'download_fakes.dart';
 import 'progress_fakes.dart';
+import 'storage_fakes.dart';
 
 /// プラットフォームチャネルとネットワークを触らないようにした標準の override 群。
 List<Override> testOverrides({
@@ -55,6 +59,9 @@ List<Override> testOverrides({
   ConnectivityMonitor? connectivityMonitor,
   OfflineMetadataGateway? offlineMetadata,
   LibraryCacheStore? libraryCache,
+  DeviceStorageProbe? deviceStorageProbe,
+  AutoDeleteSettingsController Function()? autoDeleteSettings,
+  OpenVolumeCheck? openVolumeCheck,
   String apiBaseUrl = 'http://localhost:8000',
 }) {
   return [
@@ -124,6 +131,18 @@ List<Override> testOverrides({
     libraryCacheStoreProvider.overrideWithValue(
       libraryCache ?? InMemoryLibraryCacheStore(),
     ),
+    // 端末の空き容量はプラグイン（プラットフォームチャネル）。既定は「分からない」
+    // （本番でプラグインが値を返さない端末と同じ）。キューも画面もここから読む。
+    deviceStorageProbeProvider.overrideWithValue(
+      deviceStorageProbe ?? unknownDeviceStorage,
+    ),
+    // 自動削除の設定は drift。既定はオフのスタブにして、アプリ全体を出す
+    // テストで起動時の自動削除が走っても何も読まないようにする。
+    autoDeleteSettingsControllerProvider.overrideWith(
+      autoDeleteSettings ?? StubAutoDeleteSettingsController.new,
+    ),
+    // ビューアで開いている巻の判定（既定は「どれも開いていない」）。
+    openVolumeCheckProvider.overrideWithValue(openVolumeCheck ?? (_) => false),
   ];
 }
 
@@ -153,6 +172,10 @@ ProviderContainer createContainer({
   ConnectivityMonitor? connectivityMonitor,
   OfflineMetadataGateway? offlineMetadata,
   LibraryCacheStore? libraryCache,
+  DeviceStorageProbe? deviceStorageProbe,
+  AutoDeleteSettingsController Function()? autoDeleteSettings,
+  OpenVolumeCheck? openVolumeCheck,
+  AppResumeMonitor? appResumeMonitor,
   List<Override> overrides = const [],
 }) {
   return ProviderContainer(
@@ -172,8 +195,14 @@ ProviderContainer createContainer({
         connectivityMonitor: connectivityMonitor,
         offlineMetadata: offlineMetadata,
         libraryCache: libraryCache,
+        deviceStorageProbe: deviceStorageProbe,
+        autoDeleteSettings: autoDeleteSettings,
+        openVolumeCheck: openVolumeCheck,
+        appResumeMonitor: appResumeMonitor,
       ),
-      // 後に並べた方が勝つので、個別の差し替えはここへ足す。
+      // Riverpod 3 は同じプロバイダの二重 override を拒むので、testOverrides が
+      // 既に差し替えているもの（appResumeMonitor など）は上の引数で渡す。
+      // ここへ足せるのは testOverrides が触らないプロバイダだけ。
       ...overrides,
     ],
   );

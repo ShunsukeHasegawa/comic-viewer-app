@@ -122,8 +122,8 @@ String downloadLabelOf(
 
 /// 巻のダウンロード操作。
 ///
-/// 一括ダウンロード（タイトル単位）は詳細画面の見出し、ダウンロード一覧の画面は #13。
-/// ここは巻ごとの導線だけを持つ。
+/// 一括ダウンロード（タイトル単位）は詳細画面の見出し、一覧・複数選択の削除は
+/// ダウンロード管理画面（`DownloadManagerScreen`。#13）。ここは巻ごとの導線だけを持つ。
 class VolumeDownloadButton extends ConsumerWidget {
   const VolumeDownloadButton({
     required this.bookId,
@@ -244,15 +244,41 @@ class VolumeDownloadButton extends ConsumerWidget {
     );
   }
 
-  Widget _cancelButton(BuildContext context, DownloadQueue queue) => IconButton(
-    onPressed: () => _guard(
-      context,
-      what: 'ダウンロードの取り消し',
-      action: () => queue.remove(volume.id),
-    ),
-    tooltip: 'ダウンロードを取り消す',
-    icon: const Icon(Icons.close),
-  );
+  Widget _cancelButton(BuildContext context, DownloadQueue queue) {
+    // 「更新あり」の取り直し待ち（旧世代の ZIP が読める）を remove すると、
+    // 読める旧世代まで消える。中止は pause にして、キューに旧世代の
+    // completed へ戻させる（ダウンロード管理画面の「更新を中止」と同じ）。
+    if (download case final current? when current.hasInstalledArchive) {
+      if (current.isActive) {
+        return IconButton(
+          onPressed: () => _guard(
+            context,
+            what: '更新の中止',
+            action: () => queue.pause(volume.id),
+          ),
+          tooltip: '更新を中止',
+          icon: const Icon(Icons.close),
+        );
+      }
+      // 中断 / 失敗でも旧世代の ZIP が読める行（以前のキューが再起動後の
+      // 中断・失敗で書いたもの）。取り消しとして黙って remove すると読める
+      // 巻が消えるので、削除として確認を挟む（ダウンロード管理画面と同じ）。
+      return IconButton(
+        onPressed: () => _confirmDelete(context, queue),
+        tooltip: 'ダウンロードを削除',
+        icon: const Icon(Icons.delete_outline),
+      );
+    }
+    return IconButton(
+      onPressed: () => _guard(
+        context,
+        what: 'ダウンロードの取り消し',
+        action: () => queue.remove(volume.id),
+      ),
+      tooltip: 'ダウンロードを取り消す',
+      icon: const Icon(Icons.close),
+    );
+  }
 
   /// 消す前に確認する（オフラインで読めなくなる）。
   Future<void> _confirmDelete(BuildContext context, DownloadQueue queue) async {
