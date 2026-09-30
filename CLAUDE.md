@@ -71,8 +71,9 @@ test/         lib と同じ構成。共通フェイクは test/support/
   `DownloadQueue` に残す。`FileDownloader()` を他の場所で作らない（最初に作った側の
   永続化ストアが使われ、再開データを引けなくなる）。テストでは `FakeArchiveTransport`
   （`testOverrides` の既定）を使う。
-- 転送の taskId は `v{volumeId}.f{filesVersion}.s{sessionTag}`（`ArchiveTaskId`）。
-  タグはログアウトで作り直し、違うタグの完了は取り込まない（#15）。起動時は
+- 転送の taskId は `v{volumeId}.f{filesVersion}.s{sessionTag}.n{nonce}`（`ArchiveTaskId`）。
+  タグはログアウトで作り直し、違うタグの完了は取り込まない（#15）。ノンスは投入ごとに
+  作り直す（Android の一時停止の印が ID ごとに残るため。再開は同じ ID）。起動時は
   `_reconcile` で OS 側の転送と台帳を突き合わせる（プラグインの自動再投入は使わない）。
 - 止める意図（中断）は**先に台帳へ書く**。OS から届く `paused` は台帳が中断なら
   ユーザー操作、待機中 / 取得中のままなら 9 分の時間切れなどの一時的なものとして扱う。
