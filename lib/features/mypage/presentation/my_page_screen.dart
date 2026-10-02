@@ -10,6 +10,7 @@ import '../../auth/application/auth_controller.dart';
 import '../../auth/domain/auth_state.dart';
 import '../../downloads/application/download_queue.dart';
 import '../../downloads/domain/volume_download.dart';
+import '../../settings/presentation/widgets/theme_mode_selector.dart';
 import '../application/stats_controller.dart';
 
 /// マイページ（ユーザー情報・読書統計・設定入口）。
@@ -70,6 +71,10 @@ class MyPageScreen extends ConsumerWidget {
               trailing: const Icon(Icons.chevron_right),
               onTap: () => context.push(AppRoutes.downloadManager),
             ),
+            const Divider(),
+            // 表示テーマ（#17）。画面を移らずにその場で切り替えて確かめられるよう、
+            // ほかの設定のような別画面にはせずマイページに直接置く。
+            const ThemeModeSelector(),
             const Divider(),
             ListTile(
               leading: const Icon(Icons.logout),

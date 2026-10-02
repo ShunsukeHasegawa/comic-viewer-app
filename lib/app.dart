@@ -9,6 +9,7 @@ import 'features/downloads/application/auto_delete_runner.dart';
 import 'features/downloads/application/download_queue.dart';
 import 'features/downloads/application/safe_mode_revalidator.dart';
 import 'features/progress/presentation/progress_sync_scope.dart';
+import 'features/settings/application/theme_mode_setting.dart';
 
 /// アプリのルートウィジェット。
 class ComicLazApp extends ConsumerStatefulWidget {
@@ -63,7 +64,14 @@ class _ComicLazAppState extends ConsumerState<ComicLazApp> {
         scaffoldMessengerKey: _messengerKey,
         theme: AppTheme.light(),
         darkTheme: AppTheme.dark(),
-        themeMode: ThemeMode.system,
+        // 読めない間 / 読めなかったときは既定の「システムに合わせる」（#17）。
+        // 起動時は `main` が読み終えてから描くので、ここで null になるのは
+        // 読み込みが時間切れになったか、読めなかったときだけ。
+        themeMode: ref.watch(
+          themeModeSettingProvider.select(
+            (setting) => setting.value ?? ThemeMode.system,
+          ),
+        ),
         routerConfig: ref.watch(routerProvider),
       ),
     );

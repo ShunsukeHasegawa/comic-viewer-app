@@ -5,12 +5,15 @@ import 'package:comic_laz/features/auth/application/session_cleanup_notice.dart'
 import 'package:comic_laz/features/auth/presentation/login_screen.dart';
 import 'package:comic_laz/features/downloads/domain/volume_download.dart';
 import 'package:comic_laz/features/library/presentation/library_screen.dart';
+import 'package:comic_laz/features/settings/application/theme_mode_setting.dart';
 import 'package:comic_laz/main.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'support/api_fakes.dart';
 import 'support/auth_fakes.dart';
+import 'support/settings_fakes.dart';
 import 'support/test_scope.dart';
 
 void main() {
@@ -88,6 +91,71 @@ void main() {
     await tester.pump();
 
     expect(find.text(SessionCleanupNotice.message), findsOneWidget);
+  });
+
+  group('表示テーマ（#17）', () {
+    ThemeMode appliedMode(WidgetTester tester) =>
+        tester.widget<MaterialApp>(find.byType(MaterialApp)).themeMode!;
+
+    testWidgets('起動前に読み込んでおけば最初のフレームから保存済みのテーマで描く（スプラッシュ後に一瞬切り替わらない）', (
+      tester,
+    ) async {
+      // main と同じ組み立て（bootstrapContainer → buildRootApp）を通す。読み込みを
+      // runApp の後へ回したり、ProviderScope で別のコンテナを作り直したりする
+      // 変更はここで落ちる。
+      final container = await bootstrapContainer(
+        testOverrides(
+          authApi: MockAuthApi(),
+          themeModeStore: InMemoryThemeModeStore(ThemeMode.dark),
+        ),
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(buildRootApp(container));
+
+      // pumpAndSettle の前（最初のフレーム）で、端末がライトでもダークになっている。
+      expect(appliedMode(tester), ThemeMode.dark);
+      expect(
+        Theme.of(tester.element(find.byType(Navigator).first)).brightness,
+        Brightness.dark,
+      );
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('設定を変えるとアプリ全体の表示が切り替わる', (tester) async {
+      await tester.pumpWidget(
+        wrapWithScope(
+          const ComicLazApp(),
+          overrides: testOverrides(authApi: MockAuthApi()),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(appliedMode(tester), ThemeMode.system);
+
+      await ProviderScope.containerOf(tester.element(find.byType(ComicLazApp)))
+          .read(themeModeSettingProvider.notifier)
+          .set(ThemeMode.light);
+      await tester.pumpAndSettle();
+
+      expect(appliedMode(tester), ThemeMode.light);
+    });
+
+    testWidgets('設定を読めなかったときはシステムに合わせて表示する（起動は止めない）', (tester) async {
+      await tester.pumpWidget(
+        wrapWithScope(
+          const ComicLazApp(),
+          overrides: testOverrides(
+            authApi: MockAuthApi(),
+            themeModeStore: InMemoryThemeModeStore(ThemeMode.dark)
+              ..readError = Exception('db'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(appliedMode(tester), ThemeMode.system);
+      expect(find.byType(LoginScreen), findsOneWidget);
+    });
   });
 
   testWidgets('設定エラー画面はメッセージを表示する', (tester) async {

@@ -22,7 +22,10 @@ class SplashScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final dark = Theme.of(context).brightness == Brightness.dark;
+    // アプリのテーマ設定（#17）ではなく OS の明暗に合わせる。OS のスプラッシュは
+    // アプリの設定を知らずに OS の明暗で色を選ぶので、テーマに合わせると
+    // 「OS はダーク・アプリはライト」のときに暗い背景から teal へ一瞬で切り替わる。
+    final dark = MediaQuery.platformBrightnessOf(context) == Brightness.dark;
     return AnnotatedRegion<SystemUiOverlayStyle>(
       // 濃い背景の上なので、ライトテーマでもステータスバーのアイコンは白にする。
       value: SystemUiOverlayStyle.light,

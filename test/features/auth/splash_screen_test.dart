@@ -11,25 +11,62 @@ import 'package:flutter_test/flutter_test.dart';
 /// [SplashScreen] が食い違うと、起動のたびに色や絵が一瞬で切り替わって見える（#16）。
 /// どちらもビルドやほかのテストでは気づけないので、ここで揃っていることを押さえる。
 void main() {
-  Future<Color?> pumpSplash(WidgetTester tester, ThemeData theme) async {
+  /// [platform] は OS の明暗、[themeMode] はアプリの表示テーマの設定（#17）。
+  Future<Color?> pumpSplash(
+    WidgetTester tester, {
+    Brightness platform = Brightness.light,
+    ThemeMode themeMode = ThemeMode.system,
+  }) async {
+    tester.platformDispatcher.platformBrightnessTestValue = platform;
+    addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
     await tester.pumpWidget(
-      MaterialApp(theme: theme, home: const SplashScreen()),
+      MaterialApp(
+        theme: AppTheme.light(),
+        darkTheme: AppTheme.dark(),
+        themeMode: themeMode,
+        home: const SplashScreen(),
+      ),
     );
     return tester.widget<Scaffold>(find.byType(Scaffold)).backgroundColor;
   }
 
-  testWidgets('ライトテーマでは OS のスプラッシュと同じ teal を背景にする（テーマの明るい背景だと白く光って見えるため）', (
+  testWidgets('OS がライトなら OS のスプラッシュと同じ teal を背景にする（テーマの明るい背景だと白く光って見えるため）', (
     tester,
   ) async {
-    expect(await pumpSplash(tester, AppTheme.light()), AppColors.brand);
+    expect(await pumpSplash(tester), AppColors.brand);
   });
 
-  testWidgets('ダークテーマでは OS のスプラッシュと同じ暗い背景にする', (tester) async {
-    expect(await pumpSplash(tester, AppTheme.dark()), AppColors.darkBackground);
+  testWidgets('OS がダークなら OS のスプラッシュと同じ暗い背景にする', (tester) async {
+    expect(
+      await pumpSplash(tester, platform: Brightness.dark),
+      AppColors.darkBackground,
+    );
+  });
+
+  // OS のスプラッシュはアプリの設定を知らず、OS の明暗だけで色を選ぶ。
+  // アプリのテーマに合わせると、設定と OS が食い違うときに一瞬で色が切り替わる。
+  testWidgets('アプリをライトに固定していても OS がダークなら暗い背景のまま（OS のスプラッシュに揃える）', (
+    tester,
+  ) async {
+    expect(
+      await pumpSplash(
+        tester,
+        platform: Brightness.dark,
+        themeMode: ThemeMode.light,
+      ),
+      AppColors.darkBackground,
+    );
+  });
+
+  testWidgets('アプリをダークに固定していても OS がライトなら teal のまま', (tester) async {
+    expect(
+      await pumpSplash(tester, themeMode: ThemeMode.dark),
+      AppColors.brand,
+    );
   });
 
   testWidgets('OS のスプラッシュと同じ絵を同じ幅で出す（ずれると切り替わりで絵が跳ねるため）', (tester) async {
-    await pumpSplash(tester, AppTheme.light());
+    await pumpSplash(tester);
 
     final image = tester.widget<Image>(find.byType(Image));
     expect(

@@ -29,6 +29,7 @@ import 'package:comic_laz/features/downloads/domain/volume_download.dart';
 import 'package:comic_laz/features/library/data/library_repository.dart';
 import 'package:comic_laz/features/offline/application/offline_metadata_gateway.dart';
 import 'package:comic_laz/features/progress/data/progress_store.dart';
+import 'package:comic_laz/features/settings/application/theme_mode_setting.dart';
 import 'package:comic_laz/features/viewer/presentation/widgets/viewer_page_image.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -40,6 +41,7 @@ import 'auth_fakes.dart';
 import 'device_fakes.dart';
 import 'download_fakes.dart';
 import 'progress_fakes.dart';
+import 'settings_fakes.dart';
 import 'storage_fakes.dart';
 
 /// プラットフォームチャネルとネットワークを触らないようにした標準の override 群。
@@ -72,6 +74,7 @@ List<Override> testOverrides({
   SafeModeRevalidationStore? safeModeRevalidationStore,
   DeviceProtection? deviceProtection,
   InstallMarker? installMarker,
+  ThemeModeStore? themeModeStore,
   String apiBaseUrl = 'http://localhost:8000',
 }) {
   return [
@@ -173,6 +176,10 @@ List<Override> testOverrides({
     installMarkerProvider.overrideWithValue(
       installMarker ?? FakeInstallMarker(),
     ),
+    // 表示テーマの設定（#17）は drift。既定は「システムに合わせる」をメモリに持つ。
+    themeModeStoreProvider.overrideWithValue(
+      themeModeStore ?? InMemoryThemeModeStore(),
+    ),
   ];
 }
 
@@ -210,6 +217,7 @@ ProviderContainer createContainer({
   DeviceProtection? deviceProtection,
   AppResumeMonitor? appResumeMonitor,
   InstallMarker? installMarker,
+  ThemeModeStore? themeModeStore,
   List<Override> overrides = const [],
 }) {
   return ProviderContainer(
@@ -237,6 +245,7 @@ ProviderContainer createContainer({
         deviceProtection: deviceProtection,
         appResumeMonitor: appResumeMonitor,
         installMarker: installMarker,
+        themeModeStore: themeModeStore,
       ),
       // Riverpod 3 は同じプロバイダの二重 override を拒むので、testOverrides が
       // 既に差し替えているもの（appResumeMonitor など）は上の引数で渡す。

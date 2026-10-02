@@ -4,6 +4,7 @@ import 'package:comic_laz/features/auth/application/auth_controller.dart';
 import 'package:comic_laz/features/auth/domain/auth_state.dart';
 import 'package:comic_laz/features/downloads/domain/volume_download.dart';
 import 'package:comic_laz/features/mypage/presentation/my_page_screen.dart';
+import 'package:comic_laz/features/settings/presentation/widgets/theme_mode_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -56,6 +57,16 @@ Future<void> pumpMyPageWithFailingLogout(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
+/// マイページのいちばん下の「ログアウト」を押す。
+///
+/// テーマの切り替え（#17）が入って、テストの画面の高さでは最初から見えて
+/// いないので、スクロールしてから押す。
+Future<void> tapLogoutTile(WidgetTester tester) async {
+  final tile = find.widgetWithText(ListTile, 'ログアウト');
+  await tester.scrollUntilVisible(tile, 100);
+  await tester.tap(tile);
+}
+
 void main() {
   testWidgets('ログイン中のユーザーを表示する', (tester) async {
     await pumpMyPage(
@@ -75,6 +86,14 @@ void main() {
     expect(find.text('セーフモード'), findsOneWidget);
   });
 
+  testWidgets('表示テーマを切り替えられる（設定の入口と同じマイページに置く。#17）', (tester) async {
+    await pumpMyPage(tester);
+
+    await tester.scrollUntilVisible(find.byType(ThemeModeSelector), 100);
+    expect(find.text('テーマ'), findsOneWidget);
+    expect(find.text('ダーク'), findsOneWidget);
+  });
+
   testWidgets('一般ユーザーにはバッジを出さない', (tester) async {
     await pumpMyPage(tester);
 
@@ -85,7 +104,7 @@ void main() {
   testWidgets('ログアウトは確認ダイアログで端末内データの削除を伝える', (tester) async {
     final app = await pumpMyPage(tester);
 
-    await tester.tap(find.text('ログアウト'));
+    await tapLogoutTile(tester);
     await tester.pumpAndSettle();
 
     expect(find.textContaining('ダウンロードしたコミックと読書進捗は削除されます'), findsOneWidget);
@@ -104,7 +123,7 @@ void main() {
   testWidgets('確認するとログアウトし、端末内データを破棄する', (tester) async {
     final app = await pumpMyPage(tester);
 
-    await tester.tap(find.text('ログアウト'));
+    await tapLogoutTile(tester);
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(FilledButton, 'ログアウト'));
     await tester.pumpAndSettle();
@@ -120,7 +139,7 @@ void main() {
   testWidgets('ログアウトが失敗したらユーザーに伝える', (tester) async {
     await pumpMyPageWithFailingLogout(tester);
 
-    await tester.tap(find.text('ログアウト'));
+    await tapLogoutTile(tester);
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(FilledButton, 'ログアウト'));
     await tester.pumpAndSettle();
