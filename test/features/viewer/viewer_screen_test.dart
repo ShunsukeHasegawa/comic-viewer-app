@@ -34,6 +34,8 @@ pumpViewer(
   int pageCount = 5,
   int? nextVolumeId = 341,
   ViewerImageBuilder? imageBuilder,
+  // ビューアを一覧などの上に push した形で開く（戻る操作を試すため）。
+  bool pushed = false,
 }) async {
   rendered.clear();
   prefetched.clear();
@@ -72,10 +74,27 @@ pumpViewer(
   await tester.pumpWidget(
     UncontrolledProviderScope(
       container: container,
-      child: const MaterialApp(home: ViewerScreen(volumeId: 340)),
+      child: MaterialApp(
+        home: pushed
+            ? Builder(
+                builder: (context) => TextButton(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const ViewerScreen(volumeId: 340),
+                    ),
+                  ),
+                  child: const Text('open'),
+                ),
+              )
+            : const ViewerScreen(volumeId: 340),
+      ),
     ),
   );
   await tester.pumpAndSettle();
+  if (pushed) {
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+  }
   return (
     container: container,
     recorder: recorder,
@@ -223,6 +242,28 @@ void main() {
       await gesture.up();
       await tester.pumpAndSettle();
       expect(stateOf(app.container).currentPage, draggedTo);
+    });
+
+    // ドラッグ中に戻ったのなら、確定していない位置を進捗として保存・送信しない
+    // （読んでいない数十ページ先まで読書位置が進んでしまう）。
+    testWidgets('ドラッグ中にビューアを閉じたら、途中の位置へは移動しない', (tester) async {
+      final app = await pumpViewer(tester, pageCount: 200, pushed: true);
+      await tapZone(tester, 0.5);
+      app.recorder.saved.clear();
+
+      final gesture = await dragHalfway(tester);
+      final container = app.container;
+      // 閉じる前に購読しておき、ビューアの状態が破棄されずに残る最悪の場合を作る。
+      final keep = container.listen(viewerControllerProvider(340), (_, _) {});
+      addTearDown(keep.close);
+
+      tester.state<NavigatorState>(find.byType(Navigator)).pop();
+      await tester.pumpAndSettle();
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      expect(stateOf(container).currentPage, 1);
+      expect(app.recorder.saved, isEmpty);
     });
 
     testWidgets('離したら飛び先を最初に要求し、先読みの窓を飛び先に置き直す', (tester) async {

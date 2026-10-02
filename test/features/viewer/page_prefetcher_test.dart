@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:comic_laz/features/viewer/application/page_prefetcher.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -183,6 +184,29 @@ void main() {
 
       expect(precached, [10]);
       expect(slow.requestedPages, isEmpty);
+    });
+  });
+
+  // 表示中のページが混んだ回線で遅いと、周辺の先読みまで止まり、次のページへ
+  // 送った直後にまた待たされる。一定時間で見切って周辺を投げる。
+  test('表示中のページが遅くても、一定時間で周辺の先読みを始める', () {
+    fakeAsync((async) {
+      final requested = <int>[];
+      final slow = PagePrefetcher(
+        precache: (page) {
+          requested.add(page);
+          // 表示中のページだけ返ってこない。
+          return page == 5 ? Completer<void>().future : Future<void>.value();
+        },
+      );
+
+      slow.update(currentPage: 5, pageCount: 20);
+      async.flushMicrotasks();
+      expect(requested, [5], reason: 'まずは表示中のページだけ');
+
+      async.elapse(PagePrefetcher.visibleWait);
+      async.flushMicrotasks();
+      expect(requested, [5, 6, 7, 8, 4]);
     });
   });
 }

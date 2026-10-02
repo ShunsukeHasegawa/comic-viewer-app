@@ -20,6 +20,9 @@ class PagePrefetcher {
   /// 戻る方向に何ページ分残すか。
   final int behind;
 
+  /// 表示中のページを待つ上限（これを過ぎたら周辺の先読みを始める）。
+  static const visibleWait = Duration(seconds: 2);
+
   /// 先読み済み / 進行中のページと、その完了（失敗も完了として扱う）。
   final _requested = <int, Future<void>>{};
 
@@ -59,7 +62,9 @@ class PagePrefetcher {
     final rest = window.skip(1).toList();
     if (rest.isEmpty) return;
 
-    visible.then((_) {
+    // 表示中のページが遅い（混んだ回線 / 60 秒の時間切れ待ち）ときに周辺の
+    // 先読みまで止めない。一定時間で見切って周辺を投げ始める。
+    visible.timeout(visibleWait, onTimeout: () {}).then((_) {
       // 待っている間に窓が動いた。古い窓の周辺を今さら投げると、新しい
       // 飛び先の読み込みと競合する。
       if (generation != _generation) return;

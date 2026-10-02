@@ -94,6 +94,18 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     }
   }
 
+  /// シークバーでのページ移動。
+  ///
+  /// ドラッグの途中でシークバーが外されると、移動は次のフレームに回る
+  /// （`ViewerFooter`）。それがビューアごと閉じた（戻る）ためなら移動しない。
+  /// 確定していない数十ページ先の位置を進捗として保存・送信してしまうため。
+  void _seek(int page) {
+    // 閉じる遷移はドラッグを打ち切り、Slider は離したときと同じ onChangeEnd を
+    // 呼ぶ。そのときにも移動しない（閉じ始めた時点で今の画面ではなくなる）。
+    if (!mounted || !(ModalRoute.of(context)?.isCurrent ?? true)) return;
+    _controller.setPage(page);
+  }
+
   void _prefetch(ViewerState state) {
     final filesVersion = state.volume.filesVersion;
     if (filesVersion == null || state.pageCount == 0) return;
@@ -210,6 +222,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
           onNextVolume: _moveToNextVolume,
           canOpenNextVolume: _canOpenNextVolume(state),
           controller: _controller,
+          onSeek: _seek,
         ),
       },
     );
@@ -225,7 +238,11 @@ class _ViewerBody extends StatelessWidget {
     required this.onNextVolume,
     required this.canOpenNextVolume,
     required this.controller,
+    required this.onSeek,
   });
+
+  /// シークバーでのページ移動（[_ViewerScreenState._seek]）。
+  final ValueChanged<int> onSeek;
 
   final ViewerState state;
   final PageController pageController;
@@ -298,7 +315,7 @@ class _ViewerBody extends StatelessWidget {
             left: 0,
             right: 0,
             // ドラッグ中は番号だけ動き、離したときに 1 回だけ呼ばれる（#18）。
-            child: ViewerFooter(state: state, onSeek: controller.setPage),
+            child: ViewerFooter(state: state, onSeek: onSeek),
           ),
         ],
       ],
