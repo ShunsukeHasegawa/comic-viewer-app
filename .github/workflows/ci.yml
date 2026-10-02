@@ -253,6 +253,12 @@ jobs:
           # リポジトリは公開なので、Release は**下書き**で作る（自分だけが見られる。
           # 個人用の APK を誰でも落とせる状態にしない）。公開するなら GitHub 上で手で公開する。
           if gh release view "$TAG" > /dev/null 2>&1; then
+            # 手で公開した後の再実行では差し替えない（同じ版名のまま、ビルド番号の
+            # 違う APK に黙って入れ替わるため）。
+            if [ "$(gh release view "$TAG" --json isDraft -q .isDraft)" != 'true' ]; then
+              echo "::warning::Release $TAG は公開済みなので APK を差し替えません（Artifacts にだけ上げました）。"
+              exit 0
+            fi
             gh release upload "$TAG" "$APK" --clobber
           else
             flags='--draft'

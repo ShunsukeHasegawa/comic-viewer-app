@@ -273,6 +273,13 @@ PUB_CACHE='C:\PubCache' TMP='C:\Temp\dart' TEMP='C:\Temp\dart' flutter build apk
 ```
 
 成果物は `build/app/outputs/flutter-apk/app-release.apk`。
+
+**手元のリリースビルドは確認用**で、配るのは CI の APK だけにする。CI はビルド番号
+（versionCode）に Actions の実行番号を使うので、手元のビルド（`pubspec.yaml` の `+1`）は
+CI の APK より番号が小さく、CI の APK を入れた端末には上書きできない
+（`INSTALL_FAILED_VERSION_DOWNGRADE`。入れ直すとダウンロード済みの巻が消える）。
+どうしても手元の版を同じ端末に入れるときは、直近の CI の実行番号より大きい
+`--build-number` を付ける（その後の CI の APK が今度は上書きできなくなる点に注意）。
 本番以外の API に向けるときは「実行」と同じ `--dart-define` を付ける。
 
 ### GitHub の Secrets

@@ -33,8 +33,15 @@ val requireReleaseSigning: Boolean =
 // 警告・必須キーの確認・鍵ファイルの存在確認は release を作るときだけにする
 // （debug ビルドのたびに鍵の無い警告を出したり、鍵の置き場が無い端末や書きかけの
 // key.properties で debug を壊したりしないため）。
+// `assemble` / `build` / `bundle` のように全バリアントを作るタスクも release を含む
+// （名前に Release が無くても確認を飛ばすと、書きかけの key.properties が署名の
+// 段になって分かりにくいエラーで落ちる）。
 val isReleaseBuildRequested: Boolean =
-    gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
+    gradle.startParameter.taskNames.any { task ->
+        val name = task.substringAfterLast(':')
+        name.contains("Release", ignoreCase = true) ||
+            name in setOf("assemble", "build", "bundle")
+    }
 
 // パスワードは前後の空白を削らない（keytool は末尾に空白のあるパスワードも受け付ける。
 // 削ると別のパスワードとして渡り、「password was incorrect」としか言われず原因を
