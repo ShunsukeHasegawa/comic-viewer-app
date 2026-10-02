@@ -71,6 +71,9 @@ android {
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
+        // flutter_local_notifications（#14）が java.time などの新しい API を使うため、
+        // 古い Android（minSdk 24）向けにライブラリの desugaring を有効にする。
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -165,4 +168,42 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // compileOptions.isCoreLibraryDesugaringEnabled（flutter_local_notifications の要求）。
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
+}
+
+// プッシュ通知の Firebase 設定（#14）。android/app/google-services.json は
+// リポジトリに置かない（公開リポジトリのため。置き方は README の「プッシュ通知」）。
+// ファイルがあるときだけ google-services プラグインを適用し、無ければ Firebase の
+// 設定が無いまま作る（アプリはプッシュ通知だけ「使えない」と表示して動く）。
+// CI や設定を持たない手元のビルドを壊さないため。
+val googleServicesFile: File = file("google-services.json")
+if (googleServicesFile.exists()) {
+    apply(plugin = "com.google.gms.google-services")
+    // 設定ファイルに載っていないアプリ ID の版は、プラグインが「一致するクライアントが
+    // 無い」でビルドを止める。版ごとに確かめ、載っていない版だけ処理を外す（その版では
+    // プッシュ通知が「使えない」になる。ビルドは止めない）。
+    // - 開発版（debug）は applicationIdSuffix = ".debug" で別のアプリ ID。
+    // - profile は Flutter のプラグインが debug の設定より前に initWith(debug) で作るので
+    //   接尾辞が付かず、release と同じ ID。
+    val googleServicesJson = googleServicesFile.readText(Charsets.UTF_8)
+    val variantsByApplicationId =
+        mapOf(
+            "com.lazgram.comic_laz" to listOf("Release", "Profile"),
+            "com.lazgram.comic_laz.debug" to listOf("Debug"),
+        )
+    for ((applicationId, variants) in variantsByApplicationId) {
+        if (googleServicesJson.contains("\"$applicationId\"")) continue
+        logger.lifecycle(
+            "google-services.json に $applicationId が無いため、" +
+                "${variants.joinToString(" / ")} ではプッシュ通知を無効にします。",
+        )
+        val taskNames = variants.map { "process${it}GoogleServices" }.toSet()
+        tasks.matching { it.name in taskNames }.configureEach {
+            enabled = false
+        }
+    }
 }

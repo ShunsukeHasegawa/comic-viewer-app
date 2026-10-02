@@ -22,8 +22,14 @@ dependencies:
   disk_space_2: ^1.0.13
   drift: ^2.35.0
   drift_flutter: ^0.3.1
+  # プッシュ通知（#14。FCM）。設定ファイル（android/app/google-services.json）は
+  # リポジトリに置かない。無いビルドではプッシュ通知だけ使えない状態で動く。
+  firebase_core: ^4.15.0
+  firebase_messaging: ^16.7.0
   flutter:
     sdk: flutter
+  # 前面にいる間に届いたプッシュ通知の表示（#14。FCM は前面では OS に出させない）
+  flutter_local_notifications: ^22.3.1
   # 状態管理 / DI
   flutter_riverpod: ^3.4.3
   # モデル（イミュータブルなデータクラス）

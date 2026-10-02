@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:comic_laz/core/network/api_exception.dart';
 import 'package:comic_laz/core/session/session_data_purger.dart';
+import 'package:comic_laz/core/session/sign_out_hook.dart';
 import 'package:comic_laz/domain/models/user.dart';
 import 'package:comic_laz/features/auth/application/auth_controller.dart';
 import 'package:comic_laz/features/auth/application/session_cleanup_notice.dart';
@@ -7,6 +10,7 @@ import 'package:comic_laz/features/auth/data/auth_api.dart';
 import 'package:comic_laz/features/auth/data/auth_store.dart';
 import 'package:comic_laz/features/auth/domain/auth_state.dart';
 import 'package:comic_laz/features/auth/domain/session_cleanup_exception.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
@@ -338,6 +342,86 @@ void main() {
       expect(store.user, isNull);
       expect(purger.calls, 1);
       verify(api.deleteToken).called(1);
+    });
+
+    test('ログアウト前のフックはトークンの失効・削除より先に呼ぶ（Bearer が要る後始末のため。#14）', () async {
+      final log = <String>[];
+      final api = MockAuthApi();
+      when(api.fetchCurrentUser).thenAnswer((_) async => testUser);
+      when(api.deleteToken).thenAnswer((_) async => log.add('revoke auth'));
+      final container = createContainer(
+        authStore: FakeAuthStore(token: 'valid', user: testUser, log: log),
+        authApi: api,
+        signOutHooks: [
+          CallbackSignOutHook('first', () async => log.add('hook 1')),
+          CallbackSignOutHook('second', () async => log.add('hook 2')),
+        ],
+      );
+      addTearDown(container.dispose);
+      await settleAuth(container);
+
+      await container.read(authControllerProvider.notifier).logout();
+
+      expect(log, ['hook 1', 'hook 2', 'revoke auth', 'clear token']);
+    });
+
+    test('フックが失敗してもログアウトは続ける（後始末のために締め出さない）', () async {
+      final api = MockAuthApi();
+      when(api.fetchCurrentUser).thenAnswer((_) async => testUser);
+      when(api.deleteToken).thenAnswer((_) async {});
+      final store = FakeAuthStore(token: 'valid', user: testUser);
+      final container = createContainer(
+        authStore: store,
+        authApi: api,
+        signOutHooks: [
+          CallbackSignOutHook('failing', () async => throw StateError('x')),
+        ],
+      );
+      addTearDown(container.dispose);
+      await settleAuth(container);
+
+      await container.read(authControllerProvider.notifier).logout();
+
+      expect(
+        container.read(authControllerProvider),
+        const AuthState.unauthenticated(reason: SessionEndReason.signedOut),
+      );
+      expect(store.token, isNull);
+    });
+
+    test('返ってこないフックは打ち切ってログアウトを進める（圏外で待たせ続けない）', () {
+      fakeAsync((async) {
+        final api = MockAuthApi();
+        when(api.fetchCurrentUser).thenAnswer((_) async => testUser);
+        when(api.deleteToken).thenAnswer((_) async {});
+        final store = FakeAuthStore(token: 'valid', user: testUser);
+        final container = createContainer(
+          authStore: store,
+          authApi: api,
+          signOutHooks: [
+            CallbackSignOutHook('hanging', () => Completer<void>().future),
+          ],
+        );
+        addTearDown(container.dispose);
+        container.read(authControllerProvider);
+        async.flushMicrotasks();
+
+        var done = false;
+        unawaited(
+          container
+              .read(authControllerProvider.notifier)
+              .logout()
+              .then((_) => done = true),
+        );
+        async.elapse(
+          AuthController.signOutHookTimeout - const Duration(seconds: 1),
+        );
+        expect(done, isFalse);
+        async.elapse(const Duration(seconds: 2));
+
+        expect(done, isTrue);
+        expect(store.token, isNull);
+      });
     });
 
     test('圏外でもログアウトは完了する', () async {

@@ -10,6 +10,7 @@ import '../../auth/application/auth_controller.dart';
 import '../../auth/domain/auth_state.dart';
 import '../../downloads/application/download_queue.dart';
 import '../../downloads/domain/volume_download.dart';
+import '../../push/presentation/push_notification_settings.dart';
 import '../../settings/presentation/widgets/theme_mode_selector.dart';
 import '../application/stats_controller.dart';
 
@@ -75,6 +76,10 @@ class MyPageScreen extends ConsumerWidget {
             // 表示テーマ（#17）。画面を移らずにその場で切り替えて確かめられるよう、
             // ほかの設定のような別画面にはせずマイページに直接置く。
             const ThemeModeSelector(),
+            const Divider(),
+            // 新刊通知（#14）。テーマと同じく、その場で切り替えて確かめられるよう
+            // マイページに直接置く（テスト通知もここから送れる）。
+            const PushNotificationSettings(),
             const Divider(),
             ListTile(
               leading: const Icon(Icons.logout),

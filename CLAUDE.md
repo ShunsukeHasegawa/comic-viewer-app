@@ -124,6 +124,52 @@ test/         lib と同じ構成。共通フェイクは test/support/
   の `testOverrides` / `createContainer` を使い、必要なフェイクは `test/support/` に足す。
 - テスト名・コメントは日本語で、「なぜ」を書く（「何を」はコードを読めば分かる）。
 
+## プッシュ通知で決めたこと（#14。Android のみ）
+
+- FCM の窓口は `PushMessaging`（`features/push/data/`）、前面の表示は `ForegroundNotifier`
+  （flutter_local_notifications）だけ。`FirebaseMessaging` / `FlutterLocalNotificationsPlugin` を
+  他で作らない。テストは `FakePushMessaging`（既定は「使えない」）/ `FakeForegroundNotifier`。
+- `android/app/google-services.json` は**コミットしない**（`.gitignore` 済み。置き方は README）。
+  Gradle はファイルがあるときだけ google-services プラグインを適用し、載っていないアプリ ID の
+  版だけ `process<Variant>GoogleServices` を外す（release / profile は `com.lazgram.comic_laz`、
+  debug は `com.lazgram.comic_laz.debug`。profile は Flutter が接尾辞の前に作るので本体と同じ ID）。Dart 側は
+  `Firebase.initializeApp` の失敗を「使えない」（`PushAvailability.unavailable`）にして落とさない。
+  CI のリリースは Secrets の `GOOGLE_SERVICES_JSON`（任意）から書き出す。
+- 登録は `PushNotifications`（`push_notifications_controller.dart`）。ログイン / 復元 / 前面復帰 /
+  `onTokenRefresh` で確かめ、同じユーザー・同じトークンを 24 時間以内に登録済みなら POST しない
+  （控えは drift の Settings。`PushSettingsStore`）。自動の失敗は設定画面に出し、前面復帰での
+  やり直しは `retryInterval`（1 時間）に 1 回まで（ログイン / `onTokenRefresh` / スイッチ操作は
+  間引かない）。待っている自動の確かめは 1 回にまとめる（起動時の初期化と復元で POST を 2 回送らない）。
+  ユーザー操作（ON / OFF）の失敗は投げて SnackBar にし、状態（`failure`）にも残す。
+- 通知の許可は自動では 1 回だけ（`NotificationPermissionLog`。ダウンロードと**同じキー**を共有し、
+  二重にダイアログを出さない）。断られたら登録しない。ユーザーがスイッチを ON にし直したときだけ聞き直す。
+- ログアウトは `SignOutHook` で**認証トークンを失効させる前に** DELETE（Bearer が要る）。
+  控えのトークンに加え、送信中の登録（応答前で控えに無い）のトークンも POST の応答を待ってから消す。
+  時間切れで待つのをやめても DELETE は続くので、戻ったときに `PushTokenEraser.generation` が
+  変わっていれば後始末（`schedule`）を飛ばす（次のセッションで登録したトークンを消さない）。
+  フックは失敗 / 時間切れ（`AuthController.signOutHookTimeout`）でもログアウトを止めない。
+  端末の FCM トークンは `PushTokenEraser` が捨てる（予約を drift に先に書き、圏外なら次の起動 /
+  次の登録の前に捨て直す）。失効（401）は DELETE できないので `PushRegistrationPurger`
+  （`purgesRefetchableOnly = false`。`safe_mode` の変更で通知を止めない）で端末側だけ捨てる。
+  サーバーに残った行は次の送信で FCM が無効と返し、サーバーが消す。
+- 登録が通ればサーバーがトークンの持ち主を移す（`DeviceTokenRepository::upsert`）ので、捨て損ねた
+  トークンの予約はそこで下ろしてよい。
+- 「新刊通知」の ON / OFF は端末の好み（ログアウトでも残す）。OFF は DELETE + 端末のトークンを捨てる。
+  どちらもできなければ（圏外）投げ、OFF のまま「まだ止められていません」と警告を出す（予約は残し、
+  次の前面復帰 / 起動で捨てられたら警告も消える）。
+- 通知のタップは `pushRouteFor` → `router.go`。いまのサーバーは data を送らないのでライブラリ。
+  data に `book_id`（または 1 件だけの `book_ids`）があればタイトル詳細（サーバー側の変更で有効になる）。
+- **`FirebaseMessaging.onBackgroundMessage` に登録しない**（`firebaseMessagingBackgroundHandler` は
+  置いてあるだけ）。登録すると背面で届くたびに全プラグイン付きの headless エンジンが起き、
+  background_downloader の `firstBackgroundChannel` を奪って、巻の完了 / 進捗が次のコールドスタート
+  まで届かなくなる。notification メッセージは OS が出すので要らない。data だけのメッセージを足すなら
+  この干渉を先に解く（`platform_config_test.dart` が退行を止める）。
+- チャネルは `new_volumes`（「新刊のお知らせ」）。AndroidManifest の FCM 既定チャネル / アイコン
+  （`ic_stat_notify`。`python tool/make_notification_icon.py .` で生成）/ 色と揃える
+  （`test/platform/platform_config_test.dart` が食い違いを止める）。ダウンロードの通知とは分け、
+  前面の通知は tag を付けて ID の衝突で上書きし合わないようにする。
+- iOS（APNs / `GoogleService-Info.plist` / `aps-environment`）は対象外。
+
 ## 端末内データの保護で決めたこと（#15）
 
 - **ファイル単位の暗号化・起動時の生体認証ロック・画面の保護（スクリーンショット禁止 /
@@ -192,6 +238,11 @@ test/         lib と同じ構成。共通フェイクは test/support/
   競合解決は**クライアント申告の `read_at` 同士**の比較（サーバーが新しければ
   `stale` + `current`）。単発 API は無条件 upsert なので、アプリは 1 件でも
   こちらを使う（#12）。
+- プッシュ通知（#14）: `POST /api/user/device-token`（`token` 必須・255 文字まで、`platform`
+  は `web|android|ios`、`device_name` は 100 文字まで）→ 200 で JSON の文字列。同じトークンは
+  持ち主を移して上書き。`DELETE /api/user/device-token?token=`（本文を落とす経路があるので
+  クエリ）はログイン中のユーザーの行だけ消す。`GET /api/user/push-notification-test` は
+  そのユーザーの全端末へ送る。送信は notification（title / body / image）だけで **data は無い**。
 - オフライン向けに `GET /api/v2/volumes/{id}/manifest`、`GET /api/v2/volumes/{id}/archive` が
   **サーバー側に実装済み**。
   実装前に `gh api repos/ShunsukeHasegawa/comic-viewer/contents/<path>` で

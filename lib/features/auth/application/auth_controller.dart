@@ -7,6 +7,7 @@ import '../../../core/device/device_name_resolver.dart';
 import '../../../core/network/api_exception.dart';
 import '../../../core/session/session_data_purger.dart';
 import '../../../core/session/session_purge_journal.dart';
+import '../../../core/session/sign_out_hook.dart';
 import '../../../core/storage/install_marker.dart';
 import '../../../domain/models/user.dart';
 import '../../downloads/data/safe_mode_revalidation_store.dart';
@@ -222,8 +223,22 @@ class AuthController extends _$AuthController {
     }
   }
 
+  /// [SignOutHook] 1 つを待つ上限。圏外でもログアウトを待たせすぎない。
+  static const signOutHookTimeout = Duration(seconds: 6);
+
   /// 明示的なログアウト。サーバーへの通知が失敗しても端末内は必ず片付ける。
+  ///
+  /// Bearer が要る後始末（プッシュ通知の登録の解除 #14）は、トークンを
+  /// 失効させる**前に**済ませる（[SignOutHook]）。失敗 / 時間切れでも進める。
   Future<void> logout() async {
+    for (final hook in ref.read(signOutHooksProvider)) {
+      try {
+        await hook.beforeSignOut().timeout(signOutHookTimeout);
+      } on Object catch (error) {
+        debugPrint('[session] sign-out hook ${hook.debugLabel} failed: $error');
+      }
+      if (!ref.mounted) return;
+    }
     try {
       await ref.read(authApiProvider).deleteToken();
     } on ApiException {

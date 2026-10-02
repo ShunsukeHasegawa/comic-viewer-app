@@ -21,6 +21,9 @@ plugins {
     id("dev.flutter.flutter-plugin-loader") version "1.0.0"
     id("com.android.application") version "9.1.0" apply false
     id("org.jetbrains.kotlin.android") version "2.4.0" apply false
+    // プッシュ通知（#14）。google-services.json があるときだけ app で適用する
+    // （android/app/build.gradle.kts）。ここでは版を決めるだけ。
+    id("com.google.gms.google-services") version "4.5.0" apply false
 }
 
 include(":app")

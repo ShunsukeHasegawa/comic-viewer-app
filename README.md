@@ -153,6 +153,63 @@ Web 版は Sanctum の SPA Cookie 認証だが、アプリでは **Bearer トー
     同じユーザーのダウンロード（数 GB）と、まだ送れていない読書位置
     （サーバーにも無いので消すと永久に失われる）は残す
 
+### プッシュ通知（#14。Android のみ）
+
+お気に入りタイトルの新刊をサーバー（comic-viewer の `PushNotificationService`）が FCM で送る。
+アプリはトークンを `POST /api/user/device-token`（`platform: android`・`device_name`）で登録し、
+ログアウトで `DELETE /api/user/device-token?token=` する。
+
+#### Firebase の設定ファイルを置く（初回だけ）
+
+`android/app/google-services.json` は**リポジトリに入れない**（公開リポジトリのため。`.gitignore` 済み）。
+無いまま作ったビルドも動くが、マイページの「新刊通知」が「このビルドではプッシュ通知を使えません」になる。
+
+1. [Firebase コンソール](https://console.firebase.google.com/) でサーバーと同じプロジェクトを開く
+   （サーバーの `storage/app/firebase.json` のサービスアカウントと同じプロジェクトでないと届かない）
+2. 「プロジェクトの設定」→「マイアプリ」→ Android アプリを追加し、パッケージ名
+   **`com.lazgram.comic_laz`**（リリース版）を登録する
+3. 開発版でも試すなら、同じプロジェクトに **`com.lazgram.comic_laz.debug`** も追加する
+   （開発版はアプリ ID が違う。追加しなければ開発版だけ「使えません」になる。ビルドは通る。
+   逆に開発版だけ登録したファイルでも、リリース版 / profile は「使えません」になるだけでビルドは通る）
+4. 「google-services.json をダウンロード」して **`android/app/google-services.json`** に置く
+   （両方登録したなら、後でダウンロードしたファイル 1 つに両方が載っている）
+5. ビルドし直す（`flutter clean` は要らない）
+6. CI のリリース APK（`release-android`）でも使うなら、GitHub の Secrets に
+   **`GOOGLE_SERVICES_JSON`**（ファイルの中身をそのまま貼る）を足す。無ければ警告を出して、
+   通知が「使えません」の APK を作る
+
+ファイルがあるときだけ `com.google.gms.google-services` プラグインを適用する
+（`android/app/build.gradle.kts`）。無いビルド（CI / 設定を持たない手元）でも壊れない。
+ファイルに載っていないアプリ ID の版は、その版の Firebase の処理だけ外す（その版は「使えません」）。
+
+#### 届くか確かめる
+
+マイページの「新刊通知」が ON で「新しい巻が出たら通知します」と出ていれば登録済み。
+「テスト通知を送る」でサーバーが**ログイン中のユーザーの全端末**へテスト通知を送る
+（`GET /api/user/push-notification-test`）。アプリを背面に回してから押すと OS の通知として出る。
+
+#### 決めていること
+
+- 通知の許可（Android 13 以上）はログイン後に 1 回だけ自動で聞く。ダウンロードの進捗通知と
+  記録を共有し（`NotificationPermissionLog`）、どちらかが聞いた後は自動では聞かない。
+  断られたら登録せず、マイページに「端末の設定で許可してください」と設定画面を開くボタンを出す。
+  スイッチを自分で ON にし直したときは聞き直す
+- 同じユーザー・同じトークンの登録は 24 時間に 1 回まで（起動 / ログイン / 前面復帰で確かめる。
+  トークンが変わったときはすぐ）。登録に失敗したら、前面復帰でのやり直しは 1 時間に 1 回まで
+  （自宅サーバーが落ちている間にアプリを切り替えるたびに送らない。ログイン / スイッチ操作ではすぐ）
+- 「新刊通知」を OFF にして、圏外でサーバーの登録も端末のトークンも消せなかったときは、
+  OFF のまま「まだ止められていません」と出す（通信できるようになったら自動でやり直す）
+- ログアウトは**認証トークンを失効させる前に** DELETE する（`SignOutHook`。Bearer が要る）。
+  その後、端末の FCM トークンも捨てる（`PushTokenEraser`）。失効（401）では DELETE できないので
+  端末側だけ捨て、サーバーに残った行は次の送信で FCM が無効と返してサーバーが消す。
+  圏外で捨てられなかったら予約を残し、次の起動で捨て直す
+- 前面で届いた通知は `flutter_local_notifications` で出す（チャネル `new_volumes`「新刊のお知らせ」。
+  背面の通知も同じチャネル。ダウンロードの進捗通知とは別）
+- 通知を押すとライブラリを開く。サーバーが data に `book_id`（または 1 件だけの `book_ids`）を
+  載せたらそのタイトルの詳細を開く（いまのサーバーは data を送らないので、載せるのはサーバー側の変更）
+- 通知の小さいアイコンは `assets/branding/icon_monochrome.png` から
+  `python tool/make_notification_icon.py .` で作る（`res/drawable-*/ic_stat_notify.png`）
+
 ### ブランド
 
 - アクセント: teal `#244C60`
@@ -294,7 +351,7 @@ CI の APK より番号が小さく、CI の APK を入れた端末には上書�
 
 ### GitHub の Secrets
 
-リポジトリの Settings → Secrets and variables → Actions に 4 つ登録する
+リポジトリの Settings → Secrets and variables → Actions に 4 つ（プッシュ通知も使うなら 5 つ）登録する
 （リポジトリは public だが、Secrets はフォークの PR からは読めない。リリースの job は
 タグ push / 手動実行 = 書き込み権限のある人の操作でしか動かない）。
 
@@ -304,6 +361,7 @@ CI の APK より番号が小さく、CI の APK を入れた端末には上書�
 | `ANDROID_KEYSTORE_PASSWORD` | keystore のパスワード |
 | `ANDROID_KEY_ALIAS` | エイリアス（例: `comic-laz`） |
 | `ANDROID_KEY_PASSWORD` | 鍵のパスワード（PKCS12 なら keystore と同じ） |
+| `GOOGLE_SERVICES_JSON` | 任意。`google-services.json` の中身（プッシュ通知 #14。無ければ通知の使えない APK になる） |
 
 パスワードは前後の空白も含めてそのまま使われる（貼り付けで末尾に空白や改行を足さない）。
 

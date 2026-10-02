@@ -5,12 +5,15 @@ import 'package:comic_laz/core/device/app_resume_monitor.dart';
 import 'package:comic_laz/core/device/connectivity_monitor.dart';
 import 'package:comic_laz/core/device/device_name_resolver.dart';
 import 'package:comic_laz/core/device/device_protection.dart';
+import 'package:comic_laz/core/device/notification_permission_log.dart';
 import 'package:comic_laz/core/session/session_data_purger.dart';
 import 'package:comic_laz/core/session/session_purge_journal.dart';
+import 'package:comic_laz/core/session/sign_out_hook.dart';
 import 'package:comic_laz/core/storage/install_marker.dart';
 import 'package:comic_laz/core/storage/storage_protection.dart';
 import 'package:comic_laz/core/widgets/thumbnail_image.dart';
 import 'package:comic_laz/data/api/books_api.dart';
+import 'package:comic_laz/data/api/device_token_api.dart';
 import 'package:comic_laz/data/api/taxonomy_api.dart';
 import 'package:comic_laz/data/api/user_api.dart';
 import 'package:comic_laz/features/auth/application/auth_controller.dart';
@@ -29,6 +32,9 @@ import 'package:comic_laz/features/downloads/domain/volume_download.dart';
 import 'package:comic_laz/features/library/data/library_repository.dart';
 import 'package:comic_laz/features/offline/application/offline_metadata_gateway.dart';
 import 'package:comic_laz/features/progress/data/progress_store.dart';
+import 'package:comic_laz/features/push/data/foreground_notifier.dart';
+import 'package:comic_laz/features/push/data/push_messaging.dart';
+import 'package:comic_laz/features/push/data/push_settings_store.dart';
 import 'package:comic_laz/features/settings/application/theme_mode_setting.dart';
 import 'package:comic_laz/features/viewer/presentation/widgets/viewer_page_image.dart';
 import 'package:flutter/widgets.dart';
@@ -41,6 +47,7 @@ import 'auth_fakes.dart';
 import 'device_fakes.dart';
 import 'download_fakes.dart';
 import 'progress_fakes.dart';
+import 'push_fakes.dart';
 import 'settings_fakes.dart';
 import 'storage_fakes.dart';
 
@@ -75,6 +82,12 @@ List<Override> testOverrides({
   DeviceProtection? deviceProtection,
   InstallMarker? installMarker,
   ThemeModeStore? themeModeStore,
+  PushMessaging? pushMessaging,
+  ForegroundNotifier? foregroundNotifier,
+  PushSettingsStore? pushSettingsStore,
+  DeviceTokenApi? deviceTokenApi,
+  NotificationPermissionLog? notificationPermissionLog,
+  List<SignOutHook>? signOutHooks,
   String apiBaseUrl = 'http://localhost:8000',
 }) {
   return [
@@ -180,6 +193,29 @@ List<Override> testOverrides({
     themeModeStoreProvider.overrideWithValue(
       themeModeStore ?? InMemoryThemeModeStore(),
     ),
+    // プッシュ通知（#14）。Firebase と flutter_local_notifications はチャネル、
+    // 設定と控えは drift、登録は通信。既定は「このビルドでは使えない」
+    // （設定ファイルの無いビルドと同じ）にして、ログイン / ログアウトのたびに
+    // 登録の処理を走らせない。
+    pushMessagingProvider.overrideWithValue(
+      pushMessaging ?? FakePushMessaging(),
+    ),
+    foregroundNotificationsProvider.overrideWithValue(
+      foregroundNotifier ?? FakeForegroundNotifier(),
+    ),
+    pushSettingsStoreProvider.overrideWithValue(
+      pushSettingsStore ?? InMemoryPushSettingsStore(),
+    ),
+    deviceTokenApiProvider.overrideWithValue(
+      deviceTokenApi ?? FakeDeviceTokenApi(),
+    ),
+    // 通知の許可を求めたかの記録（ダウンロードと共有。drift）。
+    notificationPermissionLogProvider.overrideWithValue(
+      notificationPermissionLog ?? InMemoryNotificationPermissionLog(),
+    ),
+    // ログアウト前のフックは既定で本物（プッシュ通知の解除。上のフェイクで動く）。
+    if (signOutHooks != null)
+      signOutHooksProvider.overrideWithValue(signOutHooks),
   ];
 }
 
@@ -218,6 +254,12 @@ ProviderContainer createContainer({
   AppResumeMonitor? appResumeMonitor,
   InstallMarker? installMarker,
   ThemeModeStore? themeModeStore,
+  PushMessaging? pushMessaging,
+  ForegroundNotifier? foregroundNotifier,
+  PushSettingsStore? pushSettingsStore,
+  DeviceTokenApi? deviceTokenApi,
+  NotificationPermissionLog? notificationPermissionLog,
+  List<SignOutHook>? signOutHooks,
   List<Override> overrides = const [],
 }) {
   return ProviderContainer(
@@ -246,6 +288,12 @@ ProviderContainer createContainer({
         appResumeMonitor: appResumeMonitor,
         installMarker: installMarker,
         themeModeStore: themeModeStore,
+        pushMessaging: pushMessaging,
+        foregroundNotifier: foregroundNotifier,
+        pushSettingsStore: pushSettingsStore,
+        deviceTokenApi: deviceTokenApi,
+        notificationPermissionLog: notificationPermissionLog,
+        signOutHooks: signOutHooks,
       ),
       // Riverpod 3 は同じプロバイダの二重 override を拒むので、testOverrides が
       // 既に差し替えているもの（appResumeMonitor など）は上の引数で渡す。

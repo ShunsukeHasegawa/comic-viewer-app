@@ -181,6 +181,18 @@ jobs:
             echo "keyPassword=$(esc "$ANDROID_KEY_PASSWORD")"
           } > android/key.properties
 
+      # プッシュ通知の Firebase 設定（#14）。リポジトリには置かないので Secrets から書き出す。
+      # 無くてもリリースは作る（その APK ではマイページの「新刊通知」が「使えません」になる）。
+      - name: Prepare Firebase config
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -z "$GOOGLE_SERVICES_JSON" ]; then
+            echo '::warning::GOOGLE_SERVICES_JSON がありません。この APK ではプッシュ通知を使えません（README の「プッシュ通知」）。'
+            exit 0
+          fi
+          printf '%s' "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -270,4 +282,4 @@ jobs:
 
       - name: Remove signing key
         if: always()
-        run: rm -f android/key.properties "$RUNNER_TEMP/release.jks"
+        run: rm -f android/key.properties "$RUNNER_TEMP/release.jks" android/app/google-services.json

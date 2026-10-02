@@ -52,3 +52,7 @@ app.*.map.json
 /android/key.properties
 *.jks
 *.keystore
+
+# プッシュ通知の Firebase 設定（#14）。公開リポジトリなので上げない（置き方は README）。
+/android/app/google-services.json
+/ios/Runner/GoogleService-Info.plist

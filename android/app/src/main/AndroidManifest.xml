@@ -8,6 +8,8 @@
          UIDT（priority 0）は使わない（背面の holding queue から予約できない）
          ので RUN_USER_INITIATED_JOBS は宣言しない。パッケージの receiver /
          provider / service はライブラリのマニフェストからマージされる。 -->
+    <!-- 新刊のプッシュ通知（#14）も同じ許可を使う（求めるのはどちらか先の 1 回だけ。
+         NotificationPermissionLog）。 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <!-- 転送を WorkManager の foreground（dataSync）で走らせる（#10）。
          通常の実行は 9 分で時間切れになり、パッケージが holding queue を
@@ -56,6 +58,21 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- プッシュ通知（#14）。アプリが背面 / 終了中に届いた FCM の通知は OS が出すので、
+             その見た目をここで決める。チャネルは Dart 側（LocalForegroundNotifier）が作る
+             「新刊のお知らせ」。前面で出す通知と同じチャネルにして、OS の設定で 1 つに見せる
+             （巻のダウンロードの進捗通知とは別のチャネル）。アイコンは白の単色
+             （tool/make_notification_icon.py で生成。ランチャーのアイコンは色付きで、
+             ステータスバーでは白い四角になる）。 -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="new_volumes" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_stat_notify" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_color"
+            android:resource="@color/notification_accent" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

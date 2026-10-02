@@ -9,6 +9,7 @@ import 'features/downloads/application/auto_delete_runner.dart';
 import 'features/downloads/application/download_queue.dart';
 import 'features/downloads/application/safe_mode_revalidator.dart';
 import 'features/progress/presentation/progress_sync_scope.dart';
+import 'features/push/application/push_notifications_controller.dart';
 import 'features/settings/application/theme_mode_setting.dart';
 
 /// アプリのルートウィジェット。
@@ -37,6 +38,9 @@ class _ComicLazAppState extends ConsumerState<ComicLazApp> {
     // 端末内データの保護（#15）。起動のたびに `.nomedia` とバックアップ除外を
     // 掛け直す（DB と転送の記録は画面に依らず作られるので、ここで起動時に走らせる）。
     ref.listen(storageProtectionProvider, (_, _) {});
+    // プッシュ通知（#14）。起動直後から動かす（通知を押して起動したときの遷移、
+    // 前面で届いた通知の表示、ログインに合わせたトークンの登録）。
+    ref.listen(pushNotificationsProvider, (_, _) {});
     // セーフモードが ON になった後の再検証（#15）。サーバーがもう配信しない巻を
     // 消したら、黙って消さずに知らせる。
     ref.listen(safeModeRevalidatorProvider, (previous, next) {

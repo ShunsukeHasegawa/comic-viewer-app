@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- プッシュ通知（#14）。colors.xml は flutter_launcher_icons が書き換えるので分ける。 -->
+<resources>
+    <!-- 通知の小さいアイコンの色（AppColors.brand / LocalForegroundNotifier.accentColor と同じ）。 -->
+    <color name="notification_accent">#244C60</color>
+</resources>

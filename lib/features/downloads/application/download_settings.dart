@@ -1,6 +1,7 @@
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../../../core/device/network_kind_monitor.dart';
+import '../../../core/device/notification_permission_log.dart';
 import '../../../core/storage/app_database.dart';
 
 part 'download_settings.g.dart';
@@ -12,8 +13,11 @@ class DownloadSettingsStore {
   static const wifiOnlyKey = 'downloads.wifi_only';
 
   /// 通知の許可を一度求めたか。
+  ///
+  /// プッシュ通知（#14）と共有する記録（`NotificationPermissionLog`）。
+  /// どちらかが求めたら、もう片方は自動では聞かない（二重に聞かない）。
   static const notificationPermissionRequestedKey =
-      'downloads.notification_permission_requested';
+      DriftNotificationPermissionLog.requestedKey;
 
   final AppDatabase _database;
 
