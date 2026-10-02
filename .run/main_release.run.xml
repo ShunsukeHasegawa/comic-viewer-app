@@ -1,0 +1,9 @@
+<component name="ProjectRunConfigurationManager">
+  <!-- 普段使いのリリース版（key.properties の鍵で署名）を Android Studio から入れる（#16）。
+       通常の main.dart（開発版）は com.lazgram.comic_laz.debug として別アプリで入る。 -->
+  <configuration default="false" name="main.dart (release)" type="FlutterRunConfigurationType" factoryName="Flutter">
+    <option name="additionalArgs" value="--release" />
+    <option name="filePath" value="$PROJECT_DIR$/lib/main.dart" />
+    <method v="2" />
+  </configuration>
+</component>

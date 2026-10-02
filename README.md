@@ -252,6 +252,16 @@ Light / Dark 両対応で、テーマは OS 設定に従う。
 R8（コード縮小）は切っている（`android/app/build.gradle.kts` のコメント）。
 `background_downloader` が keep ルールを持たず、release だけで転送が壊れうるため。
 
+### 開発版とリリース版
+
+開発版（debug）は**別アプリ**として入る（アプリ ID `com.lazgram.comic_laz.debug`、名前「Comic LAZ Dev」）。
+署名の違うリリース版と同じ ID だと、切り替えるたびにアンインストールが要り、普段使いの
+ダウンロード済みの巻が消えるため。ログイン・ダウンロードは別々に持つ。
+
+Android Studio では、実行構成 **`main.dart (release)`**（`.run/main_release.run.xml`）を
+選んで実行すると、`key.properties` の鍵で署名したリリース版が入る。通常の `main.dart`
+は開発版（ホットリロード可）。
+
 ### 手元でリリースビルド
 
 Windows でユーザー名に日本語が入っている場合、pub のキャッシュと一時ディレクトリを

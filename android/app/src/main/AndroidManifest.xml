@@ -23,7 +23,7 @@
          バックアップ / 端末間転送は全部外す（#15。理由は data_extraction_rules.xml）。
          dataExtractionRules は Android 12 以上、fullBackupContent は 11 以下の保険。 -->
     <application
-        android:label="Comic LAZ"
+        android:label="${appName}"
         android:name=".ComicLazApplication"
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"

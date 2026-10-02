@@ -90,6 +90,8 @@ android {
         // バージョニングの方針は README の「バージョニング」。
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        // ホームに出る名前。開発版は buildTypes.debug で上書きする。
+        manifestPlaceholders["appName"] = "Comic LAZ"
     }
 
     signingConfigs {
@@ -115,6 +117,13 @@ android {
     }
 
     buildTypes {
+        // 開発版は別アプリとして入れる（#16）。同じアプリ ID のままだと、署名の違う
+        // リリース版と開発版を切り替えるたびにアンインストールが要り、普段使いの
+        // リリース版のダウンロード済みの巻が消える。ID と名前を分けて並べて置く。
+        debug {
+            applicationIdSuffix = ".debug"
+            manifestPlaceholders["appName"] = "Comic LAZ Dev"
+        }
         release {
             signingConfig =
                 if (hasReleaseKeystore) {
