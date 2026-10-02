@@ -1,0 +1,15 @@
+# リリース署名の設定（#16）。このファイルを android/key.properties にコピーして値を入れる。
+# android/key.properties は git 管理外（.gitignore）。絶対にコミットしない。
+#
+# - storeFile は keystore のパス。相対パスは android/ から。
+#   keystore はリポジトリの外に置く（例: C:/Keys/comic-laz-release.jks）。
+#   Windows でも区切りは / を使う（\ はエスケープ文字として読まれる。使うなら \\）。
+# - パスワードに \ を含むときは \\ と書く。パスワードの末尾の空白はそのまま使われる
+#   （行末に余計な空白を残さない）。先頭を空白にするときは前に \ を付ける（例: \ pass）。
+#   storeFile / keyAlias の前後の空白は無視される。
+# - 文字コードは UTF-8（日本語を含むパスでも可）。
+# - ファイルが無い場合、release ビルドは debug 鍵で署名される（手元の確認用。警告が出る）。
+storeFile=C:/Keys/comic-laz-release.jks
+storePassword=CHANGE_ME
+keyAlias=comic-laz
+keyPassword=CHANGE_ME

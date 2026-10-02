@@ -46,3 +46,9 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# リリース署名の鍵（#16）。android/.gitignore にもあるが、keystore を
+# リポジトリのどこに置いても上がらないように root でも止める。
+/android/key.properties
+*.jks
+*.keystore

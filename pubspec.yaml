@@ -40,7 +40,10 @@ dependencies:
 dev_dependencies:
   build_runner: ^2.16.1
   drift_dev: ^2.35.0
+  # ランチャーアイコン / 起動スプラッシュの生成（#16。設定は末尾）
+  flutter_launcher_icons: ^0.14.4
   flutter_lints: ^6.0.0
+  flutter_native_splash: ^2.4.8
   flutter_test:
     sdk: flutter
   freezed: ^4.0.2
@@ -50,3 +53,63 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    # SplashScreen（トークン検証中の画面）。ネイティブのスプラッシュと同じ絵を
+    # 同じ大きさで出し、切り替わりで絵が跳ねないようにする（#16）。
+    # assets/branding/ を丸ごと登録しない（生成元の大きな PNG まで同梱されるため）。
+    - assets/branding/splash_logo.png
+
+# ---------------------------------------------------------------------------
+# ブランディング（#16）。絵を差し替えたら次の 2 つを流し直す（生成物はコミットする）:
+#   TMP='C:\Temp\claude-dart' TEMP='C:\Temp\claude-dart' dart run flutter_launcher_icons
+#   TMP='C:\Temp\claude-dart' TEMP='C:\Temp\claude-dart' dart run flutter_native_splash:create
+#
+# assets/branding/ の絵（icon-512x512.png 以外は `python tool/make_branding.py .` で
+# 作り直せる。Pillow が要る）:
+#   icon-512x512.png       Web 版の PWA アイコン（comic-viewer の frontend/public）そのもの
+#   icon_foreground.png    上の吹き出しだけを透過で切り出し、アダプティブアイコンの
+#                          安全領域（108dp 中の直径 66dp の円）に収めたもの
+#   icon_monochrome.png    同じ形の白シルエット（文字は抜き）。Android 13 のテーマアイコン用
+#   splash_android12.png   吹き出しを 288dp の枠の直径 180dp の円に収めたもの（円で切られる）
+#   splash_logo.png        吹き出しだけ。154dp 幅（xxxhdpi 換算）で Android 12 と同じ大きさ
+#   splash_logo_ios.png    同じ大きさの @3x 版（ツールが iOS は @3x として扱うため）
+# ---------------------------------------------------------------------------
+
+flutter_launcher_icons:
+  # 既存の ic_launcher を上書きする（マニフェストの参照を変えないため）
+  android: true
+  ios: true
+  # Web 版のアイコンは四隅まで teal で塗られた正方形なので、レガシー（Android 7 以下）と
+  # iOS（OS が角を丸める）はそのまま使う。
+  image_path: assets/branding/icon-512x512.png
+  remove_alpha_ios: true
+  background_color_ios: "#244C60"
+  # Android 8 以上はランチャーが円 / 角丸などで切り抜く。正方形のアイコンをそのまま
+  # 前景にすると吹き出しの角が欠けるので、安全領域に収めた前景 + 単色の背景にする。
+  adaptive_icon_background: "#244C60"
+  adaptive_icon_foreground: assets/branding/icon_foreground.png
+  adaptive_icon_monochrome: assets/branding/icon_monochrome.png
+  # 既定の 16% の inset を足すと二重に縮む（前景の絵で余白を取り済み）
+  adaptive_icon_foreground_inset: 0
+  web:
+    generate: false
+  windows:
+    generate: false
+  macos:
+    generate: false
+
+flutter_native_splash:
+  # ブランドカラー（AppColors.brand / AppColors.darkBackground と同じ）。
+  # 起動直後に白い画面が一瞬出ないよう、Flutter 側の SplashScreen も同じ色にしている。
+  color: "#244C60"
+  color_dark: "#0a0f1a"
+  image: assets/branding/splash_logo.png
+  image_ios: assets/branding/splash_logo_ios.png
+  android_gravity: center
+  ios_content_mode: center
+  # Android 12 以上は OS のスプラッシュ API（上の設定は効かない）
+  android_12:
+    color: "#244C60"
+    color_dark: "#0a0f1a"
+    image: assets/branding/splash_android12.png
+  web: false

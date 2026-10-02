@@ -166,7 +166,200 @@ Light / Dark 両対応で、テーマは OS 設定に従う。
 `.github/workflows/ci.yml`
 
 - `analyze-and-test`: 生成コードの差分チェック → `dart format` → `flutter analyze` → `flutter test`
-- `build-android`: `flutter build apk --debug`
+- `build-android`: `flutter build apk --debug`（push / PR のとき）
+- `release-android`: 署名済みのリリース APK（`v*` のタグ push と手動実行のときだけ。
+  `analyze-and-test` が通ってから動く）。詳細は次の「リリース」
+
+## リリース（Android APK の直接配布。#16）
+
+配布は **APK の直接配布**だけ（個人用途。Google Play / TestFlight は使わない。iOS は対象外）。
+
+- アプリ ID は `com.lazgram.comic_laz` のまま変えない（変えると別アプリとして入り、
+  ダウンロード済みの巻を引き継げない）
+- 通信は HTTPS 前提（巻の ZIP のバックグラウンド転送は http では動かない）
+- 対応 OS は **Android 7.0（API 24）以上**（`minSdk` は Flutter の既定に従う。
+  数値で固定すると Flutter が既定を上げたときにビルドが壊れるため）
+- アプリ名は「Comic LAZ」。アイコン / スプラッシュは Web 版の PWA アイコンとブランドカラー
+  （teal `#244C60` / ダーク `#0a0f1a`）から生成している（作り直し方は `pubspec.yaml` 末尾のコメント）
+
+### バージョニング
+
+`pubspec.yaml` の `version: x.y.z+build` の形。
+
+| 部分 | 意味 | 決め方 |
+| --- | --- | --- |
+| `x.y.z`（versionName） | 人が見る版 | 互換を切る変更（端末内データの作り直しなど）で `x`、機能追加で `y`、修正だけなら `z` を上げる |
+| `build`（versionCode） | Android が上書きの可否を決める整数 | **CI の `github.run_number`**（`ci.yml` の実行回数。単調増加） |
+
+- リリースの版は**タグが正**（`v1.2.3` → versionName `1.2.3`）。タグを打つ前に `pubspec.yaml` の
+  `x.y.z` を同じ値に上げてコミットする（違うと CI が警告を出し、APK にはタグの値を使う）
+- `pubspec.yaml` の `+build` は手元のビルド用で、CI では使わない
+- Android は versionCode が**下がる**上書きインストールを拒否する。CI の APK を入れた端末に
+  手元の release ビルドを上書きしたいときは `--build-number` をそれより大きくする
+- `.github/workflows/ci.yml` のファイル名を変えない（`run_number` が 1 からやり直しになり、
+  以降の APK が「古い版」として上書きできなくなる）
+- `v1.2.0-rc.1` のようなタグは GitHub Release の pre-release になる
+
+### リリース署名（keystore）
+
+署名鍵は**一度作ったら変えない**。鍵が変わると上書きインストールできず、アンインストール
+（= ダウンロード済みの巻・まだ送れていない読書位置が消える）が必要になる。
+
+1. keystore を作る（自分で実行する。JDK 17 の `keytool`。Android Studio 同梱なら
+   `"C:\Program Files\Android\Android Studio\jbr\bin\keytool.exe"`）。
+
+   ```sh
+   # 1 行のまま PowerShell / bash のどちらでも動く。パスワードと名前は対話で入力する
+   keytool -genkeypair -v -storetype PKCS12 -keyalg RSA -keysize 4096 -validity 10000 -keystore C:/Keys/comic-laz-release.jks -alias comic-laz
+   ```
+
+   `-validity 10000`（約 27 年）は鍵の有効期限。切れると更新版を出せないので長く取る。
+
+   PKCS12 では鍵のパスワードは keystore のパスワードと同じになる
+   （`storePassword` と `keyPassword` に同じ値を入れる）。
+
+   パスワードの先頭・末尾には空白を使わない方が安全（key.properties や Secrets に
+   貼るときに紛れ込んだ / 落ちた空白に気づけず、署名が「password was incorrect」で
+   失敗する）。使った場合の書き方は手順 3。
+
+2. 置き場所と控え
+   - keystore は**リポジトリの外**に置く（例: `C:\Keys\`）。`.gitignore` で `*.jks` /
+     `*.keystore` / `android/key.properties` は止めているが、そもそも置かない
+   - **必ず控えを取る**: keystore ファイルとパスワード・エイリアスを、パスワードマネージャ
+     と別の媒体（USB メモリ / クラウドストレージ）の 2 か所以上に。失うと以後のリリースを
+     同じアプリとして更新できない（アンインストールしてダウンロードし直すしかない）
+
+3. `android/key.properties.example` を `android/key.properties` にコピーして値を入れる。
+
+   ```properties
+   storeFile=C:/Keys/comic-laz-release.jks
+   storePassword=（keystore のパスワード）
+   keyAlias=comic-laz
+   keyPassword=（同じパスワード）
+   ```
+
+   - `storeFile` の相対パスは `android/` から。Windows でも区切りは `/`
+     （`\` はエスケープ文字として読まれる。使うなら `\\`）。パスワード中の `\` も `\\`
+   - パスワードの前後の空白は削らずにそのまま使う（行末に余計な空白を残さない）。
+     先頭が空白のパスワードは前に `\` を付ける（例: `storePassword=\ pass`）。
+     CI は Secrets の値をこの形に直して書く
+   - 文字コードは UTF-8（日本語を含むパス可。BOM 付きでも読める）
+
+`android/key.properties` が**無い**とき、release ビルドは **debug 鍵で署名**される
+（Gradle が警告を出す。手元で release の挙動を見るためだけのもの）。この APK は
+リリース署名の APK と上書きできないので配らない。CI のリリースビルドは鍵が無ければ失敗する。
+
+R8（コード縮小）は切っている（`android/app/build.gradle.kts` のコメント）。
+`background_downloader` が keep ルールを持たず、release だけで転送が壊れうるため。
+
+### 手元でリリースビルド
+
+Windows でユーザー名に日本語が入っている場合、pub のキャッシュと一時ディレクトリを
+ASCII のパスにしないと失敗する（`build_runner` と同じ理由）。TMP / TEMP に指定する
+ディレクトリは**先に作っておく**（無いと一時ファイルを作れずビルドが失敗する）。
+
+```powershell
+# PowerShell
+New-Item -ItemType Directory -Force C:\Temp\dart | Out-Null
+$env:PUB_CACHE = 'C:\PubCache'
+$env:TMP = 'C:\Temp\dart'; $env:TEMP = 'C:\Temp\dart'
+flutter build apk --release
+```
+
+```sh
+# Git Bash
+mkdir -p /c/Temp/dart
+PUB_CACHE='C:\PubCache' TMP='C:\Temp\dart' TEMP='C:\Temp\dart' flutter build apk --release
+```
+
+成果物は `build/app/outputs/flutter-apk/app-release.apk`。
+本番以外の API に向けるときは「実行」と同じ `--dart-define` を付ける。
+
+### GitHub の Secrets
+
+リポジトリの Settings → Secrets and variables → Actions に 4 つ登録する
+（リポジトリは public だが、Secrets はフォークの PR からは読めない。リリースの job は
+タグ push / 手動実行 = 書き込み権限のある人の操作でしか動かない）。
+
+| 名前 | 値 |
+| --- | --- |
+| `ANDROID_KEYSTORE_BASE64` | keystore ファイルを base64 にしたもの |
+| `ANDROID_KEYSTORE_PASSWORD` | keystore のパスワード |
+| `ANDROID_KEY_ALIAS` | エイリアス（例: `comic-laz`） |
+| `ANDROID_KEY_PASSWORD` | 鍵のパスワード（PKCS12 なら keystore と同じ） |
+
+パスワードは前後の空白も含めてそのまま使われる（貼り付けで末尾に空白や改行を足さない）。
+
+`gh` で登録する場合（値を画面やファイルに残さない）:
+
+```powershell
+# PowerShell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes('C:\Keys\comic-laz-release.jks')) |
+  gh secret set ANDROID_KEYSTORE_BASE64
+gh secret set ANDROID_KEYSTORE_PASSWORD   # 対話で入力
+gh secret set ANDROID_KEY_ALIAS
+gh secret set ANDROID_KEY_PASSWORD
+```
+
+```sh
+# bash（macOS の base64 は -w が無いので `base64 -i <file>`）
+base64 -w 0 C:/Keys/comic-laz-release.jks | gh secret set ANDROID_KEYSTORE_BASE64
+```
+
+Web の画面で登録する場合は、上の base64 の出力をクリップボード経由で貼る
+（PowerShell なら `| Set-Clipboard`）。
+
+### リリースの手順
+
+1. `pubspec.yaml` の `version` の `x.y.z` を上げて master にコミット・push（CI が通ること）
+2. タグを打って push する
+
+   ```sh
+   git tag v1.2.3
+   git push origin v1.2.3
+   ```
+
+3. CI の `release-android` が署名済み APK（`comic-laz-1.2.3-build.<run_number>.apk`）を作り、
+   - Actions の成果物（Artifacts）に上げる
+   - **GitHub Release `v1.2.3` を下書き（draft）で作って添付する**（リポジトリは public だが、
+     下書きは自分にしか見えない。個人用の APK を誰でも落とせる状態にしないため。
+     公開したいときだけ GitHub 上で手で公開する）
+4. job の Summary に出る**署名証明書の SHA-256** が前回と同じか確かめる
+   （違うと上書きインストールできない）
+
+タグを打たずに APK だけ欲しいときは、Actions → CI → Run workflow（手動実行）。
+版は `pubspec.yaml` の `x.y.z`、成果物は Artifacts にだけ上がる（Release は作らない）。
+
+### 端末へのインストール
+
+- **端末で直接**: 端末のブラウザで GitHub にログインし、Release（下書き）のページから APK を
+  ダウンロードして開く。
+  初回は「不明なアプリのインストール」の許可を求められるので、そのブラウザ（または
+  ファイルマネージャ）に許可する（設定 → アプリ → 特別なアプリアクセス →
+  不明なアプリのインストール）。Play プロテクトの警告が出たら「詳細」→「このままインストール」
+- **PC から adb**: 端末の開発者向けオプションで USB デバッグを有効にして
+
+  ```sh
+  adb install -r comic-laz-1.2.3-build.42.apk   # -r: データを残したまま上書き
+  ```
+
+  `INSTALL_FAILED_UPDATE_INCOMPATIBLE` は署名鍵が違う（次の項）、
+  `INSTALL_FAILED_VERSION_DOWNGRADE` は versionCode が下がっている。
+
+### 一度だけ: debug 署名版からの切り替え
+
+これまで入れていた `flutter run` / CI の debug APK は debug 鍵で署名されているので、
+リリース署名の APK を**上書きできない**。**最初の 1 回だけアンインストールが必要**で、
+端末内のデータ（ダウンロード済みの巻・オフライン用の情報・画像キャッシュ・ログイン）は消える。
+
+1. 切り替える前に、オンラインの状態でアプリを開いて読書位置を送り切っておく
+   （まだ送れていない読書位置はサーバーにも無いので、消えると戻らない）
+2. アンインストールする（`adb uninstall com.lazgram.comic_laz` か端末の設定から）
+3. リリース APK を入れてログインし、読みたい巻をダウンロードし直す
+
+以後は同じ鍵で署名した APK を上書きするだけでデータは残る。なお、リリース版を入れた
+端末に `flutter run`（debug 鍵）で入れ直すと同じ理由で失敗する（開発は別の端末か
+エミュレータで行う）。
 
 ## 進め方
 

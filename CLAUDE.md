@@ -142,6 +142,31 @@ test/         lib と同じ構成。共通フェイクは test/support/
   nsurlsessiond の一時ファイルは OS 管理。SQLite の削除済みページは VACUUM
   まで残りうる。圏外起動中の `safe_mode` 変更は次にサーバーへ届くまで気づけない。
 
+## リリース（#16。手順の詳細は README の「リリース」）
+
+- 配布は Android の **APK 直接配布だけ**（Play / TestFlight / iOS は対象外）。
+  `applicationId` は `com.lazgram.comic_laz` から変えない。
+- 署名は `android/key.properties`（git 管理外。書式は `android/key.properties.example`）。
+  無ければ release は debug 鍵で署名し警告する（手元確認用）。CI は
+  `COMIC_LAZ_REQUIRE_RELEASE_SIGNING=true` で鍵が無ければ失敗させ、`apksigner` で
+  debug 署名でないことも確かめる。**keystore やパスワードを作らない / コミットしない**
+  （作るのはユーザー。鍵が変わると上書きできず、入れ直しでダウンロードが消える）。
+- R8 / リソース縮小は**切ったまま**にする（`background_downloader` が keep ルールを
+  持たず、release だけで転送が壊れうる。有効にするなら実機で転送を確かめてから）。
+- バージョン: versionName はタグ（`v1.2.3`）、versionCode は `ci.yml` の
+  `github.run_number`。`ci.yml` のファイル名を変えない（versionCode が巻き戻る）。
+- リリースの job は `ci.yml` の `release-android`（`v*` タグ / 手動実行。Secrets は
+  `ANDROID_KEYSTORE_BASE64` / `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_ALIAS` /
+  `ANDROID_KEY_PASSWORD`）。
+- `minSdk` は `flutter.minSdkVersion`（現在 24）のまま数値で固定しない。
+- アイコン / スプラッシュは `assets/branding/` の絵から生成する（設定は `pubspec.yaml` 末尾）。
+  絵を変えたら `python tool/make_branding.py .` → TMP / TEMP を ASCII にして
+  `dart run flutter_launcher_icons` と `dart run flutter_native_splash:create`。
+  ツールは `ios/Runner.xcodeproj/project.pbxproj`（`ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS`）
+  と `Info.plist`（全体の字下げ・`UIStatusBarHidden`）を書き換えるので戻し、CRLF だった
+  ファイルの改行も戻す。Flutter の `SplashScreen` はネイティブと同じ色・同じ大きさの
+  ロゴにしてある（`test/features/auth/splash_screen_test.dart` が食い違いを止める）。
+
 ## サーバー API（comic-viewer）で確認済みの事実
 
 - `/api/books` は **`data` ラップ無しの配列**（静的 JSON 配信・ETag + must-revalidate）。

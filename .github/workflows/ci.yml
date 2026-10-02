@@ -3,11 +3,18 @@ name: CI
 on:
   push:
     branches: [master]
+    # リリース（#16）。v1.2.3 の形のタグで署名済み APK を作り、GitHub Release に添付する。
+    tags: ['v*']
   pull_request:
+  # 手動のリリースビルド（タグを打たずに署名済み APK だけ欲しいとき）。
+  # バージョン名は pubspec.yaml から取り、GitHub Release は作らない。
+  workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # 手動実行で同じブランチの push の CI を止めないよう、イベントでも分ける。
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  # リリース（タグ / 手動）は途中で止めない（Release への添付が半端に終わるため）。
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') }}
 
 env:
   FLUTTER_VERSION: 3.47.5
@@ -49,6 +56,8 @@ jobs:
         run: flutter test
 
   build-android:
+    # リリースの回は release-android が同じ確認（Android のビルドが通るか）を兼ねる。
+    if: github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,3 +81,187 @@ jobs:
 
       - name: Build debug APK
         run: flutter build apk --debug
+
+  # 署名済みのリリース APK（#16）。v* のタグ push と手動実行のときだけ動く。
+  # 鍵は GitHub の Secrets から取り、無ければ失敗させる（debug 署名の APK を
+  # リリースとして出さないため。鍵が違うと上書きインストールできない）。
+  release-android:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    # 壊れたコミットにタグを打ってもリリースを作らない。
+    needs: analyze-and-test
+    runs-on: ubuntu-latest
+    permissions:
+      # GitHub Release の作成 / APK の添付に要る。
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          # バージョン名: タグがあればタグ（v1.2.3 → 1.2.3）、手動実行なら pubspec.yaml。
+          # ビルド番号（versionCode）: この workflow の run_number。単調増加なので
+          # 上書きインストールが「古い版」と言われない（ci.yml の名前を変えると 1 から
+          # やり直しになるので変えない）。
+          pubspec_name=$(sed -nE 's/^version:[[:space:]]*([^+[:space:]]+).*/\1/p' pubspec.yaml)
+          if [ -z "$pubspec_name" ]; then
+            echo '::error::pubspec.yaml の version を読めません。'
+            exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" = 'tag' ]; then
+            tag="$GITHUB_REF_NAME"
+            if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::タグ $tag はバージョンの形（v1.2.3 / v1.2.3-rc.1）ではありません。"
+              exit 1
+            fi
+            build_name="${tag#v}"
+            if [ "$build_name" != "$pubspec_name" ]; then
+              echo "::warning::タグ ($build_name) と pubspec.yaml の version ($pubspec_name) が違います。APK にはタグの値を使います。次のリリースまでに pubspec.yaml を揃えてください。"
+            fi
+            case "$build_name" in
+              *-*) prerelease=true ;;
+              *) prerelease=false ;;
+            esac
+          else
+            build_name="$pubspec_name"
+            prerelease=false
+          fi
+          {
+            echo "build_name=$build_name"
+            echo "build_number=$GITHUB_RUN_NUMBER"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "version: $build_name+$GITHUB_RUN_NUMBER"
+
+      - name: Prepare signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          missing=''
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              missing="$missing $name"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::リリース署名の Secrets がありません:$missing（README の「GitHub の Secrets」を参照）。debug 署名の APK はリリースとして作りません。"
+            exit 1
+          fi
+
+          keystore="$RUNNER_TEMP/release.jks"
+          # 改行入りで貼られた base64 も読めるように -i（改行・空白を無視）を付ける。
+          if ! printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode -i > "$keystore" || [ ! -s "$keystore" ]; then
+            echo '::error::ANDROID_KEYSTORE_BASE64 を base64 として読めません。'
+            exit 1
+          fi
+
+          # Properties 形式なので \ はエスケープ文字として読まれる。値に \ が
+          # 含まれても元の値になるよう \\ にしてから書く。先頭の空白 / タブは
+          # Properties.load が読み飛ばすので、前に \ を付けて残す（Gradle 側も
+          # パスワードの前後の空白は削らない。削れると別のパスワードとして渡り、
+          # 「password was incorrect」としか言われず原因を追えない）。
+          # （外部コマンドにしない。$(...) の中の失敗は set -e でも止まらず、空の
+          # パスワードが黙って書かれるため）
+          esc() {
+            local bs='\'
+            local v="${1//"$bs"/"$bs$bs"}"
+            case "$v" in
+              ' '* | $'\t'*) v="$bs$v" ;;
+            esac
+            printf '%s' "$v"
+          }
+          umask 077
+          {
+            echo "storeFile=$keystore"
+            echo "storePassword=$(esc "$ANDROID_KEYSTORE_PASSWORD")"
+            echo "keyAlias=$(esc "$ANDROID_KEY_ALIAS")"
+            echo "keyPassword=$(esc "$ANDROID_KEY_PASSWORD")"
+          } > android/key.properties
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      # 生成コードはコミット済みのものを使う（タグの時点の内容をそのまま出すため。
+      # 古くないことは analyze-and-test が確かめている）。
+      - name: Build release APK
+        env:
+          # key.properties が無ければ Gradle 側でも止める（二重の保険）。
+          COMIC_LAZ_REQUIRE_RELEASE_SIGNING: 'true'
+        run: >-
+          flutter build apk --release
+          --build-name=${{ steps.version.outputs.build_name }}
+          --build-number=${{ steps.version.outputs.build_number }}
+
+      - name: Verify release signature
+        id: apk
+        run: |
+          apk=build/app/outputs/flutter-apk/app-release.apk
+          build_tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
+          certs=$("$build_tools/apksigner" verify --print-certs "$apk")
+          echo "$certs"
+          # 何かの拍子に debug 鍵で署名されていたら出さない。パイプにしないのは、
+          # pipefail 下で grep -q が先に終わると printf が SIGPIPE で失敗扱いになり、
+          # 見つけたのに素通りしうるため。
+          if grep -q 'CN=Android Debug' <<< "$certs"; then
+            echo '::error::APK が debug 鍵で署名されています。'
+            exit 1
+          fi
+          # + は Release の添付名で別の文字に置き換えられうるので使わない。
+          name="comic-laz-${{ steps.version.outputs.build_name }}-build.${{ steps.version.outputs.build_number }}.apk"
+          mv "$apk" "build/app/outputs/flutter-apk/$name"
+          echo "path=build/app/outputs/flutter-apk/$name" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          {
+            echo "### $name"
+            echo
+            echo '署名証明書（前回のリリースと同じであること。違うと上書きインストールできない）:'
+            echo
+            echo '```'
+            grep -E 'certificate (DN|SHA-256 digest)' <<< "$certs" || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.apk.outputs.name }}
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          APK: ${{ steps.apk.outputs.path }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          # 再実行（Re-run）でも同じ Release に上書きで付け直す。
+          # リポジトリは公開なので、Release は**下書き**で作る（自分だけが見られる。
+          # 個人用の APK を誰でも落とせる状態にしない）。公開するなら GitHub 上で手で公開する。
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" "$APK" --clobber
+          else
+            flags='--draft'
+            if [ "$PRERELEASE" = 'true' ]; then
+              flags="$flags --prerelease"
+            fi
+            gh release create "$TAG" "$APK" --title "Comic LAZ $TAG" --generate-notes --verify-tag $flags
+          fi
+
+      - name: Remove signing key
+        if: always()
+        run: rm -f android/key.properties "$RUNNER_TEMP/release.jks"
