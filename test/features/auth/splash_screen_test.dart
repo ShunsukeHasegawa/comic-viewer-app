@@ -76,6 +76,18 @@ void main() {
     expect(image.width, SplashScreen.logoWidth);
   });
 
+  // OS のスプラッシュは絵を画面の真ん中に出す。Flutter 側がずれると、起動のたびに
+  // 絵が左上へ飛んで見える（実機で見つかった不具合）。
+  testWidgets('絵は画面の真ん中、スピナーはその真下に出す', (tester) async {
+    await pumpSplash(tester);
+
+    final screen = tester.getCenter(find.byType(Scaffold));
+    expect(tester.getCenter(find.byType(Image)), screen);
+    final spinner = tester.getCenter(find.byType(CircularProgressIndicator));
+    expect(spinner.dx, screen.dx);
+    expect(spinner.dy, greaterThan(screen.dy));
+  });
+
   group('pubspec.yaml の生成設定', () {
     final pubspec = File('pubspec.yaml').readAsStringSync();
 

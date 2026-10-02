@@ -31,22 +31,27 @@ class SplashScreen extends StatelessWidget {
       value: SystemUiOverlayStyle.light,
       child: Scaffold(
         backgroundColor: dark ? AppColors.darkBackground : AppColors.brand,
-        body: Stack(
-          alignment: Alignment.center,
-          children: [
-            Image.asset(
-              'assets/branding/splash_logo.png',
-              width: logoWidth,
-              semanticLabel: 'Comic LAZ',
-            ),
-            Transform.translate(
-              offset: const Offset(0, _spinnerOffset),
-              child: CircularProgressIndicator(
-                // 既定の primary（ライトは brand）だと背景と同じ色で見えない。
-                color: dark ? AppColors.brandLight : AppColors.onBrand,
+        // Scaffold の body は左上寄せのゆるい制約で置かれるので、そのままでは
+        // Stack が絵の大きさに縮み、絵とスピナーが左上に出る。画面いっぱいに
+        // 広げてから中央に置く（OS のスプラッシュの絵と同じ位置にするため）。
+        body: SizedBox.expand(
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              Image.asset(
+                'assets/branding/splash_logo.png',
+                width: logoWidth,
+                semanticLabel: 'Comic LAZ',
               ),
-            ),
-          ],
+              Transform.translate(
+                offset: const Offset(0, _spinnerOffset),
+                child: CircularProgressIndicator(
+                  // 既定の primary（ライトは brand）だと背景と同じ色で見えない。
+                  color: dark ? AppColors.brandLight : AppColors.onBrand,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
