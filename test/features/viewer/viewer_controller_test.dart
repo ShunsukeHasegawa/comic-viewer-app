@@ -319,6 +319,31 @@ void main() {
       );
     });
 
+    test('閉じた後に届いたページ移動は捨てる（落ちない・閉じたときの進捗を書き換えない）', () async {
+      // シークバーがドラッグ途中で外されたときの移動は次のフレームに回すので、
+      // その間にビューアごと閉じられて provider が破棄されていることがある。
+      final recorder = RecordingProgressRecorder();
+      final container = ProviderContainer(
+        overrides: [
+          ...testOverrides(booksApi: FakeBooksApi(readVolume: volumeFixture())),
+          progressRecorderProvider.overrideWithValue(recorder),
+        ],
+      );
+      addTearDown(container.dispose);
+      final sub = container.listen(viewerControllerProvider(340), (_, _) {});
+      await container.read(viewerControllerProvider(340).future);
+      final notifier = container.read(viewerControllerProvider(340).notifier);
+
+      sub.close();
+      await pumpEventQueue();
+      expect(container.exists(viewerControllerProvider(340)), isFalse);
+      recorder.saved.clear();
+
+      expect(() => notifier.setPage(4), returnsNormally);
+      await pumpEventQueue();
+      expect(recorder.saved, isEmpty);
+    });
+
     test('メニューの表示を切り替えられる', () async {
       final fixture = build();
       final notifier = fixture.container.read(

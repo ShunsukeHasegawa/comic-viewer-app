@@ -81,6 +81,8 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         _pageController.page?.round() ?? _pageController.initialPage;
     if (current == target) return;
     // 連続したページ送りでアニメーションが渋滞しないよう、離れている場合は飛ばす。
+    // アニメーションで送ると通り過ぎるページを全部組み立てて画像を要求する
+    // （シークバーで遠くへ飛んだときに途中のページを読まない。#18）。
     if ((current - target).abs() > 1) {
       _pageController.jumpToPage(target);
     } else {
@@ -295,6 +297,7 @@ class _ViewerBody extends StatelessWidget {
             bottom: 0,
             left: 0,
             right: 0,
+            // ドラッグ中は番号だけ動き、離したときに 1 回だけ呼ばれる（#18）。
             child: ViewerFooter(state: state, onSeek: controller.setPage),
           ),
         ],

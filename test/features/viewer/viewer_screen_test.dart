@@ -139,6 +139,115 @@ void main() {
     expect(stateOf(app.container).currentPage, greaterThan(1));
   });
 
+  group('シークバーで遠くへ飛ぶ（#18）', () {
+    /// ドラッグの途中（指を離す前）まで進める。
+    Future<TestGesture> dragHalfway(WidgetTester tester) async {
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byType(Slider)),
+      );
+      // RTL なので左へ動かすと先のページ。刻みごとにフレームを回す
+      // （実機のドラッグと同じく onChanged が何度も呼ばれる）。
+      for (var step = 0; step < 20; step++) {
+        await gesture.moveBy(const Offset(-10, 0));
+        await tester.pump();
+      }
+      return gesture;
+    }
+
+    String pathOf(int page) => '/books/view/340/$page';
+
+    testWidgets('ドラッグ中は番号だけ動き、途中のページを読み込まない', (tester) async {
+      // 刻みごとに移動すると、通り過ぎたページを全部（先読みの窓ごと）
+      // 自宅サーバーへ要求し、飛び先がその後ろに並んで表示が遅れる。
+      final app = await pumpViewer(tester, pageCount: 200);
+      await tapZone(tester, 0.5);
+      rendered.clear();
+      prefetched.clear();
+      app.recorder.saved.clear();
+
+      final gesture = await dragHalfway(tester);
+
+      expect(stateOf(app.container).currentPage, 1, reason: 'まだ移動しない');
+      expect(rendered, isEmpty, reason: '途中のページを組み立てない');
+      expect(prefetched, isEmpty, reason: '途中のページを先読みしない');
+      expect(app.recorder.saved, isEmpty, reason: '刻みごとに端末へ書かない');
+      expect(
+        find.textContaining(RegExp(r'^(?!1 / )\d+ / 201$')),
+        findsOneWidget,
+        reason: 'ドラッグ中の位置は番号で見せる',
+      );
+
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      final target = stateOf(app.container).currentPage;
+      expect(target, greaterThan(20), reason: '一気に遠くへ飛んでいる');
+      expect(find.text('$target / 201'), findsOneWidget);
+      // 元のページ（1）は移動の直前のフレームで組み立て直されるが、同じ画像なので
+      // 要求は増えない。間のページを 1 枚も通り過ぎないことを確かめる。
+      expect(
+        rendered.map((request) => request.url.path).toSet(),
+        containsAll([pathOf(target)]),
+      );
+      expect(
+        rendered.map((request) => request.url.path).toSet(),
+        everyElement(isIn([pathOf(1), pathOf(target)])),
+        reason: '飛び先だけを組み立てる（間のページを通り過ぎない）',
+      );
+      expect(app.recorder.saved.map((row) => row.currentPage), [target]);
+    });
+
+    testWidgets('ドラッグ中にメニューが閉じられても、見せていた番号へ移動する（黙って捨てない）', (tester) async {
+      // 別の指で中央をタップするとシークバーごと外れ、Slider は onChangeEnd を
+      // 呼ばない。以前は刻みごとに移動していたので、移動が消えるのは退行になる。
+      final app = await pumpViewer(tester, pageCount: 200);
+      await tapZone(tester, 0.5);
+      app.recorder.saved.clear();
+
+      final gesture = await dragHalfway(tester);
+      final shown = tester
+          .widget<Text>(find.textContaining(RegExp(r'^\d+ / 201$')))
+          .data!;
+      final draggedTo = int.parse(shown.split(' / ').first);
+      expect(draggedTo, greaterThan(1));
+      expect(stateOf(app.container).currentPage, 1, reason: 'まだ移動していない');
+
+      app.container.read(viewerControllerProvider(340).notifier).toggleMenu();
+      await tester.pumpAndSettle();
+      expect(find.byType(ViewerFooter), findsNothing);
+
+      expect(stateOf(app.container).currentPage, draggedTo);
+      expect(app.recorder.saved.map((row) => row.currentPage), [draggedTo]);
+
+      // 外れた後に指を離しても、二重に移動したり落ちたりしない。
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(stateOf(app.container).currentPage, draggedTo);
+    });
+
+    testWidgets('離したら飛び先を最初に要求し、先読みの窓を飛び先に置き直す', (tester) async {
+      await pumpViewer(tester, pageCount: 200);
+      await tapZone(tester, 0.5);
+      prefetched.clear();
+
+      final gesture = await dragHalfway(tester);
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ViewerScreen)),
+      );
+      final target = stateOf(container).currentPage;
+      expect(prefetched.map((request) => request.url.path), [
+        pathOf(target),
+        pathOf(target + 1),
+        pathOf(target + 2),
+        pathOf(target + 3),
+        pathOf(target - 1),
+      ], reason: '飛び先 → 周辺の順。元の位置（1-4）の周辺は要求し直さない');
+    });
+  });
+
   testWidgets('最終ページの次は巻末オーバーレイ', (tester) async {
     final app = await pumpViewer(tester);
 

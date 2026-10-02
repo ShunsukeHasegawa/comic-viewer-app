@@ -48,17 +48,47 @@ class ViewerHeader extends StatelessWidget {
 }
 
 /// ページ位置の表示とシークバー（RTL: 右が 1 ページ目）。
-class ViewerFooter extends StatelessWidget {
+///
+/// **ドラッグ中は表示（ページ番号）だけを動かし、離したときに 1 回だけ移動する**
+/// （#18。Web 版の `@input` / `@change` と同じ分担）。ドラッグの刻みごとに
+/// 移動すると、通り過ぎた途中のページを全部（先読みの窓ごと）自宅サーバーへ
+/// 要求し、飛び先のページがその後ろに並んで表示が遅れる。進捗の端末保存も
+/// 刻みごとに走る。
+class ViewerFooter extends StatefulWidget {
   const ViewerFooter({required this.state, required this.onSeek, super.key});
 
   final ViewerState state;
 
-  /// スライダー操作でのページ移動。
+  /// スライダーを離したときのページ移動（ドラッグの途中では呼ばない）。
   final ValueChanged<int> onSeek;
 
   @override
+  State<ViewerFooter> createState() => _ViewerFooterState();
+}
+
+class _ViewerFooterState extends State<ViewerFooter> {
+  /// ドラッグ中の位置。`null` ならドラッグしていない（状態のページを出す）。
+  int? _dragPage;
+
+  @override
+  void dispose() {
+    // メニューが閉じられる（ドラッグ中に別の指で中央をタップ）などで、ドラッグの
+    // 途中に外されると Slider は onChangeEnd を呼ばない（指を離した時点で
+    // 既に unmount 済みのため）。見せていた番号を黙って捨てないよう、外されたときに
+    // 最後の位置へ移動する。dispose の最中に provider を変えると、それを見ている
+    // ウィジェットの再構築がツリーの確定中に走ってしまうので次のフレームへ回す。
+    final pending = _dragPage;
+    if (pending != null) {
+      final onSeek = widget.onSeek;
+      WidgetsBinding.instance.addPostFrameCallback((_) => onSeek(pending));
+    }
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final slideCount = state.slideCount;
+    final slideCount = widget.state.slideCount;
+    final page = _dragPage ?? widget.state.currentPage;
 
     return Material(
       color: Colors.black.withValues(alpha: 0.72),
@@ -70,7 +100,7 @@ class ViewerFooter extends StatelessWidget {
             children: [
               // 「現在 / 全ページ + 1」（巻末オーバーレイを含む Web 版の表記）。
               Text(
-                '${state.currentPage} / $slideCount',
+                '$page / $slideCount',
                 style: const TextStyle(color: Colors.white70, fontSize: 12),
               ),
               Expanded(
@@ -78,12 +108,23 @@ class ViewerFooter extends StatelessWidget {
                   // 右から左へ読むので、シークバーも右端が 1 ページ目。
                   textDirection: TextDirection.rtl,
                   child: Slider(
-                    value: state.currentPage.clamp(1, slideCount).toDouble(),
+                    value: page.clamp(1, slideCount).toDouble(),
                     min: 1,
                     max: slideCount.toDouble(),
                     divisions: slideCount > 1 ? slideCount - 1 : null,
-                    label: '${state.currentPage}',
-                    onChanged: (value) => onSeek(value.round()),
+                    label: '$page',
+                    // タップ / 支援技術の操作でも start → changed → end の順で
+                    // 呼ばれるので、移動は end に寄せてよい。
+                    onChangeStart: (value) =>
+                        setState(() => _dragPage = value.round()),
+                    onChanged: (value) {
+                      final next = value.round();
+                      if (next != _dragPage) setState(() => _dragPage = next);
+                    },
+                    onChangeEnd: (value) {
+                      widget.onSeek(value.round());
+                      if (mounted) setState(() => _dragPage = null);
+                    },
                   ),
                 ),
               ),

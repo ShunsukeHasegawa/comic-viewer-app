@@ -226,7 +226,11 @@ class ViewerController extends _$ViewerController {
   }
 
   /// ページ / 巻末オーバーレイへ移動する。
+  ///
+  /// 閉じた後に呼ばれても何もしない（ドラッグ途中でシークバーが外されたときの
+  /// 移動は次のフレームに回すので、その間にビューアごと閉じられることがある）。
   void setPage(int page) {
+    if (!ref.mounted) return;
     final current = state.value;
     if (current == null || current.slideCount == 0) return;
 
