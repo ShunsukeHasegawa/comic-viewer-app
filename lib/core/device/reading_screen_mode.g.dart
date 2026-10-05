@@ -54,4 +54,4 @@ final class ReadingScreenModeProvider
   }
 }
 
-String _$readingScreenModeHash() => r'712a9b54a38682556aacf3727617601e094f6614';
+String _$readingScreenModeHash() => r'5e0d43407d9b5ee239d621d07c6127436acf266e';

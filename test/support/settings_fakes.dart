@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:comic_laz/features/settings/application/keep_screen_on_setting.dart';
 import 'package:comic_laz/features/settings/application/theme_mode_setting.dart';
 import 'package:flutter/material.dart';
 
@@ -32,5 +33,33 @@ class InMemoryThemeModeStore implements ThemeModeStore {
     if (writeError case final error?) throw error;
     writes.add(mode);
     this.mode = mode;
+  }
+}
+
+/// メモリ上に持つ [KeepScreenOnStore]（drift はプラットフォームチャネルを使うため）。
+class InMemoryKeepScreenOnStore implements KeepScreenOnStore {
+  InMemoryKeepScreenOnStore([this.keepScreenOn = true]);
+
+  bool keepScreenOn;
+
+  /// 書き込みを失敗させる（保存できなかったときに表示を変えないことの確認用）。
+  Object? writeError;
+
+  /// 読み込みを失敗させる。
+  Object? readError;
+
+  final writes = <bool>[];
+
+  @override
+  Future<bool> read() async {
+    if (readError case final error?) throw error;
+    return keepScreenOn;
+  }
+
+  @override
+  Future<void> write(bool keepScreenOn) async {
+    if (writeError case final error?) throw error;
+    writes.add(keepScreenOn);
+    this.keepScreenOn = keepScreenOn;
   }
 }

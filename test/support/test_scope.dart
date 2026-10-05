@@ -35,6 +35,7 @@ import 'package:comic_laz/features/progress/data/progress_store.dart';
 import 'package:comic_laz/features/push/data/foreground_notifier.dart';
 import 'package:comic_laz/features/push/data/push_messaging.dart';
 import 'package:comic_laz/features/push/data/push_settings_store.dart';
+import 'package:comic_laz/features/settings/application/keep_screen_on_setting.dart';
 import 'package:comic_laz/features/settings/application/theme_mode_setting.dart';
 import 'package:comic_laz/features/viewer/presentation/widgets/viewer_page_image.dart';
 import 'package:flutter/widgets.dart';
@@ -82,6 +83,7 @@ List<Override> testOverrides({
   DeviceProtection? deviceProtection,
   InstallMarker? installMarker,
   ThemeModeStore? themeModeStore,
+  KeepScreenOnStore? keepScreenOnStore,
   PushMessaging? pushMessaging,
   ForegroundNotifier? foregroundNotifier,
   PushSettingsStore? pushSettingsStore,
@@ -193,6 +195,10 @@ List<Override> testOverrides({
     themeModeStoreProvider.overrideWithValue(
       themeModeStore ?? InMemoryThemeModeStore(),
     ),
+    // 「読書中は画面を消さない」（#19）も drift。既定は ON をメモリに持つ。
+    keepScreenOnStoreProvider.overrideWithValue(
+      keepScreenOnStore ?? InMemoryKeepScreenOnStore(),
+    ),
     // プッシュ通知（#14）。Firebase と flutter_local_notifications はチャネル、
     // 設定と控えは drift、登録は通信。既定は「このビルドでは使えない」
     // （設定ファイルの無いビルドと同じ）にして、ログイン / ログアウトのたびに
@@ -254,6 +260,7 @@ ProviderContainer createContainer({
   AppResumeMonitor? appResumeMonitor,
   InstallMarker? installMarker,
   ThemeModeStore? themeModeStore,
+  KeepScreenOnStore? keepScreenOnStore,
   PushMessaging? pushMessaging,
   ForegroundNotifier? foregroundNotifier,
   PushSettingsStore? pushSettingsStore,
@@ -288,6 +295,7 @@ ProviderContainer createContainer({
         appResumeMonitor: appResumeMonitor,
         installMarker: installMarker,
         themeModeStore: themeModeStore,
+        keepScreenOnStore: keepScreenOnStore,
         pushMessaging: pushMessaging,
         foregroundNotifier: foregroundNotifier,
         pushSettingsStore: pushSettingsStore,

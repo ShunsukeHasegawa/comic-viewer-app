@@ -8,6 +8,7 @@ import 'package:comic_laz/features/viewer/presentation/widgets/viewer_chrome.dar
 import 'package:comic_laz/features/viewer/presentation/widgets/viewer_page_image.dart';
 import 'package:comic_laz/features/viewer/presentation/widgets/volume_end_overlay.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -36,12 +37,17 @@ pumpViewer(
   ViewerImageBuilder? imageBuilder,
   // ビューアを一覧などの上に push した形で開く（戻る操作を試すため）。
   bool pushed = false,
+  // 「読書中は画面を消さない」（#19）。
+  bool keepScreenOn = true,
 }) async {
   rendered.clear();
   prefetched.clear();
   final recorder = RecordingProgressRecorder();
   final wakeLock = FakeScreenWakeLock();
-  final screenMode = ReadingScreenMode(wakeLock);
+  final screenMode = ReadingScreenMode(
+    wakeLock,
+    keepScreenOn: () async => keepScreenOn,
+  );
 
   final container = ProviderContainer(
     overrides: [
@@ -420,6 +426,32 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(app.screenMode.activeCount, 0, reason: '離れたら解除する');
+  });
+
+  testWidgets('「読書中は画面を消さない」が OFF でも全画面表示にはする（#19）', (tester) async {
+    // 全画面表示の切り替えを記録する（テストのバインディングの疑似メッセンジャー）。
+    final uiModes = <String>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'SystemChrome.setEnabledSystemUIMode') {
+          uiModes.add(call.arguments as String);
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+
+    final app = await pumpViewer(tester, keepScreenOn: false);
+
+    expect(app.screenMode.activeCount, 1);
+    expect(uiModes, ['SystemUiMode.immersiveSticky']);
+    expect(app.wakeLock.enableCount, 0, reason: '消灯は端末の設定に任せる');
   });
 
   testWidgets('閉じるときに進捗を送る（ページ送りでは送らない）', (tester) async {

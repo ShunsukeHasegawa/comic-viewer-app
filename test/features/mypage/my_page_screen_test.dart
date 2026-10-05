@@ -4,6 +4,8 @@ import 'package:comic_laz/features/auth/application/auth_controller.dart';
 import 'package:comic_laz/features/auth/domain/auth_state.dart';
 import 'package:comic_laz/features/downloads/domain/volume_download.dart';
 import 'package:comic_laz/features/mypage/presentation/my_page_screen.dart';
+import 'package:comic_laz/features/settings/application/keep_screen_on_setting.dart';
+import 'package:comic_laz/features/settings/presentation/widgets/keep_screen_on_switch.dart';
 import 'package:comic_laz/features/settings/presentation/widgets/theme_mode_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -63,8 +65,18 @@ Future<void> pumpMyPageWithFailingLogout(WidgetTester tester) async {
 /// いないので、スクロールしてから押す。
 Future<void> tapLogoutTile(WidgetTester tester) async {
   final tile = find.widgetWithText(ListTile, 'ログアウト');
-  await tester.scrollUntilVisible(tile, 100);
+  await scrollIntoView(tester, tile);
   await tester.tap(tile);
+}
+
+/// [finder] が押せるところまでスクロールする。
+///
+/// scrollUntilVisible は端が少し見えた時点で止まり、真ん中を押すと画面外に
+/// なることがある（設定が増えて下の項目ほど起きる）。最後に全体を見せる。
+Future<void> scrollIntoView(WidgetTester tester, Finder finder) async {
+  await tester.scrollUntilVisible(finder, 100);
+  await tester.ensureVisible(finder);
+  await tester.pumpAndSettle();
 }
 
 void main() {
@@ -92,6 +104,17 @@ void main() {
     await tester.scrollUntilVisible(find.byType(ThemeModeSelector), 100);
     expect(find.text('テーマ'), findsOneWidget);
     expect(find.text('ダーク'), findsOneWidget);
+  });
+
+  testWidgets('「読書中は画面を消さない」をテーマの近くで切り替えられる（#19）', (tester) async {
+    final app = await pumpMyPage(tester);
+
+    final tile = find.byKey(KeepScreenOnSwitch.switchKey);
+    await scrollIntoView(tester, tile);
+    await tester.tap(tile);
+    await tester.pumpAndSettle();
+
+    expect(app.container.read(keepScreenOnSettingProvider).value, isFalse);
   });
 
   testWidgets('一般ユーザーにはバッジを出さない', (tester) async {
