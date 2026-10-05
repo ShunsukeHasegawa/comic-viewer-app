@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "dart": {
+      "command": "cmd",
+      "args": ["/c", "dart", "mcp-server"],
+      "env": {
+        "TMP": "C:\\Temp\\claude-dart",
+        "TEMP": "C:\\Temp\\claude-dart"
+      }
+    },
+    "mobile": {
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "@mobilenext/mobile-mcp@latest"],
+      "env": {
+        "ANDROID_HOME": "C:\\Android\\Sdk"
+      }
+    }
+  }
+}
