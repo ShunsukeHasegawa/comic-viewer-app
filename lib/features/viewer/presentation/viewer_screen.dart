@@ -41,6 +41,21 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   /// 次巻への遷移中（連打での二重遷移を防ぐ）。
   bool _movingToNextVolume = false;
 
+  /// スライドで追いつける距離（ページ数）。これより離れていれば飛ばす。
+  static const _maxSlideDistance = 3;
+
+  /// ページ位置を「ちょうどそのページ」とみなす誤差。
+  static const _pageEpsilon = 0.001;
+
+  /// タップで送っているスライドの行き先（0 始まり）。スライド中でなければ null。
+  int? _slideTarget;
+
+  /// 古いスライドの完了で [_slideTarget] を消さないための通し番号。
+  int _slideToken = 0;
+
+  /// 指を置いた時点でスライド中だったか（[_onPointerDown]）。
+  bool _tapStartedMidSlide = false;
+
   ViewerController get _controller =>
       ref.read(viewerControllerProvider(widget.volumeId).notifier);
 
@@ -74,24 +89,108 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   }
 
   /// 状態のページ番号に表示を合わせる（シークバー / タップ操作の反映）。
-  void _syncPageController(int page) {
+  ///
+  /// [resume] はスライド中のタップで止められたスライドを再開するとき。
+  /// 止まった位置の四捨五入が行き先と同じでも、行き先まで送り切る。
+  void _syncPageController(int page, {bool resume = false}) {
     if (!_pageController.hasClients) return;
     final target = page - 1;
     final current =
-        _pageController.page?.round() ?? _pageController.initialPage;
-    if (current == target) return;
-    // 連続したページ送りでアニメーションが渋滞しないよう、離れている場合は飛ばす。
+        _pageController.page ?? _pageController.initialPage.toDouble();
+    if (resume) {
+      if ((current - target).abs() < _pageEpsilon) return;
+    } else {
+      // 指でのスワイプ中は四捨五入で状態が先に進むので、表示に手を出さない。
+      if (_slideTarget == target || current.round() == target) return;
+    }
     // アニメーションで送ると通り過ぎるページを全部組み立てて画像を要求する
     // （シークバーで遠くへ飛んだときに途中のページを読まない。#18）。
-    if ((current - target).abs() > 1) {
+    // 素早い連続タップで数ページ先行した分はスライドで追いつく。
+    if ((current - target).abs() > _maxSlideDistance) {
+      _slideToken++;
+      _setSlideTarget(null);
       _pageController.jumpToPage(target);
-    } else {
-      _pageController.animateToPage(
-        target,
-        duration: const Duration(milliseconds: 180),
-        curve: Curves.easeOut,
-      );
+      return;
     }
+    final token = ++_slideToken;
+    _setSlideTarget(target);
+    _pageController
+        .animateToPage(
+          target,
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOut,
+        )
+        // 指で止められた / 次のスライドに置き換えられたときも完了する。
+        .whenComplete(() {
+          if (token == _slideToken) _setSlideTarget(null);
+        });
+  }
+
+  /// スライドの行き先を更新する。
+  ///
+  /// スライド中は PageView の指での操作を切る（[_ViewerBody.isTapSliding]）
+  /// ので、切り替わるときは作り直す。
+  void _setSlideTarget(int? target) {
+    final wasSliding = _slideTarget != null;
+    _slideTarget = target;
+    if (mounted && wasSliding != (target != null)) setState(() {});
+  }
+
+  /// スワイプ / スライドで表示ページが変わった。
+  ///
+  /// タップで送っているスライドの途中のページは状態に書き戻さない。
+  /// 書き戻すと、先行している状態が途中のページへ巻き戻り、その間の
+  /// タップが 1 回分失われる。
+  void _onPageChanged(int index) {
+    if (_slideTarget != null) return;
+    _controller.setPage(index + 1);
+  }
+
+  /// スクロールが止まったら、止まった位置を状態に合わせる。
+  ///
+  /// スライドを指で止めてそのまま戻すと、四捨五入のページが変わらず
+  /// `onPageChanged` が来ないまま状態だけ先へ進んで残るため。
+  void _onScrollEnd() {
+    if (_slideTarget != null || !_pageController.hasClients) return;
+    final page = _pageController.page;
+    if (page == null) return;
+    _controller.setPage(page.round() + 1);
+  }
+
+  /// 指を置いた時点でスライド中だったかを記録する。
+  ///
+  /// スライド中は `Scrollable` が子へのポインタを無視するため、各ページの
+  /// タップ領域（`ViewerTapZones`）にタップが届かず、スライドが止まるだけになる。
+  ///
+  /// タップのスライドは動き出した最初のフレームではまだページの途中にいない
+  /// ので、行き先が残っているか（止められても完了の通知は後で届く）も見る。
+  /// スワイプ後の慣性で動いている間も子には届かないので、位置の端数も見る。
+  void _onPointerDown(PointerDownEvent event) {
+    final page = _pageController.hasClients ? _pageController.page : null;
+    _tapStartedMidSlide =
+        _slideTarget != null ||
+        (page != null && (page - page.roundToDouble()).abs() > _pageEpsilon);
+  }
+
+  /// スライド中に始まったタップをページ送りとして扱う。
+  ///
+  /// 止まっているときのタップは各ページのタップ領域が先に受ける（より深い）。
+  /// ここに来るのは誰も受けなかったタップ（巻末オーバーレイの余白など）なので
+  /// 何もしない。
+  void _onTapDuringSlide(double dx, double width) {
+    if (!_tapStartedMidSlide) return;
+    _tapStartedMidSlide = false;
+    ViewerTapZones.dispatch(
+      dx: dx,
+      width: width,
+      onNext: _controller.goToNextPage,
+      onPrevious: _controller.goToPreviousPage,
+      onToggleMenu: _controller.toggleMenu,
+    );
+    // 端のページで送れなかった / メニューの開閉だけのときも、止められた
+    // スライドを行き先まで送り切る（途中で止まったままにしない）。
+    final state = ref.read(viewerControllerProvider(widget.volumeId)).value;
+    if (state != null) _syncPageController(state.currentPage, resume: true);
   }
 
   /// シークバーでのページ移動。
@@ -223,6 +322,11 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
           canOpenNextVolume: _canOpenNextVolume(state),
           controller: _controller,
           onSeek: _seek,
+          onPageChanged: _onPageChanged,
+          onScrollEnd: _onScrollEnd,
+          onPointerDown: _onPointerDown,
+          onTapDuringSlide: _onTapDuringSlide,
+          isTapSliding: _slideTarget != null,
         ),
       },
     );
@@ -239,10 +343,30 @@ class _ViewerBody extends StatelessWidget {
     required this.canOpenNextVolume,
     required this.controller,
     required this.onSeek,
+    required this.onPageChanged,
+    required this.onScrollEnd,
+    required this.onPointerDown,
+    required this.onTapDuringSlide,
+    required this.isTapSliding,
   });
+
+  /// タップで送るスライドの最中か。
+  ///
+  /// その間は PageView の指での操作を切る。切らないと、次のタップで指を
+  /// 置いた瞬間に PageView がスライドを掴み、離すまで止めてしまう
+  /// （回数分は送れても、タップのたびに一瞬止まって見える）。
+  final bool isTapSliding;
 
   /// シークバーでのページ移動（[_ViewerScreenState._seek]）。
   final ValueChanged<int> onSeek;
+
+  /// 表示ページの変化（0 始まり。[_ViewerScreenState._onPageChanged]）。
+  final ValueChanged<int> onPageChanged;
+  final VoidCallback onScrollEnd;
+
+  /// スライド中のタップの受け口（[_ViewerScreenState._onTapDuringSlide]）。
+  final ValueChanged<PointerDownEvent> onPointerDown;
+  final void Function(double dx, double width) onTapDuringSlide;
 
   final ViewerState state;
   final PageController pageController;
@@ -273,35 +397,58 @@ class _ViewerBody extends StatelessWidget {
     return Stack(
       fit: StackFit.expand,
       children: [
-        PageView.builder(
-          controller: pageController,
-          // 右 → 左（RTL 固定）。綴じ方向の設定は廃止済み。
-          reverse: true,
-          itemCount: state.slideCount,
-          onPageChanged: (index) => controller.setPage(index + 1),
-          itemBuilder: (context, index) {
-            final page = index + 1;
-            if (page > state.pageCount) {
-              return VolumeEndOverlay(
-                volume: state.volume,
-                hasNextVolume: state.hasNextVolume,
-                canOpenNextVolume: canOpenNextVolume,
-                onNextVolume: canOpenNextVolume && !isMovingToNextVolume
-                    ? () => onNextVolume()
-                    : null,
-                onClose: () => onClose(),
-              );
-            }
-            return ViewerPageImage(
-              volumeId: state.volume.id,
-              page: state.volume.files[index],
-              filesVersion: filesVersion,
-              isCurrent: page == state.currentPage,
-              onNext: controller.goToNextPage,
-              onPrevious: controller.goToPreviousPage,
-              onToggleMenu: controller.toggleMenu,
-            );
-          },
+        // スライド中は PageView の子にタップが届かないので、外側で受ける
+        // （届かないとスライドが止まるだけで、素早い連続タップが失われる）。
+        LayoutBuilder(
+          builder: (context, constraints) => Listener(
+            onPointerDown: onPointerDown,
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTapUp: (details) => onTapDuringSlide(
+                details.localPosition.dx,
+                constraints.maxWidth,
+              ),
+              child: NotificationListener<ScrollEndNotification>(
+                onNotification: (notification) {
+                  if (notification.depth == 0) onScrollEnd();
+                  return false;
+                },
+                child: PageView.builder(
+                  controller: pageController,
+                  // 右 → 左（RTL 固定）。綴じ方向の設定は廃止済み。
+                  reverse: true,
+                  physics: isTapSliding
+                      ? const NeverScrollableScrollPhysics()
+                      : null,
+                  itemCount: state.slideCount,
+                  onPageChanged: onPageChanged,
+                  itemBuilder: (context, index) {
+                    final page = index + 1;
+                    if (page > state.pageCount) {
+                      return VolumeEndOverlay(
+                        volume: state.volume,
+                        hasNextVolume: state.hasNextVolume,
+                        canOpenNextVolume: canOpenNextVolume,
+                        onNextVolume: canOpenNextVolume && !isMovingToNextVolume
+                            ? () => onNextVolume()
+                            : null,
+                        onClose: () => onClose(),
+                      );
+                    }
+                    return ViewerPageImage(
+                      volumeId: state.volume.id,
+                      page: state.volume.files[index],
+                      filesVersion: filesVersion,
+                      isCurrent: page == state.currentPage,
+                      onNext: controller.goToNextPage,
+                      onPrevious: controller.goToPreviousPage,
+                      onToggleMenu: controller.toggleMenu,
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
         ),
         if (state.isMenuVisible) ...[
           Positioned(

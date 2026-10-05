@@ -138,6 +138,90 @@ void main() {
     expect(stateOf(app.container).currentPage, 1);
   });
 
+  group('スライド中の連続タップ', () {
+    /// スライドの途中（180ms の半分ほど）でタップする。
+    Future<void> tapMidSlide(WidgetTester tester, double ratio) async {
+      final size = tester.getSize(find.byType(MaterialApp));
+      await tester.tapAt(Offset(size.width * ratio, size.height / 2));
+      // 状態の変化 → 次のフレームでスライド開始 → 途中まで進める。
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 16));
+      await tester.pump(const Duration(milliseconds: 70));
+    }
+
+    double shownPage(WidgetTester tester) =>
+        tester.widget<PageView>(find.byType(PageView)).controller!.page!;
+
+    testWidgets('スライド中に重ねたタップも回数分だけ送る（指で止めて終わりにしない）', (tester) async {
+      final app = await pumpViewer(tester, pageCount: 10);
+
+      await tapMidSlide(tester, 0.1);
+      expect(shownPage(tester), isNot(0), reason: 'スライドの途中でタップする前提');
+      await tapMidSlide(tester, 0.1);
+      await tapMidSlide(tester, 0.1);
+      await tester.pumpAndSettle();
+
+      expect(stateOf(app.container).currentPage, 4);
+      expect(shownPage(tester), 3, reason: '表示も状態と同じページで止まる');
+    });
+
+    testWidgets('次のタップで指を置いてもスライドは止まらない', (tester) async {
+      await pumpViewer(tester, pageCount: 10);
+      final size = tester.getSize(find.byType(MaterialApp));
+      final left = Offset(size.width * 0.1, size.height / 2);
+
+      await tapMidSlide(tester, 0.1);
+      final gesture = await tester.startGesture(left);
+      final pressedAt = shownPage(tester);
+      await tester.pump(const Duration(milliseconds: 30));
+      expect(
+        shownPage(tester),
+        greaterThan(pressedAt),
+        reason: '指を置いている間もスライドが進む（掴まれて一瞬止まらない）',
+      );
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      expect(shownPage(tester), 2, reason: '指を離したらタップとして 1 ページ足す');
+    });
+
+    testWidgets('スライドが終われば指でのスワイプは今までどおり効く', (tester) async {
+      final app = await pumpViewer(tester, pageCount: 10);
+
+      await tapZone(tester, 0.1);
+      // reverse（RTL）なので右へのフリックで次のページ。
+      await tester.fling(find.byType(PageView), const Offset(300, 0), 1000);
+      await tester.pumpAndSettle();
+
+      expect(stateOf(app.container).currentPage, 3);
+    });
+
+    testWidgets('前ページへの連続タップも回数分だけ戻る', (tester) async {
+      final app = await pumpViewer(tester, pageCount: 10);
+      app.container.read(viewerControllerProvider(340).notifier).setPage(6);
+      await tester.pumpAndSettle();
+
+      await tapMidSlide(tester, 0.9);
+      await tapMidSlide(tester, 0.9);
+      await tester.pumpAndSettle();
+
+      expect(stateOf(app.container).currentPage, 4);
+      expect(shownPage(tester), 3);
+    });
+
+    testWidgets('スライド中の中央タップはメニューを開き、スライドは送り切る', (tester) async {
+      final app = await pumpViewer(tester);
+
+      await tapMidSlide(tester, 0.1);
+      await tapMidSlide(tester, 0.5);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(ViewerHeader), findsOneWidget);
+      expect(stateOf(app.container).currentPage, 2);
+      expect(shownPage(tester), 1, reason: '途中で止まったままにしない');
+    });
+  });
+
   testWidgets('中央タップでメニューを開閉する', (tester) async {
     final app = await pumpViewer(tester);
     expect(find.byType(ViewerHeader), findsNothing);

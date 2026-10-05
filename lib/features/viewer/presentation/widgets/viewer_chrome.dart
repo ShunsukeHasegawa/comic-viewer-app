@@ -172,10 +172,29 @@ class ViewerTapZones extends StatelessWidget {
   }
 
   void _handleTap(BuildContext context, TapUpDetails details) {
-    final width = context.size?.width ?? 0;
+    dispatch(
+      dx: details.localPosition.dx,
+      width: context.size?.width ?? 0,
+      onNext: onNext,
+      onPrevious: onPrevious,
+      onToggleMenu: onToggleMenu,
+    );
+  }
+
+  /// 横位置 [dx]（幅 [width] の中）を 3 分割の操作に振り分ける。
+  ///
+  /// ページ送りのスライド中は各ページのタップ領域にタップが届かないため、
+  /// ビューア側で受けたタップもここで同じ判定にかける。
+  static void dispatch({
+    required double dx,
+    required double width,
+    required VoidCallback onNext,
+    required VoidCallback onPrevious,
+    required VoidCallback onToggleMenu,
+  }) {
     if (width <= 0) return;
 
-    final ratio = details.localPosition.dx / width;
+    final ratio = dx / width;
     if (ratio < 1 / 3) {
       onNext();
     } else if (ratio > 2 / 3) {
