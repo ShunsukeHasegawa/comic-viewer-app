@@ -20,6 +20,7 @@ import '../../support/offline_fakes.dart';
 import '../../support/test_scope.dart';
 
 BookDetail sampleDetail({
+  String overview = '巨人と戦う話',
   bool isFavorite = false,
   bool isComplete = true,
   List<BookVolume>? volumes,
@@ -27,7 +28,7 @@ BookDetail sampleDetail({
 }) => BookDetail(
   id: 12,
   title: '進撃の巨人',
-  overview: '巨人と戦う話',
+  overview: overview,
   isComplete: isComplete,
   isFavorite: isFavorite,
   authors: const ['諫山創'],
@@ -120,6 +121,35 @@ void main() {
     expect(find.text('1 巻'), findsOneWidget);
     expect(find.text('2 巻'), findsOneWidget);
     expect(find.text('全 2 巻'), findsOneWidget, reason: 'ヒーローの巻数');
+  });
+
+  group('あらすじの「もっと見る」', () {
+    testWidgets('畳んだ行数に収まるなら出さない（押しても何も増えない）', (tester) async {
+      await pumpDetail(tester);
+
+      expect(find.text('巨人と戦う話'), findsOneWidget);
+      expect(find.text('もっと見る'), findsNothing);
+    });
+
+    testWidgets('収まらなければ出し、押すと全文を見せて「閉じる」にする', (tester) async {
+      final overview = List.filled(40, '巨人と戦う話。').join();
+      await pumpDetail(
+        tester,
+        booksApi: FakeBooksApi(bookDetail: sampleDetail(overview: overview)),
+      );
+
+      Text overviewText() => tester.widget<Text>(find.text(overview));
+      expect(overviewText().maxLines, 3);
+
+      await tester.tap(find.text('もっと見る'));
+      await tester.pump();
+      expect(overviewText().maxLines, isNull, reason: '全文');
+      expect(find.text('閉じる'), findsOneWidget);
+
+      await tester.tap(find.text('閉じる'));
+      await tester.pump();
+      expect(overviewText().maxLines, 3);
+    });
   });
 
   testWidgets('ヒーローの背景は 1 巻の 1 ページ目', (tester) async {

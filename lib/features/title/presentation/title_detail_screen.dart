@@ -1,4 +1,4 @@
-import 'dart:ui' as ui;
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -259,11 +259,22 @@ class _Hero extends StatelessWidget {
   }
 }
 
-/// 背景の絵。文字が乗る下半分だけぼかし、全面に暗いグラデーションを重ねる。
+/// 背景の絵。全面に暗いグラデーションを重ねて文字を読みやすくする。
+///
+/// 絵の大きさとグラデーションはヒーローの高さではなく、画面の幅と文字の
+/// 開始位置から決める。ヒーローの高さに合わせると、あらすじを展開した
+/// ときに絵が拡大されてしまう。
 class _HeroBackground extends ConsumerWidget {
   const _HeroBackground({required this.detail});
 
   final BookDetail detail;
+
+  /// 漫画のページ（縦長）を幅いっぱいに見せる縦横比。
+  static const _imageAspect = 1.5;
+
+  /// 文字の開始位置から暗くし終えるまでの距離。畳んだあらすじと「読む」が
+  /// 収まる程度にする。
+  static const _darkenDistance = 240.0;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -276,49 +287,59 @@ class _HeroBackground extends ConsumerWidget {
       request,
       BoxFit.cover,
     );
+    // 文字が始まる位置（`_HeroChrome` の高さ + 絵を見せる高さ）。
+    final textTop =
+        MediaQuery.paddingOf(context).top +
+        8 +
+        kMinInteractiveDimension +
+        _heroImageHeight;
+    final darkEnd = textTop + _darkenDistance;
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        // ぼかしを始める位置は「絵を見せる高さ」に合わせる。あらすじの展開で
-        // ヒーローの高さが変わるため、割合はその都度求める。
         final height = constraints.maxHeight;
-        final start = height <= 0
-            ? 1.0
-            : (_heroImageHeight / height).clamp(0.0, 1.0);
+        final imageHeight = math.max(
+          constraints.maxWidth * _imageAspect,
+          darkEnd,
+        );
+        double stopAt(double y) =>
+            height <= 0 ? 1.0 : (y / height).clamp(0.0, 1.0);
         return Stack(
           fit: StackFit.expand,
           children: [
             const ColoredBox(color: Colors.black),
-            image,
-            // ぼかした同じ絵を上から重ねて「徐々にぼける」ようにする。
-            // `BackdropFilter` だと境界に直線が出るため、絵そのものを 2 枚使う。
-            ShaderMask(
-              blendMode: BlendMode.dstIn,
-              shaderCallback: (rect) => LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: const [Colors.transparent, Colors.black],
-                stops: [start, (start + 0.08).clamp(0.0, 1.0)],
-              ).createShader(rect),
-              child: ImageFiltered(
-                imageFilter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: imageHeight,
+              // あらすじが長くヒーローが絵より伸びたときに、絵の下端が
+              // 線にならないよう黒へ溶かす。
+              child: ShaderMask(
+                blendMode: BlendMode.dstIn,
+                shaderCallback: (rect) => const LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [Colors.black, Colors.transparent],
+                  stops: [0.85, 1],
+                ).createShader(rect),
                 child: image,
               ),
             ),
-            const DecoratedBox(
+            DecoratedBox(
               decoration: BoxDecoration(
                 gradient: LinearGradient(
                   begin: Alignment.topCenter,
                   end: Alignment.bottomCenter,
-                  colors: [
+                  colors: const [
                     Color(0x66000000),
                     Color(0x33000000),
                     Color(0xE6000000),
                   ],
-                  stops: [0, 0.35, 1],
+                  stops: [0, stopAt(darkEnd * 0.35), stopAt(darkEnd)],
                 ),
               ),
-              child: SizedBox.expand(),
+              child: const SizedBox.expand(),
             ),
           ],
         );
@@ -446,30 +467,52 @@ class _HeroOverview extends StatefulWidget {
 }
 
 class _HeroOverviewState extends State<_HeroOverview> {
+  static const _collapsedLines = 3;
+
   bool _expanded = false;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return GestureDetector(
-      onTap: () => setState(() => _expanded = !_expanded),
-      behavior: HitTestBehavior.opaque,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            widget.overview,
-            maxLines: _expanded ? null : 3,
-            overflow: _expanded ? null : TextOverflow.ellipsis,
-            style: theme.textTheme.bodySmall?.copyWith(color: Colors.white70),
+    final style = theme.textTheme.bodySmall?.copyWith(color: Colors.white70);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // 畳んだ行数に収まるなら畳む意味が無いので、「もっと見る」を出さない。
+        final painter = TextPainter(
+          text: TextSpan(text: widget.overview, style: style),
+          maxLines: _collapsedLines,
+          textDirection: Directionality.of(context),
+          textScaler: MediaQuery.textScalerOf(context),
+        )..layout(maxWidth: constraints.maxWidth);
+        final overflows = painter.didExceedMaxLines;
+        painter.dispose();
+
+        final text = Text(
+          widget.overview,
+          maxLines: _expanded ? null : _collapsedLines,
+          overflow: _expanded ? null : TextOverflow.ellipsis,
+          style: style,
+        );
+        if (!overflows) return text;
+
+        return GestureDetector(
+          onTap: () => setState(() => _expanded = !_expanded),
+          behavior: HitTestBehavior.opaque,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              text,
+              const SizedBox(height: 2),
+              Text(
+                _expanded ? '閉じる' : 'もっと見る',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: Colors.white,
+                ),
+              ),
+            ],
           ),
-          const SizedBox(height: 2),
-          Text(
-            _expanded ? '閉じる' : 'もっと見る',
-            style: theme.textTheme.labelSmall?.copyWith(color: Colors.white),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 }
