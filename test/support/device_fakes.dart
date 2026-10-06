@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:comic_laz/core/device/device_protection.dart';
+import 'package:comic_laz/core/device/in_app_browser.dart';
 
 /// プラットフォームチャネルに触らない [DeviceProtection]。
 ///
@@ -24,5 +25,22 @@ class FakeDeviceProtection implements DeviceProtection {
       for (final path in paths)
         if (failingPaths.contains(path)) path,
     ];
+  }
+}
+
+/// プラットフォームチャネルに触らない [InAppBrowser]。
+///
+/// 開こうとした URL を記録し、開けなかったことにもできる。
+class FakeInAppBrowser implements InAppBrowser {
+  /// [open] に渡された URL（呼び出し順）。
+  final opened = <Uri>[];
+
+  /// `false` にすると「ブラウザが無い」などで開けなかったことにする。
+  bool succeeds = true;
+
+  @override
+  Future<bool> open(Uri url) async {
+    opened.add(url);
+    return succeeds;
   }
 }

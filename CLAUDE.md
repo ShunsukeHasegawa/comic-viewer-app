@@ -120,6 +120,9 @@ test/         lib と同じ構成。共通フェイクは test/support/
   `transport.reset()` をファイル削除より先に呼ぶ。
 - ネイティブの転送は https 前提。開発用の http サーバーでは ZIP のダウンロードは
   失敗する（debug 用の cleartext 許可 / `NSAllowsLocalNetworking` は入れていない）。
+- Web のページ（管理画面など）を開くのは `InAppBrowser`（`core/device/`。Custom Tabs）だけ。
+  `LaunchMode.externalApplication` は開くたびに Chrome のタブが増えるので使わない。管理画面は
+  Cookie セッションなのでアプリのトークンでは入れない（#20）。テストでは `FakeInAppBrowser`。
 - テストはネットワークとプラットフォームチャネルを触らない。`test/support/test_scope.dart`
   の `testOverrides` / `createContainer` を使い、必要なフェイクは `test/support/` に足す。
 - テスト名・コメントは日本語で、「なぜ」を書く（「何を」はコードを読めば分かる）。

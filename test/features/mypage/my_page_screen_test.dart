@@ -14,12 +14,17 @@ import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
 
 import '../../support/auth_fakes.dart';
+import '../../support/device_fakes.dart';
 import '../../support/test_scope.dart';
 
 Future<
   ({ProviderContainer container, FakeAuthStore store, RecordingPurger purger})
 >
-pumpMyPage(WidgetTester tester, {User user = testUser}) async {
+pumpMyPage(
+  WidgetTester tester, {
+  User user = testUser,
+  FakeInAppBrowser? browser,
+}) async {
   final api = MockAuthApi()..stubCurrentUser(user);
   when(api.deleteToken).thenAnswer((_) async {});
   final store = FakeAuthStore(token: 'valid', user: user);
@@ -28,6 +33,7 @@ pumpMyPage(WidgetTester tester, {User user = testUser}) async {
     authStore: store,
     authApi: api,
     purgers: [purger],
+    inAppBrowser: browser,
   );
   addTearDown(container.dispose);
 
@@ -122,6 +128,40 @@ void main() {
 
     expect(find.text('管理者'), findsNothing);
     expect(find.text('セーフモード'), findsNothing);
+  });
+
+  group('管理画面（#20）', () {
+    const admin = User(id: 1, name: '長谷川', isAdmin: true);
+
+    testWidgets('管理者は Web 版の管理画面を Custom Tabs で開ける', (tester) async {
+      final browser = FakeInAppBrowser();
+      await pumpMyPage(tester, user: admin, browser: browser);
+
+      final tile = find.widgetWithText(ListTile, '管理画面');
+      await scrollIntoView(tester, tile);
+      await tester.tap(tile);
+      await tester.pumpAndSettle();
+
+      expect(browser.opened, [Uri.parse('http://localhost:8000/admin')]);
+    });
+
+    testWidgets('一般ユーザーには入口を出さない（押しても 403 になるだけ）', (tester) async {
+      await pumpMyPage(tester);
+
+      expect(find.widgetWithText(ListTile, '管理画面'), findsNothing);
+    });
+
+    testWidgets('開けなかったら黙らずに知らせる', (tester) async {
+      final browser = FakeInAppBrowser()..succeeds = false;
+      await pumpMyPage(tester, user: admin, browser: browser);
+
+      final tile = find.widgetWithText(ListTile, '管理画面');
+      await scrollIntoView(tester, tile);
+      await tester.tap(tile);
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('管理画面を開けませんでした'), findsOneWidget);
+    });
   });
 
   testWidgets('ログアウトは確認ダイアログで端末内データの削除を伝える', (tester) async {

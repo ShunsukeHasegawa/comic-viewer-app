@@ -6,6 +6,7 @@ import '../../../core/router/app_routes.dart';
 import '../../../core/utils/format.dart';
 import '../../../core/widgets/error_view.dart';
 import '../../../domain/models/reading_book.dart';
+import '../../admin/presentation/open_admin_page.dart';
 import '../../auth/application/auth_controller.dart';
 import '../../auth/domain/auth_state.dart';
 import '../../downloads/application/download_queue.dart';
@@ -73,6 +74,16 @@ class MyPageScreen extends ConsumerWidget {
               trailing: const Icon(Icons.chevron_right),
               onTap: () => context.push(AppRoutes.downloadManager),
             ),
+            // 管理画面（#20）。Web 版のページなので Custom Tabs で開く
+            // （開く先が別画面だと分かるよう、矢印ではなく外部リンクの印にする）。
+            if (user != null && user.isAdmin)
+              ListTile(
+                leading: const Icon(Icons.admin_panel_settings_outlined),
+                title: const Text('管理画面'),
+                subtitle: const Text('Web 版の管理画面を開く'),
+                trailing: const Icon(Icons.open_in_new),
+                onTap: () => openAdminPage(context, ref),
+              ),
             const Divider(),
             // 表示テーマ（#17）。画面を移らずにその場で切り替えて確かめられるよう、
             // ほかの設定のような別画面にはせずマイページに直接置く。

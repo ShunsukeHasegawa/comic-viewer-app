@@ -1,6 +1,7 @@
 import 'package:comic_laz/core/network/api_exception.dart';
 import 'package:comic_laz/core/widgets/error_view.dart';
 import 'package:comic_laz/domain/models/book_detail.dart';
+import 'package:comic_laz/domain/models/user.dart';
 import 'package:comic_laz/features/downloads/application/download_settings.dart';
 import 'package:comic_laz/features/downloads/domain/volume_download.dart';
 import 'package:comic_laz/features/library/application/library_controller.dart';
@@ -12,6 +13,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../support/api_fakes.dart';
+import '../../support/auth_fakes.dart';
+import '../../support/device_fakes.dart';
 import '../../support/download_fakes.dart';
 import '../../support/offline_fakes.dart';
 import '../../support/test_scope.dart';
@@ -68,8 +71,14 @@ Future<ProviderContainer> pumpDetail(
   Map<int, VolumeDownload>? downloads,
   FakeOfflineMetadataGateway? offline,
   DownloadGate downloadGate = DownloadGate.open,
+  User? user,
+  FakeInAppBrowser? browser,
 }) async {
   final container = createContainer(
+    // ログイン中のユーザー（管理画面の入口の出し分け。#20）。既定は未ログイン。
+    authStore: user == null ? null : FakeAuthStore(token: 'valid', user: user),
+    authApi: user == null ? null : (MockAuthApi()..stubCurrentUser(user)),
+    inAppBrowser: browser,
     booksApi: booksApi ?? FakeBooksApi(bookDetail: sampleDetail()),
     downloadQueue: downloadQueue == null ? null : () => downloadQueue,
     downloads: downloads,
@@ -503,6 +512,31 @@ void main() {
       await tester.tap(find.byIcon(Icons.sync_problem));
       await tester.pumpAndSettle();
       expect(queue.enqueued, [(volumeId: 340, bookId: 12)]);
+    });
+  });
+
+  group('管理画面で編集（#20）', () {
+    testWidgets('管理者はそのタイトルの編集画面を開ける（Web 版の「編集」と同じ）', (tester) async {
+      final browser = FakeInAppBrowser();
+      await pumpDetail(
+        tester,
+        user: const User(id: 1, isAdmin: true),
+        browser: browser,
+      );
+
+      await tester.tap(find.byTooltip('管理画面で編集'));
+      await tester.pumpAndSettle();
+
+      expect(browser.opened, [
+        Uri.parse('http://localhost:8000/admin/books/12'),
+      ]);
+    });
+
+    testWidgets('一般ユーザーには出さない', (tester) async {
+      await pumpDetail(tester, user: testUser);
+
+      expect(find.byTooltip('管理画面で編集'), findsNothing);
+      expect(find.byTooltip('お気に入りに追加'), findsOneWidget);
     });
   });
 

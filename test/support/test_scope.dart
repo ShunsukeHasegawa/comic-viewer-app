@@ -5,6 +5,7 @@ import 'package:comic_laz/core/device/app_resume_monitor.dart';
 import 'package:comic_laz/core/device/connectivity_monitor.dart';
 import 'package:comic_laz/core/device/device_name_resolver.dart';
 import 'package:comic_laz/core/device/device_protection.dart';
+import 'package:comic_laz/core/device/in_app_browser.dart';
 import 'package:comic_laz/core/device/notification_permission_log.dart';
 import 'package:comic_laz/core/session/session_data_purger.dart';
 import 'package:comic_laz/core/session/session_purge_journal.dart';
@@ -90,6 +91,7 @@ List<Override> testOverrides({
   DeviceTokenApi? deviceTokenApi,
   NotificationPermissionLog? notificationPermissionLog,
   List<SignOutHook>? signOutHooks,
+  InAppBrowser? inAppBrowser,
   String apiBaseUrl = 'http://localhost:8000',
 }) {
   return [
@@ -219,6 +221,8 @@ List<Override> testOverrides({
     notificationPermissionLogProvider.overrideWithValue(
       notificationPermissionLog ?? InMemoryNotificationPermissionLog(),
     ),
+    // 管理画面を開く Custom Tabs（#20）は url_launcher（チャネル）。
+    inAppBrowserProvider.overrideWithValue(inAppBrowser ?? FakeInAppBrowser()),
     // ログアウト前のフックは既定で本物（プッシュ通知の解除。上のフェイクで動く）。
     if (signOutHooks != null)
       signOutHooksProvider.overrideWithValue(signOutHooks),
@@ -267,6 +271,7 @@ ProviderContainer createContainer({
   DeviceTokenApi? deviceTokenApi,
   NotificationPermissionLog? notificationPermissionLog,
   List<SignOutHook>? signOutHooks,
+  InAppBrowser? inAppBrowser,
   List<Override> overrides = const [],
 }) {
   return ProviderContainer(
@@ -302,6 +307,7 @@ ProviderContainer createContainer({
         deviceTokenApi: deviceTokenApi,
         notificationPermissionLog: notificationPermissionLog,
         signOutHooks: signOutHooks,
+        inAppBrowser: inAppBrowser,
       ),
       // Riverpod 3 は同じプロバイダの二重 override を拒むので、testOverrides が
       // 既に差し替えているもの（appResumeMonitor など）は上の引数で渡す。

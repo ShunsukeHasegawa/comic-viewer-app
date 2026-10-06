@@ -41,6 +41,8 @@ dependencies:
   path: ^1.9.1
   path_provider: ^2.1.6
   riverpod_annotation: ^4.0.7
+  # 管理者向けに Web 版の管理画面を Custom Tabs で開く（#20）
+  url_launcher: ^6.3.3
   wakelock_plus: ^1.8.0
 
 dev_dependencies:

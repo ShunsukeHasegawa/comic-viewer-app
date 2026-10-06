@@ -12,6 +12,7 @@ import '../../../core/widgets/app_back_button.dart';
 import '../../../core/widgets/error_view.dart';
 import '../../../core/widgets/thumbnail_image.dart';
 import '../../../domain/models/book_detail.dart';
+import '../../admin/presentation/open_admin_page.dart';
 import '../../downloads/application/download_queue.dart';
 import '../../downloads/application/downloaded_lookup.dart';
 import '../application/book_detail_controller.dart';
@@ -204,6 +205,7 @@ class _Hero extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _HeroChrome(
+              bookId: detail.id,
               isFavorite: detail.isFavorite,
               onToggleFavorite: onToggleFavorite,
             ),
@@ -348,14 +350,19 @@ class _HeroBackground extends ConsumerWidget {
 }
 
 /// 絵の上に浮かせる操作（戻る / お気に入り）。
-class _HeroChrome extends StatelessWidget {
-  const _HeroChrome({required this.isFavorite, required this.onToggleFavorite});
+class _HeroChrome extends ConsumerWidget {
+  const _HeroChrome({
+    required this.bookId,
+    required this.isFavorite,
+    required this.onToggleFavorite,
+  });
 
+  final int bookId;
   final bool isFavorite;
   final VoidCallback onToggleFavorite;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final style = IconButton.styleFrom(
       backgroundColor: Colors.black38,
       foregroundColor: Colors.white,
@@ -368,9 +375,17 @@ class _HeroChrome extends StatelessWidget {
         0,
       ),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           AppBackButton(style: style),
+          const Spacer(),
+          // Web 版のタイトル詳細の「編集」と同じ入口（#20）。
+          if (watchIsAdmin(ref))
+            IconButton(
+              style: style,
+              icon: const Icon(Icons.edit_outlined),
+              tooltip: '管理画面で編集',
+              onPressed: () => openAdminPage(context, ref, bookId: bookId),
+            ),
           IconButton(
             style: style,
             icon: Icon(isFavorite ? Icons.favorite : Icons.favorite_outline),
