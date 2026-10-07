@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/router/app_routes.dart';
+import '../../../core/router/open_volume.dart';
 import '../../../core/utils/format.dart';
 import '../../../core/widgets/error_view.dart';
 import '../../../core/widgets/thumbnail_image.dart';
@@ -132,7 +133,9 @@ class _HistoryTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return ListTile(
-      onTap: () => context.push(AppRoutes.viewer(entry.id)),
+      // 閉じたらタイトル詳細へ戻す（#21）。
+      onTap: () =>
+          pushVolumeViaTitle(context, bookId: entry.bookId, volumeId: entry.id),
       leading: SizedBox(
         width: 40,
         child: ClipRRect(

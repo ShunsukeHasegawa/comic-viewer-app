@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:go_router/go_router.dart';
 
-import '../../../../core/router/app_routes.dart';
+import '../../../../core/router/open_volume.dart';
 import '../../../../core/widgets/thumbnail_image.dart';
 import '../../../../domain/models/reading_book.dart';
 
@@ -51,8 +50,12 @@ class _ReadingCard extends StatelessWidget {
     return SizedBox(
       width: 104,
       child: InkWell(
-        // 読みかけの巻をそのまま開く。
-        onTap: () => context.push(AppRoutes.viewer(item.volumeId)),
+        // 読みかけの巻をそのまま開く。閉じたらタイトル詳細へ戻す（#21）。
+        onTap: () => pushVolumeViaTitle(
+          context,
+          bookId: item.bookId,
+          volumeId: item.volumeId,
+        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [

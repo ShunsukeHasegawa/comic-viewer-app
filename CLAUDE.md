@@ -120,6 +120,8 @@ test/         lib と同じ構成。共通フェイクは test/support/
   `transport.reset()` をファイル削除より先に呼ぶ。
 - ネイティブの転送は https 前提。開発用の http サーバーでは ZIP のダウンロードは
   失敗する（debug 用の cleartext 許可 / `NSAllowsLocalNetworking` は入れていない）。
+- 「続きを読む」/ 履歴から巻を開くのは `pushVolumeViaTitle`（`core/router/open_volume.dart`）。
+  タイトル詳細を挟んで積み、閉じたら詳細へ戻す（#21）。
 - Web のページ（管理画面など）を開くのは `InAppBrowser`（`core/device/`。Custom Tabs）だけ。
   `LaunchMode.externalApplication` は開くたびに Chrome のタブが増えるので使わない。管理画面は
   Cookie セッションなのでアプリのトークンでは入れない（#20）。テストでは `FakeInAppBrowser`。
@@ -160,8 +162,8 @@ test/         lib と同じ構成。共通フェイクは test/support/
 - 「新刊通知」の ON / OFF は端末の好み（ログアウトでも残す）。OFF は DELETE + 端末のトークンを捨てる。
   どちらもできなければ（圏外）投げ、OFF のまま「まだ止められていません」と警告を出す（予約は残し、
   次の前面復帰 / 起動で捨てられたら警告も消える）。
-- 通知のタップは `pushRouteFor` → `router.go`。いまのサーバーは data を送らないのでライブラリ。
-  data に `book_id`（または 1 件だけの `book_ids`）があればタイトル詳細（サーバー側の変更で有効になる）。
+- 通知のタップは `pushRouteFor` → `router.go`。data に `book_id`（または 1 件だけの `book_ids`）が
+  あればタイトル詳細、無ければライブラリ。サーバーは更新が 1 タイトルだけのときに `book_id` を添える。
 - **`FirebaseMessaging.onBackgroundMessage` に登録しない**（`firebaseMessagingBackgroundHandler` は
   置いてあるだけ）。登録すると背面で届くたびに全プラグイン付きの headless エンジンが起き、
   background_downloader の `firstBackgroundChannel` を奪って、巻の完了 / 進捗が次のコールドスタート
@@ -187,7 +189,7 @@ test/         lib と同じ構成。共通フェイクは test/support/
   `com.bbflight.background_downloader.{statusUpdateMap,progressUpdateMap,resumeDataMap}.v2`
   に Task の JSON ごと入り、**Bearer 入りのヘッダを含む**。次の起動の
   `ArchiveTransport.start` で取り出されるまでの間はバックアップに載りうる（取り出す前に
-  消すと完了を失うので消さない。根本対策は巻単位の短命トークンで、サーバー側の変更が要る）。
+  消すと完了を失うので消さない。根本対策は巻単位の短命トークンで、サーバー側の変更が要る。依頼の中身は `docs/server-requests.md`）。
   nsurlsessiond の一時ファイルは OS 管理。SQLite の削除済みページは VACUUM
   まで残りうる。圏外起動中の `safe_mode` 変更は次にサーバーへ届くまで気づけない。
 
@@ -245,7 +247,8 @@ test/         lib と同じ構成。共通フェイクは test/support/
   は `web|android|ios`、`device_name` は 100 文字まで）→ 200 で JSON の文字列。同じトークンは
   持ち主を移して上書き。`DELETE /api/user/device-token?token=`（本文を落とす経路があるので
   クエリ）はログイン中のユーザーの行だけ消す。`GET /api/user/push-notification-test` は
-  そのユーザーの全端末へ送る。送信は notification（title / body / image）だけで **data は無い**。
+  そのユーザーの全端末へ送る。送信は notification（title / body / image）で、そのユーザー宛ての
+  更新が 1 タイトルだけのときだけ data `{book_id}`（文字列）が付く。
 - オフライン向けに `GET /api/v2/volumes/{id}/manifest`、`GET /api/v2/volumes/{id}/archive` が
   **サーバー側に実装済み**。
   実装前に `gh api repos/ShunsukeHasegawa/comic-viewer/contents/<path>` で

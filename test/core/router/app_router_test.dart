@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:comic_laz/core/router/app_router.dart';
 import 'package:comic_laz/core/router/app_routes.dart';
 import 'package:comic_laz/core/router/not_found_screen.dart';
+import 'package:comic_laz/core/router/open_volume.dart';
 import 'package:comic_laz/core/widgets/app_back_button.dart';
 import 'package:comic_laz/data/api/books_api.dart';
 import 'package:comic_laz/domain/models/book.dart';
@@ -27,10 +28,12 @@ Future<GoRouter> pumpRouterAt(
   WidgetTester tester,
   String location, {
   BooksApi? booksApi,
+  GoRouterRedirect? redirect,
 }) async {
   final router = GoRouter(
     initialLocation: location,
     routes: buildRoutes(),
+    redirect: redirect,
     errorBuilder: (context, state) =>
         NotFoundScreen(location: state.uri.toString()),
   );
@@ -171,6 +174,36 @@ void main() {
     expect(find.byType(TitleDetailScreen), findsOneWidget);
 
     await tester.tap(find.byType(AppBackButton));
+    await tester.pumpAndSettle();
+    expect(find.byType(LibraryScreen), findsOneWidget);
+  });
+
+  testWidgets('続きを読む / 履歴から開いた巻は、閉じるとタイトル詳細へ戻る（#21）', (tester) async {
+    // 本番のルータは redirect（同期）を持つ。2 回続けた push の 2 回目が 1 回目の
+    // 上に積まれるのはこの前提のときだけなので、redirect ありで確かめる。
+    final router = await pumpRouterAt(
+      tester,
+      AppRoutes.library,
+      redirect: (context, state) => null,
+    );
+
+    pushVolumeViaTitle(
+      tester.element(find.byType(LibraryScreen)),
+      bookId: 12,
+      volumeId: 34,
+    );
+    await tester.pumpAndSettle();
+    expect(tester.widget<ViewerScreen>(find.byType(ViewerScreen)).volumeId, 34);
+
+    router.pop();
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<TitleDetailScreen>(find.byType(TitleDetailScreen)).bookId,
+      12,
+      reason: '詳細を挟んでいない',
+    );
+
+    router.pop();
     await tester.pumpAndSettle();
     expect(find.byType(LibraryScreen), findsOneWidget);
   });
