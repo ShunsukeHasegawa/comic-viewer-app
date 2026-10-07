@@ -9,6 +9,7 @@ import '../../../core/cache/comic_image_loader.dart';
 import '../../../core/media/media_urls.dart';
 import '../../../core/router/app_routes.dart';
 import '../../../core/utils/format.dart';
+import '../../../core/utils/value_set.dart';
 import '../../../core/widgets/app_back_button.dart';
 import '../../../core/widgets/error_view.dart';
 import '../../../core/widgets/thumbnail_image.dart';
@@ -674,13 +675,17 @@ class _VolumesHeader extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
-    final downloads = ref.watch(downloadQueueProvider).value ?? const {};
     final volumeIds = {for (final volume in detail.volumes) volume.id};
-    final active = [
-      for (final download in downloads.values)
-        if (download.isActive && volumeIds.contains(download.volumeId))
-          download.volumeId,
-    ];
+    // 進捗の数字は使わないので、動いている巻の顔ぶれが変わったときだけ作り直す。
+    final active = ref.watch(
+      downloadQueueProvider.select(
+        (state) => ValueSet([
+          for (final download in (state.value ?? const {}).values)
+            if (download.isActive && volumeIds.contains(download.volumeId))
+              download.volumeId,
+        ]),
+      ),
+    );
     final hasDownloadable = detail.volumes.any((v) => v.isDownloadable);
 
     return Padding(
@@ -692,7 +697,7 @@ class _VolumesHeader extends ConsumerWidget {
           // 1 巻ずつ止めさせるのは酷なので、タイトル単位でも止められるようにする。
           if (active.isNotEmpty)
             TextButton.icon(
-              onPressed: () => _pauseAll(context, ref, active),
+              onPressed: () => _pauseAll(context, ref, active.toList()),
               icon: const Icon(Icons.pause),
               label: Text('${active.length} 巻を中断'),
             ),

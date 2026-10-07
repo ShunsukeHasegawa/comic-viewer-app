@@ -32,8 +32,11 @@ class VolumeTile extends ConsumerWidget {
     final theme = Theme.of(context);
     final status = volume.userStatus;
     // ダウンロード状態は 1 度だけ読み、行のラベルとボタンで共有する
-    // （別々に watch すると表示と操作がずれる瞬間ができる）。
-    final download = ref.watch(downloadQueueProvider).value?[volume.id];
+    // （別々に watch すると表示と操作がずれる瞬間ができる）。この巻の行だけを
+    // 見る。台帳全体を見ると、1 巻の進捗のたびに全部の行を作り直す。
+    final download = ref.watch(
+      downloadQueueProvider.select((state) => state.value?[volume.id]),
+    );
     final waitingForWifi =
         ref.watch(downloadGateProvider) == DownloadGate.waitingForWifi;
 

@@ -1,5 +1,6 @@
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
+import '../../../core/utils/value_set.dart';
 import '../domain/volume_download.dart';
 import 'download_queue.dart';
 
@@ -11,17 +12,20 @@ part 'downloaded_lookup.g.dart';
 /// 途中のデータを含めると開いてから読めないことに気づく形になってしまう。
 /// 一方で「更新あり」の取り直し中は**旧世代の ZIP が残っていて読める**ので、
 /// status ではなく [VolumeDownload.hasInstalledArchive] で判断する（#11）。
+///
+/// 台帳は進捗のたびに作り直されるので、中身で比べる [ValueSet] で返す
+/// （読める巻が変わらない間は watch している画面を作り直させない）。
 @riverpod
 Set<int> downloadedVolumeIds(Ref ref) {
   final downloads = ref.watch(downloadQueueProvider).value;
-  return installedVolumeIds(downloads);
+  return ValueSet(installedVolumeIds(downloads));
 }
 
 /// 読める巻を 1 つ以上持つタイトル ID。
 @riverpod
 Set<int> downloadedBookIds(Ref ref) {
   final downloads = ref.watch(downloadQueueProvider).value;
-  return installedBookIds(downloads);
+  return ValueSet(installedBookIds(downloads));
 }
 
 /// ダウンロード台帳をまだ読み終えていない（= 何が読めるか分からない）。

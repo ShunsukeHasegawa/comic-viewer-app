@@ -14,6 +14,9 @@ part of 'downloaded_lookup.dart';
 /// 途中のデータを含めると開いてから読めないことに気づく形になってしまう。
 /// 一方で「更新あり」の取り直し中は**旧世代の ZIP が残っていて読める**ので、
 /// status ではなく [VolumeDownload.hasInstalledArchive] で判断する（#11）。
+///
+/// 台帳は進捗のたびに作り直されるので、中身で比べる [ValueSet] で返す
+/// （読める巻が変わらない間は watch している画面を作り直させない）。
 
 @ProviderFor(downloadedVolumeIds)
 final downloadedVolumeIdsProvider = DownloadedVolumeIdsProvider._();
@@ -24,6 +27,9 @@ final downloadedVolumeIdsProvider = DownloadedVolumeIdsProvider._();
 /// 途中のデータを含めると開いてから読めないことに気づく形になってしまう。
 /// 一方で「更新あり」の取り直し中は**旧世代の ZIP が残っていて読める**ので、
 /// status ではなく [VolumeDownload.hasInstalledArchive] で判断する（#11）。
+///
+/// 台帳は進捗のたびに作り直されるので、中身で比べる [ValueSet] で返す
+/// （読める巻が変わらない間は watch している画面を作り直させない）。
 
 final class DownloadedVolumeIdsProvider
     extends $FunctionalProvider<Set<int>, Set<int>, Set<int>>
@@ -34,6 +40,9 @@ final class DownloadedVolumeIdsProvider
   /// 途中のデータを含めると開いてから読めないことに気づく形になってしまう。
   /// 一方で「更新あり」の取り直し中は**旧世代の ZIP が残っていて読める**ので、
   /// status ではなく [VolumeDownload.hasInstalledArchive] で判断する（#11）。
+  ///
+  /// 台帳は進捗のたびに作り直されるので、中身で比べる [ValueSet] で返す
+  /// （読める巻が変わらない間は watch している画面を作り直させない）。
   DownloadedVolumeIdsProvider._()
     : super(
         from: null,
@@ -68,7 +77,7 @@ final class DownloadedVolumeIdsProvider
 }
 
 String _$downloadedVolumeIdsHash() =>
-    r'3a1a30acbcc3052a88d3b5a96475584059c292b7';
+    r'4f34005057b6ab7b2b78d5eec156e37b79fac941';
 
 /// 読める巻を 1 つ以上持つタイトル ID。
 
@@ -114,7 +123,7 @@ final class DownloadedBookIdsProvider
   }
 }
 
-String _$downloadedBookIdsHash() => r'3d629439689d98ccae089a0fc80e48022f4d2a52';
+String _$downloadedBookIdsHash() => r'cec5337ad41a15ac40b009814dd9a6637ed5603d';
 
 /// ダウンロード台帳をまだ読み終えていない（= 何が読めるか分からない）。
 ///

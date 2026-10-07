@@ -237,7 +237,9 @@ class ComicImageLoader {
       );
     }
     return (
-      bytes: Uint8List.fromList(data),
+      // Dio は bytes 指定で Uint8List を返す。複製すると数 MB のページが
+      // 先読みの分だけ一時的に 2 つずつメモリに載る。
+      bytes: data is Uint8List ? data : Uint8List.fromList(data),
       contentType: response.headers.value(Headers.contentTypeHeader),
     );
   }
