@@ -7,23 +7,34 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../../support/api_fakes.dart';
 
-/// 書き込み回数を数え、`read` を 1 回だけ待たせられるキャッシュ。
+/// 本体の読み書き回数を数え、`readUserStatus` を 1 回だけ待たせられるキャッシュ。
 ///
 /// キャッシュは drift（非同期）なので、`read` → `write` の間に別の書き込みを
 /// 挟み込めるかどうかはゲートで作らないと再現しない（イベントループの順序に
 /// 任せたテストは落ち方が安定しない）。
 class _GatedCacheStore extends InMemoryLibraryCacheStore {
+  /// 本体（全タイトル）の書き込み回数（数 MB の encode が起きる回数）。
   int writes = 0;
 
-  /// 次の `read` を待たせる（1 回だけ）。
-  Completer<void>? pendingRead;
+  /// 本体（全タイトル）の読み込み回数（数 MB の decode が起きる回数）。
+  int reads = 0;
+
+  /// 次の `readUserStatus` を、値を読んだ後・返す前で待たせる（1 回だけ）。
+  Completer<void>? pendingUserStatusRead;
 
   @override
   Future<LibrarySnapshot?> read() async {
-    final gate = pendingRead;
-    pendingRead = null;
-    if (gate != null) await gate.future;
+    reads++;
     return super.read();
+  }
+
+  @override
+  Future<UserStatus?> readUserStatus() async {
+    final gate = pendingUserStatusRead;
+    pendingUserStatusRead = null;
+    final status = await super.readUserStatus();
+    if (gate != null) await gate.future;
+    return status;
   }
 
   @override
@@ -31,6 +42,16 @@ class _GatedCacheStore extends InMemoryLibraryCacheStore {
     writes++;
     await super.write(snapshot);
   }
+}
+
+/// ETag だけ残っていて本体が読めない控え（payload が壊れていて捨てた状態）。
+class _HeaderOnlyCacheStore extends InMemoryLibraryCacheStore {
+  @override
+  Future<LibraryCacheHeader?> readHeader() async =>
+      LibraryCacheHeader(etag: '"v1"', fetchedAt: DateTime.utc(2026));
+
+  @override
+  Future<LibrarySnapshot?> read() async => null;
 }
 
 void main() {
@@ -148,21 +169,22 @@ void main() {
 
   // #11 のレビュー指摘: キャッシュを drift に移して非同期になったため、
   // お気に入りの read-modify-write の間に取り直しの書き込みが割り込める。
-  // 一覧は全冊 + ETag を 1 行で持つので、読んだ時点の内容で書き戻すと
-  // 一覧ごと古いスナップショットへ巻き戻る（圏外起動で古い巻構成が出る）。
-  test('お気に入りの書き戻しで新しい一覧を巻き戻さない', () async {
+  // 読んだ時点の控えで書き戻すと、取り直したばかりの未読 / お気に入りが
+  // 巻き戻る（圏外起動で古い状態が出る）。
+  test('お気に入りの書き戻しで取り直した未読 / お気に入りを巻き戻さない', () async {
     final gated = _GatedCacheStore();
     final repository = LibraryRepository(api: api, cache: gated);
     await repository.loadBooks();
 
-    // サーバー側の一覧が変わった。
+    // サーバー側の状態が変わった（別端末で既読にした）。
     api
       ..books = [testBook(id: 3, title: 'C')]
-      ..etag = '"v2"';
+      ..etag = '"v2"'
+      ..userStatus = const UserStatus(favorites: [2]);
 
-    // お気に入りが控えを読んだ後・書き戻す前に、取り直しの書き込みを挟み込む。
+    // お気に入りが控えを読んだ後・書き戻す前に止め、その間に取り直しを走らせる。
     final gate = Completer<void>();
-    gated.pendingRead = gate;
+    gated.pendingUserStatusRead = gate;
     final favoriting = repository.updateCachedFavorite(
       bookId: 1,
       isFavorite: true,
@@ -176,6 +198,78 @@ void main() {
     final cached = await gated.read();
     expect(cached?.books.map((book) => book.id), [3]);
     expect(cached?.etag, '"v2"');
+    expect(
+      cached?.userStatus?.unreads,
+      isEmpty,
+      reason: '先に読んだ古い控え（unreads: [1]）で上書きしない',
+    );
+    expect(cached?.userStatus?.favorites, [2]);
+  });
+
+  // #26: 1500 タイトルで数 MB の本体を、ハートを押すたびに decode / encode しない。
+  test('お気に入りの変更では一覧の本体を読みも書きもしない', () async {
+    final gated = _GatedCacheStore();
+    final repository = LibraryRepository(api: api, cache: gated);
+    await repository.loadBooks();
+    final reads = gated.reads;
+    final writes = gated.writes;
+
+    await repository.updateCachedFavorite(bookId: 1, isFavorite: true);
+
+    expect(gated.reads, reads);
+    expect(gated.writes, writes);
+    expect((await gated.readUserStatus())?.favorites, containsAll([1, 2]));
+  });
+
+  // #26: `If-None-Match` に要るのは ETag だけ。200 で取り直すなら手元の本体は使わない。
+  test('取り直しが 200 なら手元の本体を decode しない', () async {
+    final gated = _GatedCacheStore();
+    final repository = LibraryRepository(api: api, cache: gated);
+    await repository.loadBooks();
+    api
+      ..books = [testBook(id: 3, title: 'C')]
+      ..etag = '"v2"';
+
+    await repository.loadBooks();
+
+    expect(gated.reads, 0);
+  });
+
+  test('304 で ETag だけ変わったら本体を書き直さずに ETag を更新する', () async {
+    final gated = _GatedCacheStore();
+    final repository = LibraryRepository(api: api, cache: gated);
+    await repository.loadBooks();
+    final writes = gated.writes;
+    api.respondNotModified = true;
+    api.notModifiedEtag = '"v1-gzip"';
+
+    final result = await repository.loadBooks();
+
+    expect(result.books, hasLength(2));
+    expect(gated.writes, writes);
+    expect((await gated.readHeader())?.etag, '"v1-gzip"');
+  });
+
+  // 304 には中身が無い。控えが壊れて捨てられていたら、空の一覧を正として
+  // 保存・表示せずに条件なしで取り直す。
+  test('ETag はあるのに本体が読めないときは条件なしで取り直す', () async {
+    final broken = _HeaderOnlyCacheStore();
+    final repository = LibraryRepository(api: api, cache: broken);
+    api.respondNotModified = true;
+
+    final result = await repository.loadBooks();
+
+    expect(api.ifNoneMatchCalls, ['"v1"', null]);
+    expect(result.books.map((book) => book.id), [1, 2]);
+    expect(result.isStale, isFalse);
+  });
+
+  test('圏外で本体が読めなければ古い内容の代わりに通信エラーを伝える', () async {
+    final broken = _HeaderOnlyCacheStore();
+    final repository = LibraryRepository(api: api, cache: broken);
+    api.error = const NetworkException();
+
+    await expectLater(repository.loadBooks(), throwsA(isA<NetworkException>()));
   });
 
   test('304 で ETag も変わらないならキャッシュを書き直さない', () async {

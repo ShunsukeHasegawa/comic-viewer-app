@@ -1,15 +1,20 @@
+import 'dart:convert';
+
 import 'package:comic_laz/core/storage/app_database.dart';
 import 'package:comic_laz/domain/models/book.dart';
 import 'package:comic_laz/domain/models/book_detail.dart';
 import 'package:comic_laz/domain/models/read_volume.dart';
 import 'package:comic_laz/domain/models/reading_book.dart';
 import 'package:comic_laz/features/library/domain/library_snapshot.dart';
+import 'package:comic_laz/features/offline/data/library_payload_codec.dart';
 import 'package:comic_laz/features/offline/data/offline_catalog.dart';
 import 'package:comic_laz/features/offline/data/offline_metadata_purger.dart';
+import 'package:comic_laz/features/offline/data/offline_metadata_store.dart';
 
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../support/api_fakes.dart';
+import '../../support/cache_fakes.dart';
 
 import '../../support/offline_fakes.dart';
 
@@ -82,6 +87,249 @@ void main() {
 
       expect(await fixture.catalog.readLibrary(), isNull);
       expect(await fixture.store.read(OfflineCatalog.libraryKey), isNull);
+    });
+  });
+
+  // #26: 本体（全タイトル）と未読 / お気に入り・ETag を別々に出し入れする。
+  group('一覧の控えの分割（#26）', () {
+    /// #26 より前の形式の行を直接置く（更新前の端末の状態）。
+    Future<void> putLegacy(CacheHarness cache, String payload) => cache.database
+        .into(cache.database.offlineMetadataEntries)
+        .insertOnConflictUpdate(
+          OfflineMetadataRow(
+            key: OfflineCatalog.legacyLibraryKey,
+            payload: payload,
+            etag: '"old"',
+            fetchedAt: DateTime.utc(2026, 9, 1),
+          ),
+        );
+
+    test('更新前の形式の控えも読めて、新しいキーへ移される（圏外起動で一覧を失わない）', () async {
+      final fixture = createOfflineCatalog();
+      await putLegacy(
+        fixture.cache,
+        jsonEncode({
+          'books': [testBook(id: 1, title: 'A').toJson()],
+          'user_status': const UserStatus(
+            unreads: [1],
+            favorites: [1],
+          ).toJson(),
+        }),
+      );
+
+      final header = await fixture.catalog.readLibraryHeader();
+      expect(header?.etag, '"old"', reason: '移した後も 304 を狙えるように ETag を引き継ぐ');
+
+      final snapshot = await fixture.catalog.readLibrary();
+      expect(snapshot?.books.map((book) => book.id), [1]);
+      expect(snapshot?.userStatus?.favorites, [1]);
+      expect(
+        await fixture.store.readRaw(OfflineCatalog.legacyLibraryKey),
+        isNull,
+        reason: '移し終えた旧形式の行は残さない（次の起動で古い内容に戻さない）',
+      );
+    });
+
+    test('更新前の形式の控えが壊れていれば「無い」とみなして捨てる', () async {
+      final fixture = createOfflineCatalog();
+      await putLegacy(fixture.cache, '{壊れている');
+
+      expect(await fixture.catalog.readLibraryHeader(), isNull);
+      expect(await fixture.catalog.readLibrary(), isNull);
+      expect(
+        await fixture.store.readRaw(OfflineCatalog.legacyLibraryKey),
+        isNull,
+      );
+    });
+
+    test('新しい行が既にあれば、残っていた旧形式の行で上書きしない', () async {
+      // 移し替えの途中（新しい行を書いた後・旧形式を消す前）で落ちた端末。
+      final first = createOfflineCatalog();
+      await first.catalog.writeLibrary(
+        LibrarySnapshot(
+          books: [testBook(id: 2, title: '新しい')],
+          etag: '"new"',
+          fetchedAt: DateTime.utc(2026, 9, 20),
+        ),
+      );
+      await putLegacy(
+        first.cache,
+        jsonEncode({
+          'books': [testBook(id: 1, title: '古い').toJson()],
+        }),
+      );
+
+      // 別インスタンス（= 再起動後）から読む。
+      final second = createOfflineCatalog(cache: first.cache);
+      final snapshot = await second.catalog.readLibrary();
+
+      expect(snapshot?.books.map((book) => book.id), [2]);
+      expect(snapshot?.etag, '"new"');
+      expect(
+        await second.store.readRaw(OfflineCatalog.legacyLibraryKey),
+        isNull,
+      );
+    });
+
+    test('本体だけ移して落ちた端末でも、未読 / お気に入りを旧形式から移す', () async {
+      // トランザクション導入前の版で、新しい本体の行を書いた直後に落ちた状態。
+      // 本体があるからと旧形式を消すと、未読 / お気に入りが失われる。
+      final first = createOfflineCatalog();
+      await first.store.writeRaw(
+        OfflineCatalog.libraryKey,
+        payload: jsonEncode({
+          'books': [testBook(id: 1, title: 'A').toJson()],
+        }),
+        etag: '"old"',
+        fetchedAt: DateTime.utc(2026, 9, 1),
+      );
+      await putLegacy(
+        first.cache,
+        jsonEncode({
+          'books': [testBook(id: 1, title: 'A').toJson()],
+          'user_status': const UserStatus(favorites: [1]).toJson(),
+        }),
+      );
+
+      final second = createOfflineCatalog(cache: first.cache);
+      final snapshot = await second.catalog.readLibrary();
+
+      expect(snapshot?.books.map((book) => book.id), [1]);
+      expect(snapshot?.userStatus?.favorites, [1]);
+      expect(
+        await second.store.readRaw(OfflineCatalog.legacyLibraryKey),
+        isNull,
+      );
+    });
+
+    test('移し替えの最中にログアウトで破棄しても、前のユーザーの控えを書き戻さない', () async {
+      final fixture = createOfflineCatalog();
+      // 別の isolate で分ける大きさにして、破棄が移し替えの途中に届くようにする。
+      await putLegacy(
+        fixture.cache,
+        jsonEncode({
+          'books': [
+            for (var id = 1; id <= 500; id++)
+              testBook(id: id, title: 'タイトル $id').toJson(),
+          ],
+          'user_status': const UserStatus(favorites: [1]).toJson(),
+        }),
+      );
+
+      final reading = fixture.catalog.readLibraryHeader();
+      await OfflineMetadataPurger(fixture.catalog).purgeSessionData();
+      await reading;
+
+      expect(await fixture.store.readRaw(OfflineCatalog.libraryKey), isNull);
+      expect(
+        await fixture.store.readRaw(OfflineCatalog.libraryUserStatusKey),
+        isNull,
+      );
+      expect(
+        await fixture.store.readRaw(OfflineCatalog.legacyLibraryKey),
+        isNull,
+      );
+    });
+
+    test('移す元の行が消えていれば何も書かない（破棄の後に書き戻さない）', () async {
+      final fixture = createOfflineCatalog();
+
+      final moved = await fixture.store.moveEntry(
+        OfflineCatalog.legacyLibraryKey,
+        {
+          OfflineCatalog.libraryKey: OfflineMetadataRaw(
+            payload: '{"books":[]}',
+            fetchedAt: DateTime.utc(2026),
+          ),
+        },
+      );
+
+      expect(moved, isFalse);
+      expect(await fixture.store.readRaw(OfflineCatalog.libraryKey), isNull);
+    });
+
+    test('本体を書くときに user_status が無ければ控えを消さない', () async {
+      // 一覧は取れて user_status だけ取れなかったとき、前回の控えを残す。
+      final fixture = createOfflineCatalog();
+      await fixture.catalog.writeLibrary(
+        LibrarySnapshot(
+          books: [testBook(id: 1)],
+          fetchedAt: DateTime.utc(2026),
+          userStatus: const UserStatus(favorites: [1]),
+        ),
+      );
+
+      await fixture.catalog.writeLibrary(
+        LibrarySnapshot(
+          books: [testBook(id: 2)],
+          fetchedAt: DateTime.utc(2026),
+        ),
+      );
+
+      expect((await fixture.catalog.readLibraryUserStatus())?.favorites, [1]);
+    });
+
+    test('ETag だけ書き換えても本体と取得時刻はそのまま', () async {
+      final fixture = createOfflineCatalog();
+      await fixture.catalog.writeLibrary(
+        LibrarySnapshot(
+          books: [testBook(id: 1)],
+          etag: '"v1"',
+          fetchedAt: DateTime.utc(2026, 9, 20),
+        ),
+      );
+
+      await fixture.catalog.updateLibraryEtag('"v2"');
+
+      final snapshot = await fixture.catalog.readLibrary();
+      expect(snapshot?.etag, '"v2"');
+      expect(snapshot?.books.map((book) => book.id), [1]);
+      expect(
+        snapshot?.fetchedAt.isAtSameMomentAs(DateTime.utc(2026, 9, 20)),
+        isTrue,
+        reason: '取得時刻は「いつの内容か」なので 304 では進めない',
+      );
+    });
+
+    test('大きな一覧（別の isolate で encode / decode する量）も読み直せる', () async {
+      final fixture = createOfflineCatalog();
+      final books = [
+        for (
+          var id = 1;
+          id <= LibraryPayloadCodec.encodeInIsolateFrom * 2;
+          id++
+        )
+          testBook(id: id, title: 'タイトル $id'),
+      ];
+
+      await fixture.catalog.writeLibrary(
+        LibrarySnapshot(books: books, fetchedAt: DateTime.utc(2026)),
+      );
+      final raw = await fixture.store.readRaw(OfflineCatalog.libraryKey);
+      expect(
+        raw!.payload.length,
+        greaterThanOrEqualTo(LibraryPayloadCodec.decodeInIsolateFrom),
+        reason: 'decode も isolate 側の経路を通る大きさにしておく',
+      );
+
+      final snapshot = await fixture.catalog.readLibrary();
+      expect(snapshot?.books, books);
+    });
+
+    test('一覧を消すと未読 / お気に入りの控えも消える', () async {
+      final fixture = createOfflineCatalog();
+      await fixture.catalog.writeLibrary(
+        LibrarySnapshot(
+          books: [testBook(id: 1)],
+          fetchedAt: DateTime.utc(2026),
+          userStatus: const UserStatus(favorites: [1]),
+        ),
+      );
+
+      await PersistentLibraryCacheStore(fixture.catalog).clear();
+
+      expect(await fixture.catalog.readLibraryHeader(), isNull);
+      expect(await fixture.catalog.readLibraryUserStatus(), isNull);
     });
   });
 

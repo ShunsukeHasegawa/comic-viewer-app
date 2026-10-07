@@ -7,6 +7,7 @@ import '../../../domain/models/book_detail.dart';
 import '../../../domain/models/read_volume.dart';
 import '../../../domain/models/reading_book.dart';
 import '../../library/domain/library_snapshot.dart';
+import 'library_payload_codec.dart';
 import 'offline_metadata_store.dart';
 
 part 'offline_catalog.g.dart';
@@ -27,8 +28,20 @@ class OfflineCatalog {
     required this.imageCache,
   });
 
-  /// 一覧のキー。
-  static const libraryKey = 'books';
+  /// 一覧の本体（全タイトル）のキー。ETag / 取得時刻は同じ行の列に持つ。
+  static const libraryKey = 'library/books';
+
+  /// 未読 / お気に入りの控えのキー。
+  ///
+  /// 本体と分けるのは、お気に入りの切り替えのたびに数 MB の本体を
+  /// decode / encode し直さないため（#26）。
+  static const libraryUserStatusKey = 'library/user_status';
+
+  /// #26 より前の一覧のキー（本体と `user_status` を 1 つの JSON に持っていた）。
+  ///
+  /// 見つけたら新しいキーへ移す（[_migrateLegacyLibrary]）。消さずに移すのは、
+  /// 更新直後に圏外で起動しても一覧が出るようにするため。
+  static const legacyLibraryKey = 'books';
   static const categoriesKey = 'categories';
   static const tagsKey = 'tags';
   static const bookPrefix = 'book/';
@@ -44,43 +57,157 @@ class OfflineCatalog {
 
   // ------------------------------------------------------------------ 一覧
 
+  /// 旧形式の移し替えが済んだか（プロセス内で 1 度確かめれば十分）。
+  bool _legacyLibraryChecked = false;
+
+  /// 走行中の移し替え（無ければ `null`）。完了済みの future を握り続けないのは
+  /// `LibraryRepository._cacheTask` と同じ理由（擬似時間のゾーンに縛られる）。
+  Future<void>? _legacyLibraryMigration;
+
+  /// ETag と取得時刻だけを読む（本体は DB から取り出しもしない）。
+  Future<LibraryCacheHeader?> readLibraryHeader() async {
+    await _migrateLegacyLibrary();
+    final header = await store.readHeader(libraryKey);
+    if (header == null) return null;
+    return LibraryCacheHeader(etag: header.etag, fetchedAt: header.fetchedAt);
+  }
+
   Future<LibrarySnapshot?> readLibrary() async {
-    final entry = await store.read(libraryKey);
+    await _migrateLegacyLibrary();
+    final entry = await store.readRaw(libraryKey);
+    if (entry == null) return null;
+    final List<Book> books;
+    try {
+      books = await LibraryPayloadCodec.decodeBooks(entry.payload);
+    } on Object catch (error) {
+      if (!_isMalformed(error)) rethrow;
+      // 形が変わっていたら「無い」とみなす（起動を妨げない）。未読 / お気に入りは
+      // 一覧と組で意味を持つので一緒に捨てる。
+      await store.delete([libraryKey, libraryUserStatusKey]);
+      return null;
+    }
+    return LibrarySnapshot(
+      books: books,
+      etag: entry.etag,
+      fetchedAt: entry.fetchedAt,
+      userStatus: await readLibraryUserStatus(),
+    );
+  }
+
+  /// 未読 / お気に入りの控えだけを読む（本体は decode しない）。
+  Future<UserStatus?> readLibraryUserStatus() async {
+    await _migrateLegacyLibrary();
+    final entry = await store.read(libraryUserStatusKey);
     if (entry == null) return null;
     try {
-      final books = [
-        for (final json in _objectList(entry.payload['books']))
-          Book.fromJson(json),
-      ];
-      final status = entry.payload['user_status'];
-      return LibrarySnapshot(
-        books: books,
-        etag: entry.etag,
-        fetchedAt: entry.fetchedAt,
-        userStatus: status is Map<String, dynamic>
-            ? UserStatus.fromJson(status)
-            : null,
-      );
+      return UserStatus.fromJson(entry.payload);
     } on Object {
-      // 形が変わっていたら「無い」とみなす（起動を妨げない）。
-      await store.delete([libraryKey]);
+      await store.delete([libraryUserStatusKey]);
       return null;
     }
   }
 
+  /// 本体と ETag / 取得時刻を書く。
+  ///
+  /// [LibrarySnapshot.userStatus] が `null` なら未読 / お気に入りの控えは残す。
   Future<void> writeLibrary(LibrarySnapshot snapshot) async {
-    await store.write(
+    await _migrateLegacyLibrary();
+    final payload = await LibraryPayloadCodec.encodeBooks(snapshot.books);
+    await store.writeRaw(
       libraryKey,
-      payload: {
-        'books': [for (final book in snapshot.books) book.toJson()],
-        'user_status': snapshot.userStatus?.toJson(),
-      },
+      payload: payload,
       etag: snapshot.etag,
       fetchedAt: snapshot.fetchedAt,
     );
+    if (snapshot.userStatus case final status?) {
+      await writeLibraryUserStatus(status);
+    }
   }
 
-  Future<void> deleteLibrary() => store.delete([libraryKey]);
+  Future<void> writeLibraryUserStatus(UserStatus status) async {
+    await _migrateLegacyLibrary();
+    await store.write(libraryUserStatusKey, payload: status.toJson());
+  }
+
+  /// ETag だけを書き換える（304 で ETag だけ変わったときに本体を書き直さない）。
+  Future<void> updateLibraryEtag(String? etag) async {
+    await _migrateLegacyLibrary();
+    await store.updateEtag(libraryKey, etag);
+  }
+
+  Future<void> deleteLibrary() async {
+    await _awaitLegacyLibraryMigration();
+    await store.delete([libraryKey, libraryUserStatusKey, legacyLibraryKey]);
+  }
+
+  /// #26 より前の形式の控えを、本体と未読 / お気に入りの 2 行に移す。
+  ///
+  /// 更新した端末の控えを捨てない（圏外で起動しても一覧が出るように）ため、
+  /// DB のスキーマは変えずに、最初に一覧の控えを触ったときにキーを移す。
+  Future<void> _migrateLegacyLibrary() async {
+    if (_legacyLibraryChecked) return;
+    final running = _legacyLibraryMigration;
+    if (running != null) return running;
+    final migration = _runLegacyLibraryMigration();
+    _legacyLibraryMigration = migration;
+    try {
+      await migration;
+      _legacyLibraryChecked = true;
+    } finally {
+      _legacyLibraryMigration = null;
+    }
+  }
+
+  Future<void> _runLegacyLibraryMigration() async {
+    final legacy = await store.readRaw(legacyLibraryKey);
+    if (legacy == null) return;
+    final LegacyLibraryParts parts;
+    try {
+      parts = await LibraryPayloadCodec.splitLegacy(legacy.payload);
+    } on Object catch (error) {
+      // isolate を起こせなかった等は「壊れている」ではないので消さずに投げる
+      // （次に一覧の控えを触ったときにやり直す）。
+      if (!_isMalformed(error)) rethrow;
+      // 読めない控えは従来どおり「無い」とみなす。
+      await store.delete([legacyLibraryKey]);
+      return;
+    }
+    // 書き込みと旧形式の削除は 1 つのトランザクションで行う。本体だけ書いて
+    // 落ちると、次の起動で未読 / お気に入りを移しそびれたまま旧形式を消すため。
+    // 新しい行が既にあるキーはそちらが新しいので上書きしない（無いキーだけ移す）。
+    await store.moveEntry(legacyLibraryKey, {
+      libraryKey: OfflineMetadataRaw(
+        payload: parts.books,
+        etag: legacy.etag,
+        fetchedAt: legacy.fetchedAt,
+      ),
+      if (parts.userStatus case final status?)
+        libraryUserStatusKey: OfflineMetadataRaw(
+          payload: status,
+          fetchedAt: legacy.fetchedAt,
+        ),
+    });
+  }
+
+  /// 走行中の移し替えを待つ（失敗は問わない）。
+  ///
+  /// 破棄の前に待つのは、移し替えが読んだ前のユーザーの控えを、破棄の後で
+  /// 新しいキーに書き戻させないため（`moveEntry` も旧形式が消えていれば書かない）。
+  Future<void> _awaitLegacyLibraryMigration() async {
+    final running = _legacyLibraryMigration;
+    if (running == null) return;
+    try {
+      await running;
+    } on Object {
+      // 失敗した移し替えの続きは破棄で消える。
+    }
+  }
+
+  /// 控えが壊れている（形が違う）ことを示す失敗か。
+  ///
+  /// isolate の起動失敗などまで「壊れている」として控えを消さないため。
+  static bool _isMalformed(Object error) =>
+      error is FormatException || error is TypeError || error is ArgumentError;
 
   // ------------------------------------------------------ カテゴリ / タグ
 
@@ -186,6 +313,7 @@ class OfflineCatalog {
 
   /// 端末内のオフライン用メタ情報を全部捨てる（ログアウト / ユーザー切り替え）。
   Future<void> clear() async {
+    await _awaitLegacyLibraryMigration();
     await store.deleteAll();
     final cache = await imageCache();
     // 印だけ残すと、次のユーザーの画像が無関係なタイトルのために守られてしまう。
@@ -229,11 +357,24 @@ class PersistentLibraryCacheStore implements LibraryCacheStore {
   final OfflineCatalog _catalog;
 
   @override
+  Future<LibraryCacheHeader?> readHeader() => _catalog.readLibraryHeader();
+
+  @override
   Future<LibrarySnapshot?> read() => _catalog.readLibrary();
+
+  @override
+  Future<UserStatus?> readUserStatus() => _catalog.readLibraryUserStatus();
 
   @override
   Future<void> write(LibrarySnapshot snapshot) =>
       _catalog.writeLibrary(snapshot);
+
+  @override
+  Future<void> writeUserStatus(UserStatus status) =>
+      _catalog.writeLibraryUserStatus(status);
+
+  @override
+  Future<void> writeEtag(String? etag) => _catalog.updateLibraryEtag(etag);
 
   @override
   Future<void> clear() => _catalog.deleteLibrary();

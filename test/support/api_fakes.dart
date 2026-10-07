@@ -66,6 +66,10 @@ class FakeBooksApi implements BooksApi {
   /// 304 を返すかどうか（`If-None-Match` が [etag] と一致したとき）。
   bool respondNotModified = false;
 
+  /// 304 の応答に付ける ETag（`null` なら [etag]）。圧縮の有無などで
+  /// 中身が同じまま ETag の表記だけ変わる状況の再現に使う。
+  String? notModifiedEtag;
+
   int fetchBooksCount = 0;
   final favorites = <int>{};
 
@@ -77,7 +81,7 @@ class FakeBooksApi implements BooksApi {
     ifNoneMatchCalls.add(ifNoneMatch);
     if (error case final error?) throw error;
     if (respondNotModified && ifNoneMatch != null && ifNoneMatch == etag) {
-      return ConditionalResponse.notModified(etag: etag);
+      return ConditionalResponse.notModified(etag: notModifiedEtag ?? etag);
     }
     return ConditionalResponse.modified(books, etag: etag);
   }
