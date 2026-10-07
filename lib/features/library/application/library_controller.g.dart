@@ -36,7 +36,7 @@ final class LibraryControllerProvider
   LibraryController create() => LibraryController();
 }
 
-String _$libraryControllerHash() => r'ec9553ff157a8a79e123ea9fc780537b5a53d0d8';
+String _$libraryControllerHash() => r'9bf0f8c365176bc74770b5e0148676976c7421ba';
 
 /// ライブラリ一覧の読み込み。
 

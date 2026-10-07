@@ -8,7 +8,8 @@ part of 'thumbnail_image.dart';
 
 // GENERATED CODE - DO NOT MODIFY BY HAND
 // ignore_for_file: type=lint, type=warning
-/// 既定は自前の一時キャッシュ（#8）経由の画像。
+/// 既定は自前の一時キャッシュ（#8）経由の画像。一覧も背景も表示する大きさで
+/// デコードする（原寸のまま `ImageCache` に載せてビューアのページを押し出さない。#28）。
 ///
 /// 認証ヘッダは `ComicImageLoader` が使う `Dio` のインターセプタが付ける
 /// （API と同じオリジンのみ）。ウィジェット側でトークンを扱わない。
@@ -16,7 +17,8 @@ part of 'thumbnail_image.dart';
 @ProviderFor(thumbnailBuilder)
 final thumbnailBuilderProvider = ThumbnailBuilderProvider._();
 
-/// 既定は自前の一時キャッシュ（#8）経由の画像。
+/// 既定は自前の一時キャッシュ（#8）経由の画像。一覧も背景も表示する大きさで
+/// デコードする（原寸のまま `ImageCache` に載せてビューアのページを押し出さない。#28）。
 ///
 /// 認証ヘッダは `ComicImageLoader` が使う `Dio` のインターセプタが付ける
 /// （API と同じオリジンのみ）。ウィジェット側でトークンを扱わない。
@@ -29,7 +31,8 @@ final class ThumbnailBuilderProvider
           ThumbnailBuilder
         >
     with $Provider<ThumbnailBuilder> {
-  /// 既定は自前の一時キャッシュ（#8）経由の画像。
+  /// 既定は自前の一時キャッシュ（#8）経由の画像。一覧も背景も表示する大きさで
+  /// デコードする（原寸のまま `ImageCache` に載せてビューアのページを押し出さない。#28）。
   ///
   /// 認証ヘッダは `ComicImageLoader` が使う `Dio` のインターセプタが付ける
   /// （API と同じオリジンのみ）。ウィジェット側でトークンを扱わない。
@@ -66,4 +69,4 @@ final class ThumbnailBuilderProvider
   }
 }
 
-String _$thumbnailBuilderHash() => r'34b18aec85a17e1cce506a4b88b89a01000925ea';
+String _$thumbnailBuilderHash() => r'abd5907ba99c62fbc1416dbaac9869fd6ac1d08e';
