@@ -9,11 +9,18 @@ import 'comic_image.dart';
 part 'thumbnail_image.g.dart';
 
 /// サムネイル画像の描画方法。テストでは差し替える。
+///
+/// [backdrop] は背景用（タイトル詳細のヒーロー）。読み込み中 / 失敗時は
+/// 何も描かずに下の層を見せ、読み込めたら溶かして出す。
 typedef ThumbnailBuilder = Widget Function(
   BuildContext context,
   ComicImageRequest request,
-  BoxFit fit,
-);
+  BoxFit fit, {
+  bool backdrop,
+});
+
+/// 背景用の画像を溶かして出す時間。
+const backdropFadeInDuration = Duration(milliseconds: 250);
 
 /// 既定は自前の一時キャッシュ（#8）経由の画像。
 ///
@@ -21,12 +28,21 @@ typedef ThumbnailBuilder = Widget Function(
 /// （API と同じオリジンのみ）。ウィジェット側でトークンを扱わない。
 @Riverpod(keepAlive: true)
 ThumbnailBuilder thumbnailBuilder(Ref ref) {
-  return (context, request, fit) => ComicImage(
-    request: request,
-    fit: fit,
-    loadingBuilder: (context) => const ThumbnailPlaceholder(),
-    errorBuilder: (context, _) => const ThumbnailPlaceholder(failed: true),
-  );
+  return (context, request, fit, {backdrop = false}) => backdrop
+      ? ComicImage(
+          request: request,
+          fit: fit,
+          fadeInDuration: backdropFadeInDuration,
+          loadingBuilder: (context) => const SizedBox.shrink(),
+          errorBuilder: (context, _) => const SizedBox.shrink(),
+        )
+      : ComicImage(
+          request: request,
+          fit: fit,
+          loadingBuilder: (context) => const ThumbnailPlaceholder(),
+          errorBuilder: (context, _) =>
+              const ThumbnailPlaceholder(failed: true),
+        );
 }
 
 /// 巻 / 書籍のサムネイル。

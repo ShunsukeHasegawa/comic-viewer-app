@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:comic_laz/core/cache/comic_image_loader.dart';
+import 'package:comic_laz/core/media/media_urls.dart';
 import 'package:comic_laz/core/storage/app_database.dart';
 import 'package:comic_laz/core/widgets/thumbnail_image.dart';
 import 'package:flutter/material.dart';
@@ -18,7 +21,7 @@ Future<void> pumpThumbnail(
   final container = ProviderContainer(
     overrides: testOverrides(
       apiBaseUrl: 'https://comic.lazgram.com',
-      thumbnailBuilder: (context, request, fit) {
+      thumbnailBuilder: (context, request, fit, {backdrop = false}) {
         requests.add(request);
         return const SizedBox.expand();
       },
@@ -67,5 +70,68 @@ void main() {
 
     expect(requests, isEmpty);
     expect(find.byType(ThumbnailPlaceholder), findsOneWidget);
+  });
+
+  group('既定の描画（背景用）', () {
+    /// 本物の描画（`testOverrides` はスタブに差し替えるので別の口から呼ぶ）。
+    /// 取得層は準備中 / 失敗のままにして、ネットワークを触らせない。
+    final realBuilder = Provider<ThumbnailBuilder>(thumbnailBuilder);
+
+    Future<void> pumpBuilt(
+      WidgetTester tester, {
+      required bool backdrop,
+      bool loaderFails = false,
+    }) async {
+      final container = ProviderContainer(
+        overrides: [
+          ...testOverrides(apiBaseUrl: 'https://comic.lazgram.com'),
+          comicImageLoaderProvider.overrideWith(
+            (ref) => loaderFails
+                ? Future.error(StateError('準備に失敗'))
+                : Completer<ComicImageLoader>().future,
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final request = ComicImageRequest.thumbnail(
+        container.read(mediaUrlsProvider),
+        '/books/thumbnail/340?m=1',
+      )!;
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            home: Consumer(
+              builder: (context, ref, _) => ref.watch(realBuilder)(
+                context,
+                request,
+                BoxFit.cover,
+                backdrop: backdrop,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('一覧では読み込み中に本のアイコンを出す', (tester) async {
+      await pumpBuilt(tester, backdrop: false);
+
+      expect(find.byType(ThumbnailPlaceholder), findsOneWidget);
+    });
+
+    testWidgets('背景では読み込み中に何も描かない（黒い下地に板を浮かせない）', (tester) async {
+      await pumpBuilt(tester, backdrop: true);
+
+      expect(find.byType(ThumbnailPlaceholder), findsNothing);
+    });
+
+    testWidgets('背景では失敗しても何も描かない（下の層を見せる）', (tester) async {
+      await pumpBuilt(tester, backdrop: true, loaderFails: true);
+
+      expect(find.byType(ThumbnailPlaceholder), findsNothing);
+    });
   });
 }

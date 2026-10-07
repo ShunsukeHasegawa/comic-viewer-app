@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -276,16 +277,36 @@ class _HeroBackground extends ConsumerWidget {
   /// 収まる程度にする。
   static const _darkenDistance = 240.0;
 
+  /// ページ画像が来るまで敷くサムネイルのぼかし。小さい絵を引き伸ばした
+  /// 荒さが見えない程度にする。
+  static const _placeholderBlurSigma = 12.0;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final request = _backgroundRequest(ref.watch(mediaUrlsProvider), detail);
+    final layers = _backgroundLayers(ref.watch(mediaUrlsProvider), detail);
     // 画像が無い / 読み込み中でも文字は白なので、下地は必ず暗くしておく。
-    if (request == null) return const ColoredBox(color: Colors.black);
+    if (layers == null) return const ColoredBox(color: Colors.black);
 
-    final image = ref.watch(thumbnailBuilderProvider)(
-      context,
-      request,
-      BoxFit.cover,
+    final build = ref.watch(thumbnailBuilderProvider);
+    final (:page, :thumbnail) = layers;
+    final image = Stack(
+      fit: StackFit.expand,
+      children: [
+        if (thumbnail != null)
+          if (page == null)
+            build(context, thumbnail, BoxFit.cover, backdrop: true)
+          else
+            // ページ画像が来るまでのつなぎ。一覧で読み込み済みのことが多く、
+            // 単色の板よりタイトルの雰囲気がすぐ伝わる。
+            ImageFiltered(
+              imageFilter: ImageFilter.blur(
+                sigmaX: _placeholderBlurSigma,
+                sigmaY: _placeholderBlurSigma,
+              ),
+              child: build(context, thumbnail, BoxFit.cover, backdrop: true),
+            ),
+        if (page != null) build(context, page, BoxFit.cover, backdrop: true),
+      ],
     );
     // 文字が始まる位置（`_HeroChrome` の高さ + 絵を見せる高さ）。
     final textTop =
@@ -347,26 +368,28 @@ class _HeroBackground extends ConsumerWidget {
     );
   }
 
-  /// 背景に使う画像。1 巻の 1 ページ目、無ければその巻のサムネイル。
+  /// 背景に使う画像。1 巻の 1 ページ目と、それが来るまで敷く 1 巻のサムネイル。
   ///
   /// ページ URL には `files_version` が要るので、アーカイブが無い巻
-  /// （`files_version` が `null`）ではサムネイルで代用する。
-  static ComicImageRequest? _backgroundRequest(
-    MediaUrls urls,
-    BookDetail detail,
-  ) {
+  /// （`files_version` が `null`）ではサムネイルだけを背景にする。
+  /// 敷くのは一覧（`/api/books` は最終巻）と同じ絵ではなく 1 巻のものにする。
+  /// ページ 1 枚目と同じ絵なので、ぼかしが取れるように差し替わる。
+  static ({ComicImageRequest? page, ComicImageRequest? thumbnail})?
+  _backgroundLayers(MediaUrls urls, BookDetail detail) {
     if (detail.volumes.isEmpty) return null;
     final first = detail.volumes.first;
     final filesVersion = first.filesVersion;
-    if (filesVersion == null) {
-      return ComicImageRequest.thumbnail(urls, first.thumbnail);
-    }
-    return ComicImageRequest.page(
-      urls,
-      volumeId: first.id,
-      page: 1,
-      filesVersion: filesVersion,
-    );
+    final thumbnail = ComicImageRequest.thumbnail(urls, first.thumbnail);
+    final page = filesVersion == null
+        ? null
+        : ComicImageRequest.page(
+            urls,
+            volumeId: first.id,
+            page: 1,
+            filesVersion: filesVersion,
+          );
+    if (page == null && thumbnail == null) return null;
+    return (page: page, thumbnail: thumbnail);
   }
 }
 

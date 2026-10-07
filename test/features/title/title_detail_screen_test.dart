@@ -164,11 +164,65 @@ void main() {
     expect(page, isNotEmpty, reason: '背景にページ画像を使う');
     expect(page.first.request.page!.volumeId, 340, reason: '1 巻');
     expect(page.first.request.page!.page, 1, reason: '1 ページ目');
+    expect(page.first.backdrop, isTrue, reason: '読み込み中にグレーの板を出さない');
   });
 
-  testWidgets('アーカイブが無いタイトルはサムネイルを背景にする', (tester) async {
+  testWidgets('ページ画像が来るまで 1 巻のサムネイルをぼかして敷く（#23）', (tester) async {
+    // 原寸のページは取得に時間がかかる。単色の板より絵の雰囲気を先に見せ、
+    // 小さい絵を引き伸ばした荒さはぼかしで隠す。1 巻の絵にするのは、ページ
+    // 1 枚目と同じ絵なのでぼかしが取れるように差し替わるため。
+    await pumpDetail(
+      tester,
+      booksApi: FakeBooksApi(
+        bookDetail: sampleDetail(
+          volumes: const [
+            BookVolume(
+              id: 340,
+              volume: 1,
+              thumbnail: '/books/thumbnail/340?m=1',
+              filesVersion: 1,
+            ),
+            BookVolume(
+              id: 341,
+              volume: 2,
+              thumbnail: '/books/thumbnail/341?m=1',
+            ),
+          ],
+        ),
+      ),
+    );
+
+    final backdrops = tester
+        .widgetList<StubThumbnail>(find.byType(StubThumbnail))
+        .where((stub) => stub.backdrop)
+        .toList();
+    final thumbnail = backdrops.singleWhere(
+      (stub) => stub.request.page == null,
+    );
+    expect(thumbnail.request.url.path, '/books/thumbnail/340');
+    expect(
+      find.ancestor(
+        of: find.byWidget(thumbnail),
+        matching: find.byType(ImageFiltered),
+      ),
+      findsOneWidget,
+      reason: 'つなぎのサムネイルはぼかす',
+    );
+
+    final page = backdrops.singleWhere((stub) => stub.request.page != null);
+    expect(
+      find.ancestor(
+        of: find.byWidget(page),
+        matching: find.byType(ImageFiltered),
+      ),
+      findsNothing,
+      reason: 'ページ画像はぼかさない（b00f9db でぼかしをやめた）',
+    );
+  });
+
+  testWidgets('アーカイブが無いタイトルはサムネイルをぼかさずに背景にする', (tester) async {
     // ページ URL には files_version が要る。無い巻で組み立てると壊れた URL に
-    // なるので、サムネイルで代用する。
+    // なるので、サムネイルで代用する。これが最終的な絵なのでぼかさない。
     await pumpDetail(
       tester,
       booksApi: FakeBooksApi(
@@ -189,6 +243,14 @@ void main() {
       stubs.every((stub) => stub.request.page == null),
       isTrue,
       reason: 'ページ画像は組み立てない',
+    );
+    final backdrop = stubs.singleWhere((stub) => stub.backdrop);
+    expect(
+      find.ancestor(
+        of: find.byWidget(backdrop),
+        matching: find.byType(ImageFiltered),
+      ),
+      findsNothing,
     );
   });
 

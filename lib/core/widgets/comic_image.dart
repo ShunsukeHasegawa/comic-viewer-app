@@ -13,6 +13,7 @@ class ComicImage extends ConsumerWidget {
     required this.loadingBuilder,
     required this.errorBuilder,
     this.fit = BoxFit.cover,
+    this.fadeInDuration,
     super.key,
   });
 
@@ -24,6 +25,10 @@ class ComicImage extends ConsumerWidget {
   final Widget Function(BuildContext context, Object error) errorBuilder;
 
   final BoxFit fit;
+
+  /// 指定すると、読み込めた画像をこの時間で溶かして出す（パッと切り替えない）。
+  /// メモリ上のキャッシュから同期で出せたときは溶かさない。
+  final Duration? fadeInDuration;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -37,10 +42,29 @@ class ComicImage extends ConsumerWidget {
         image: ComicImageProvider(loader: loader, request: request),
         fit: fit,
         // 1 フレーム目が来るまでは「読み込み中」。
-        frameBuilder: (context, child, frame, wasSynchronouslyLoaded) =>
-            frame == null && !wasSynchronouslyLoaded
-            ? loadingBuilder(context)
-            : child,
+        frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
+          if (wasSynchronouslyLoaded) return child;
+          final duration = fadeInDuration;
+          if (duration == null) {
+            return frame == null ? loadingBuilder(context) : child;
+          }
+          // 子の数と並びを変えない（AnimatedOpacity の状態を引き継いで溶かす）。
+          return Stack(
+            fit: StackFit.passthrough,
+            children: [
+              if (frame == null)
+                loadingBuilder(context)
+              else
+                const SizedBox.shrink(),
+              AnimatedOpacity(
+                opacity: frame == null ? 0 : 1,
+                duration: duration,
+                curve: Curves.easeOut,
+                child: child,
+              ),
+            ],
+          );
+        },
         errorBuilder: (context, error, _) => errorBuilder(context, error),
       ),
     };
