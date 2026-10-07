@@ -115,6 +115,30 @@ class ImageCacheStore {
   /// 「実体だけ消えて行が残る」不整合になるため、必ず区切って消す。
   static const _deleteChunkSize = 500;
 
+  /// 上限超過の掃除で 1 回に読む行の数。
+  ///
+  /// 超過は書き込み数件分のことがほとんどなので、全行を Dart に読み込まず
+  /// 古い方から少しずつ読む。
+  static const _evictPageSize = 200;
+
+  /// ヒット時に `lastUsedAt` を書き直す最短の間隔。
+  ///
+  /// グリッドの再描画などで同じ画像が短時間に何度も読まれるたびに UPDATE を
+  /// 打たないため。LRU / 保持期間の判断は分〜日の単位なので、この程度の
+  /// ずれでは消す順番がほぼ変わらない。
+  @visibleForTesting
+  static const lastUsedRefreshInterval = Duration(minutes: 1);
+
+  /// 書き込み中（実体はあるが行がまだ無い）のファイル名。
+  ///
+  /// 孤児の掃除が「書き終えて行を入れる直前」の実体を消さないための印。
+  /// 掃除の列挙を非同期にしたので、その間に書き込みが割り込みうる。
+  /// 値は並行して書いている本数（同じキーを同時に取得することがある）。
+  final _writing = <String, int>{};
+
+  /// 実行中の孤児の掃除ごとの「掃除の間に書き始めたファイル名」。
+  final _sweepObservers = <Set<String>>[];
+
   /// キーからファイル名を作る（キーには `/` が含まれるため符号化する）。
   static String fileNameFor(String key) =>
       base64Url.encode(utf8.encode(key)).replaceAll('=', '');
@@ -129,6 +153,21 @@ class ImageCacheStore {
   @visibleForTesting
   Future<Uint8List> readFileBytes(File file) => file.readAsBytes();
 
+  /// ファイルの書き込み。
+  ///
+  /// テストから「実体は書き終えたが行はまだ無い」瞬間を作るための差し替え口。
+  /// 本番では [File.writeAsBytes] そのもの。
+  @visibleForTesting
+  Future<void> writeFileBytes(File file, Uint8List bytes) =>
+      file.writeAsBytes(bytes, flush: false);
+
+  /// 孤児の掃除が行を読み終えた直後（ファイルを見ていく前）。
+  ///
+  /// テストから「行を読んだ後に書き込みが終わる」並びを作るための差し替え口。
+  /// 本番では何もしない。
+  @visibleForTesting
+  Future<void> afterOrphanRowsRead() async {}
+
   /// キャッシュから読む。無ければ `null`。
   ///
   /// **読み出しの失敗は投げずにキャッシュミスとして返す**。ここで投げると
@@ -142,23 +181,28 @@ class ImageCacheStore {
     final file = _fileFor(row.fileName);
     final Uint8List bytes;
     try {
-      if (!file.existsSync()) {
-        // 実体だけ消えている（OS によるキャッシュ削除など）。メタ情報も捨てる。
-        await _deleteRows([row]);
-        return null;
-      }
-      // LRU の基準を更新する（読めなかった場合に備え、読み出しは先に行う）。
+      // 事前に存在を確かめず、読んでみて失敗したらミスにする（UI isolate で
+      // 同期の `existsSync` を打たない。確かめても直後に消されうるので同じこと）。
       bytes = await readFileBytes(file);
-    } on FileSystemException {
-      // `existsSync` の直後に掃除 / 手動削除が実体を消すことがある。
-      // 読めない実体はメタ情報ごと捨て、呼び出し側にはミスとして返す。
+    } on PathNotFoundException {
+      // 実体だけ消えている（OS によるキャッシュ削除 / 掃除 / 手動削除との競合）。
+      // 無い実体のメタ情報は捨て、呼び出し側にはミスとして返す。
       await _deleteRows([row]);
+      return null;
+    } on FileSystemException {
+      // ロック / ファイルを開きすぎ（EMFILE）/ 権限など一時的かもしれない失敗。
+      // 実体はまだあるので消さず、今回だけミスにする（ネットワークから取り直す）。
       return null;
     }
 
-    await (database.update(database.cachedImages)
-          ..where((table) => table.key.equals(key)))
-        .write(CachedImagesCompanion(lastUsedAt: Value(now())));
+    // LRU の基準を更新する（読めなかった場合に備え、読み出しの後で行う）。
+    // 直近に更新したばかりなら書き直さない（ヒットのたびに UPDATE しない）。
+    final usedAt = now();
+    if (usedAt.difference(row.lastUsedAt) >= lastUsedRefreshInterval) {
+      await (database.update(database.cachedImages)
+            ..where((table) => table.key.equals(key)))
+          .write(CachedImagesCompanion(lastUsedAt: Value(usedAt)));
+    }
 
     return CachedImage(bytes: bytes, contentType: row.contentType);
   }
@@ -178,31 +222,45 @@ class ImageCacheStore {
 
     final fileName = fileNameFor(key);
     final file = _fileFor(fileName);
-    if (!file.parent.existsSync()) {
+    // 印は本数で数える。単なる集合だと、同じキーを並行して書いたときに先に
+    // 終わった方が印を外し、まだ行を入れていない方の実体が孤児扱いされうる。
+    _writing[fileName] = (_writing[fileName] ?? 0) + 1;
+    for (final observer in _sweepObservers) {
+      observer.add(fileName);
+    }
+    try {
+      // 既にあれば何もしない（OS がキャッシュディレクトリごと消すことがある）。
       await file.parent.create(recursive: true);
-    }
-    await file.writeAsBytes(bytes, flush: false);
+      await writeFileBytes(file, bytes);
 
-    if (generation != null && generation != _generation) {
-      // 書いている最中に全削除が入った。実体も残さない。
-      await _deleteFile(file);
-      return;
-    }
+      if (generation != null && generation != _generation) {
+        // 書いている最中に全削除が入った。実体も残さない。
+        await _deleteFile(file);
+        return;
+      }
 
-    final writtenAt = now();
-    await database
-        .into(database.cachedImages)
-        .insertOnConflictUpdate(
-          CachedImageRow(
-            key: key,
-            kind: kind,
-            fileName: fileName,
-            bytes: bytes.length,
-            contentType: contentType,
-            createdAt: writtenAt,
-            lastUsedAt: writtenAt,
-          ),
-        );
+      final writtenAt = now();
+      await database
+          .into(database.cachedImages)
+          .insertOnConflictUpdate(
+            CachedImageRow(
+              key: key,
+              kind: kind,
+              fileName: fileName,
+              bytes: bytes.length,
+              contentType: contentType,
+              createdAt: writtenAt,
+              lastUsedAt: writtenAt,
+            ),
+          );
+    } finally {
+      final remaining = (_writing[fileName] ?? 1) - 1;
+      if (remaining <= 0) {
+        _writing.remove(fileName);
+      } else {
+        _writing[fileName] = remaining;
+      }
+    }
 
     // 書き込みのたびに待たせない（次の読み出しを妨げない）。
     // 掃除の失敗で画像の表示を失敗扱いにはしない。
@@ -274,20 +332,19 @@ class ImageCacheStore {
 
   Future<void> _evict() async {
     final settings = await settingsStore.read();
-    final protected = await pinnedKeys();
 
-    // 期限切れ（保持期間を過ぎたもの）。
+    // 期限切れ（保持期間を過ぎたもの）。保護印の付いた画像は SQL 側で外し、
+    // 期限切れの行だけを読む（全行も全部の印も Dart に読み込まない）。
     if (settings.retention.duration case final retention?) {
       final threshold = now().subtract(retention);
       final expired =
           await (database.select(database.cachedImages)..where(
-                (table) => table.lastUsedAt.isSmallerThanValue(threshold),
+                (table) =>
+                    table.lastUsedAt.isSmallerThanValue(threshold) &
+                    _isNotPinned(table),
               ))
               .get();
-      await _deleteRows([
-        for (final row in expired)
-          if (!protected.contains(row.key)) row,
-      ]);
+      await _deleteRows(expired);
     }
 
     // 種別ごとの上限。
@@ -296,42 +353,70 @@ class ImageCacheStore {
           ? settings.pageLimit.bytes
           : settings.thumbnailLimit.bytes;
       if (limit == null) continue;
-      await evictToLimit(kind, limit, protected: protected);
+      await evictToLimit(kind, limit);
     }
+  }
+
+  /// 保護印（#11）が付いていない行。
+  Expression<bool> _isNotPinned($CachedImagesTable table) {
+    final pinned = database.selectOnly(database.pinnedImages)
+      ..addColumns([database.pinnedImages.key]);
+    return table.key.isNotInQuery(pinned);
+  }
+
+  /// [kind] の合計バイト数（保護印の付いた画像も含む）。
+  Future<int> _bytesOf(CachedImageKind kind) async {
+    final sum = database.cachedImages.bytes.sum();
+    final query = database.selectOnly(database.cachedImages)
+      ..addColumns([sum])
+      ..where(database.cachedImages.kind.equalsValue(kind));
+    return (await query.getSingle()).read(sum) ?? 0;
   }
 
   /// [kind] の合計が [limitBytes] 以下になるまで、古い順に削除する。
   ///
   /// 設定の上限は 256MB 以上なので、削除順の検証はここを直接呼ぶ。
   ///
-  /// 保護印の付いた画像（[protected]）は削除しないが、**合計には数える**。
+  /// 書き込みのたびに走るので、まず合計（`SUM(bytes)`）だけを確かめ、超えて
+  /// いなければ行を読まない。超えていれば古い方から [_evictPageSize] 件ずつ
+  /// 読んで消す（超過は数件分のことがほとんどで、全行を読むのは無駄）。
+  ///
+  /// 保護印の付いた画像は削除しないが、**合計には数える**。
   /// 数えないと上限を超えて使い続けることになるので、保護対象が多いときは
   /// その分だけ普通の画像が早く追い出される。
   @visibleForTesting
-  Future<void> evictToLimit(
-    CachedImageKind kind,
-    int limitBytes, {
-    Set<String>? protected,
-  }) async {
-    final keep = protected ?? await pinnedKeys();
-    final rows =
-        await (database.select(database.cachedImages)
-              ..where((table) => table.kind.equalsValue(kind))
-              // 古い順（最後に使った時刻）に消す。
-              ..orderBy([(table) => OrderingTerm.asc(table.lastUsedAt)]))
-            .get();
+  Future<void> evictToLimit(CachedImageKind kind, int limitBytes) async {
+    while (true) {
+      // 合計は区切りごとに読み直す。手元で引き算し続けると、並行して走る
+      // 削除（世代の入れ替え / 読み出し失敗の後始末）の分を二重に数えて
+      // 消しすぎる。
+      var total = await _bytesOf(kind);
+      if (total <= limitBytes) return;
 
-    var total = rows.fold<int>(0, (sum, row) => sum + row.bytes);
-    if (total <= limitBytes) return;
+      final rows =
+          await (database.select(database.cachedImages)
+                ..where(
+                  (table) => table.kind.equalsValue(kind) & _isNotPinned(table),
+                )
+                // 古い順（最後に使った時刻）に消す。同時刻はキーで順番を固定する。
+                ..orderBy([
+                  (table) => OrderingTerm.asc(table.lastUsedAt),
+                  (table) => OrderingTerm.asc(table.key),
+                ])
+                ..limit(_evictPageSize))
+              .get();
+      // 残りが保護印つきだけなら、それ以上は消せない。
+      if (rows.isEmpty) return;
 
-    final victims = <CachedImageRow>[];
-    for (final row in rows) {
-      if (total <= limitBytes) break;
-      if (keep.contains(row.key)) continue;
-      victims.add(row);
-      total -= row.bytes;
+      final victims = <CachedImageRow>[];
+      for (final row in rows) {
+        if (total <= limitBytes) break;
+        victims.add(row);
+        total -= row.bytes;
+      }
+      // 消した行は次の読み出しに現れないので、毎回先頭から読めばよい。
+      await _deleteRows(victims);
     }
-    await _deleteRows(victims);
   }
 
   /// 保護印の付いたキャッシュキー（#11）。
@@ -378,9 +463,24 @@ class ImageCacheStore {
     // 進行中の取得が破棄の後に書き戻さないよう、世代を進める。
     _generation++;
 
-    final query = database.select(database.cachedImages);
-    if (kind != null) query.where((table) => table.kind.equalsValue(kind));
-    await _deleteRows(await query.get());
+    final table = database.cachedImages;
+    if (kind == null) {
+      // 全部消すとき（ログアウトなど数万件になりうる）は行を 1 文で消し、実体は
+      // 下の孤児の掃除でディレクトリの列挙 1 回でまとめて消す（1 件ずつ存在を
+      // 確かめない）。行が先なので、途中で失敗しても残るのは孤児の実体だけで、
+      // 次の削除操作で回収される（行だけ残って使用量が嘘になることはない）。
+      await database.delete(table).go();
+    } else {
+      // 消すのに要るのはキーとファイル名だけ。全列を行オブジェクトに
+      // 変換しない（件数が多いと日時の変換だけで秒単位になる）。
+      final query = database.selectOnly(table)
+        ..addColumns([table.key, table.fileName])
+        ..where(table.kind.equalsValue(kind));
+      await _deleteEntries([
+        for (final row in await query.get())
+          (key: row.read(table.key)!, fileName: row.read(table.fileName)!),
+      ]);
+    }
 
     // 行を持たない実体（書き込みの途中で落ちた分）もここで回収する。
     await sweepOrphanFiles();
@@ -391,21 +491,52 @@ class ImageCacheStore {
   /// 書き込みは「実体 → 行」の順なので、途中で失敗したり OS に kill されたりすると
   /// 実体だけが残る。孤児は `usage()` にも [clear] にも現れず永久に容量を食うため、
   /// 削除操作のたびに回収する。
+  ///
+  /// 列挙は非同期（UI isolate を止めない）。**先に列挙してから行を読む**ので、
+  /// 列挙の時点で行を入れ終えていた実体は必ず「既知」に入る。行を入れる前の
+  /// 実体（書き込み中）は [_writing] で外す。
   @visibleForTesting
   Future<void> sweepOrphanFiles() async {
-    final directory = directories.imageCache;
-    if (!directory.existsSync()) return;
+    // 掃除の間に始まった書き込みのファイル名。行を読んだ後に書き終えて
+    // [_writing] から外れたものも、ここに残るので消さない。
+    final startedDuringSweep = <String>{};
+    _sweepObservers.add(startedDuringSweep);
+    try {
+      final files = <File>[];
+      try {
+        await for (final entity in directories.imageCache.list()) {
+          if (entity is File) files.add(entity);
+        }
+      } on PathNotFoundException {
+        // ディレクトリごと無い（OS が消した）なら孤児も無い。
+        return;
+      }
+      // それ以外の列挙の失敗は投げる。握ると削除（ログアウト時の破棄）が
+      // 成功扱いになり、やり直しの印が消えてしまう（#15）。
+      if (files.isEmpty) return;
 
-    final fileName = database.cachedImages.fileName;
-    final rows = await (database.selectOnly(
-      database.cachedImages,
-    )..addColumns([fileName])).get();
-    final known = {for (final row in rows) row.read(fileName)};
+      // 行を読む**前**に書き込み中の名前を控える。行を読んだ後・ループが
+      // そのファイルに届く前に書き終えたものは、行も [_writing] も見えない。
+      final writingAtQuery = {..._writing.keys};
+      final fileName = database.cachedImages.fileName;
+      final rows = await (database.selectOnly(
+        database.cachedImages,
+      )..addColumns([fileName])).get();
+      final known = {for (final row in rows) row.read(fileName)};
+      await afterOrphanRowsRead();
 
-    for (final entity in directory.listSync()) {
-      if (entity is! File) continue;
-      if (known.contains(p.basename(entity.path))) continue;
-      await _deleteFile(entity);
+      for (final file in files) {
+        final name = p.basename(file.path);
+        if (known.contains(name) ||
+            writingAtQuery.contains(name) ||
+            startedDuringSweep.contains(name) ||
+            _writing.containsKey(name)) {
+          continue;
+        }
+        await _deleteFile(file);
+      }
+    } finally {
+      _sweepObservers.remove(startedDuringSweep);
     }
   }
 
@@ -431,13 +562,20 @@ class ImageCacheStore {
 
   Future<void> _deleteFile(File file) async {
     try {
+      // 先に確かめる（無いファイルの削除は例外になり、数万件の破棄で重い）。
+      // `exists` は非同期版の方が遅い（avoid_slow_async_io）。確かめた直後に
+      // 消えても下の catch で拾う。
       if (file.existsSync()) await file.delete();
     } on FileSystemException {
-      // 消せなくてもメタ情報は消す（次回の書き込みで上書きされる）。
+      // 既に無い / 消せなくてもメタ情報は消す（次回の書き込みで上書きされる）。
     }
   }
 
-  Future<void> _deleteRows(List<CachedImageRow> rows) async {
+  Future<void> _deleteRows(List<CachedImageRow> rows) => _deleteEntries([
+    for (final row in rows) (key: row.key, fileName: row.fileName),
+  ]);
+
+  Future<void> _deleteEntries(List<_CacheEntry> rows) async {
     if (rows.isEmpty) return;
 
     // 実体と行を同じ区切りで消す（実体を全件消してから 1 文で行を消すと、
@@ -447,9 +585,11 @@ class ImageCacheStore {
         start,
         math.min(start + _deleteChunkSize, rows.length),
       );
-      for (final row in chunk) {
-        await _deleteFile(_fileFor(row.fileName));
-      }
+      // 非同期の削除を 1 件ずつ待つと、数万件の破棄（ログアウト）で往復待ちが
+      // 積み上がる。区切りの中はまとめて投げる（それぞれ別のファイル）。
+      await Future.wait([
+        for (final row in chunk) _deleteFile(_fileFor(row.fileName)),
+      ]);
       await database.batch((batch) {
         batch.deleteWhere(
           database.cachedImages,
@@ -459,6 +599,9 @@ class ImageCacheStore {
     }
   }
 }
+
+/// 削除に要る最小限（キーとファイル名）。
+typedef _CacheEntry = ({String key, String fileName});
 
 @Riverpod(keepAlive: true)
 Future<ImageCacheStore> imageCacheStore(Ref ref) async {

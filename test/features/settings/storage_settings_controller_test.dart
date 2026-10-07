@@ -37,9 +37,13 @@ void main() {
     await container.read(storageSettingsControllerProvider.future);
     await harness.record('t/a/1', bytes: 32, kind: CachedImageKind.thumbnail);
 
-    final error = await container
-        .read(storageSettingsControllerProvider.notifier)
-        .clearCache(kind: CachedImageKind.thumbnail);
+    // 削除は孤児の掃除でディレクトリを非同期に列挙する（実ファイル I/O）。
+    // `testWidgets` の擬似時間ではその完了が進まないので `runAsync` の中で待つ。
+    final error = await tester.runAsync(
+      () => container
+          .read(storageSettingsControllerProvider.notifier)
+          .clearCache(kind: CachedImageKind.thumbnail),
+    );
 
     expect(error, isNull);
     expect(memoryCleared, 1);
@@ -54,13 +58,19 @@ void main() {
     container.listen(storageSettingsControllerProvider, (_, _) {});
     await container.read(storageSettingsControllerProvider.future);
 
-    final result = container
-        .read(storageSettingsControllerProvider.notifier)
-        .clearCache();
-    // 画面を離れる（notifier が破棄される）→ そのあと削除が終わる。
-    container.dispose();
-    gated.gate.complete();
+    // 削除は孤児の掃除でディレクトリを非同期に列挙する（実ファイル I/O）。
+    // `testWidgets` の擬似時間ではその続きが進まないので、削除の開始から
+    // 完了までを `runAsync` の中で行う。
+    final error = await tester.runAsync(() async {
+      final result = container
+          .read(storageSettingsControllerProvider.notifier)
+          .clearCache();
+      // 画面を離れる（notifier が破棄される）→ そのあと削除が終わる。
+      container.dispose();
+      gated.gate.complete();
+      return result;
+    });
 
-    expect(await result, isNull);
+    expect(error, isNull);
   });
 }

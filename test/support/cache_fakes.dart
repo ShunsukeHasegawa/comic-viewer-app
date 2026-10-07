@@ -195,18 +195,70 @@ class CacheHarness {
 
 /// ファイルの読み出しだけが必ず失敗するキャッシュ。
 ///
-/// 掃除や OS のキャッシュ削除が `existsSync` の直後に実体を消した状況を作る。
+/// 掃除や OS のキャッシュ削除が、行を読んだ直後に実体を消した状況を作る。
 class BrokenFileCacheStore extends ImageCacheStore {
   BrokenFileCacheStore({
     required super.database,
     required super.directories,
     required super.settingsStore,
     super.now,
+    this.error = const PathNotFoundException('cache', OSError('見つかりません', 2)),
   });
 
+  /// 読み出しで投げる例外。既定は「実体が無い」。
+  final FileSystemException error;
+
   @override
-  Future<Uint8List> readFileBytes(File file) async =>
-      throw const FileSystemException('読み出しに失敗');
+  Future<Uint8List> readFileBytes(File file) async => throw error;
+}
+
+/// 実体を書き終えたところで止まるキャッシュ（行を入れる前の瞬間を作る）。
+///
+/// 孤児の掃除がその瞬間に割り込んでも、書き込み中の実体を消さないことの確認用。
+class GatedWriteCacheStore extends ImageCacheStore {
+  GatedWriteCacheStore({
+    required super.database,
+    required super.directories,
+    required super.settingsStore,
+    super.now,
+  });
+
+  /// 実体を書き終えたら完了する。
+  final written = Completer<void>();
+
+  /// 完了させると行の登録へ進む。
+  final gate = Completer<void>();
+
+  @override
+  Future<void> writeFileBytes(File file, Uint8List bytes) async {
+    await super.writeFileBytes(file, bytes);
+    written.complete();
+    await gate.future;
+  }
+}
+
+/// 孤児の掃除が行を読んだ直後に、止めておいた書き込みを最後まで進めるキャッシュ。
+///
+/// 「行を読んだ後・ループがそのファイルに届く前に書き込みが終わる」並びを
+/// 確実に作る（その時点では行も書き込み中の印も見えない）。
+class SweepInterleavingCacheStore extends GatedWriteCacheStore {
+  SweepInterleavingCacheStore({
+    required super.database,
+    required super.directories,
+    required super.settingsStore,
+    super.now,
+  });
+
+  /// 掃除の途中で終わらせる書き込み。
+  Future<void>? pendingWrite;
+
+  @override
+  Future<void> afterOrphanRowsRead() async {
+    final write = pendingWrite;
+    if (write == null) return;
+    gate.complete();
+    await write;
+  }
 }
 
 /// 読み出しが必ず失敗するキャッシュ（DB ごと壊れた状況）。

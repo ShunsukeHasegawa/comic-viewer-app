@@ -105,6 +105,29 @@ ProviderContainer _containerOf(WidgetTester tester) =>
 Finder _inTile(Key key, String text) =>
     find.descendant(of: find.byKey(key), matching: find.text(text));
 
+/// 実ファイル I/O を挟む操作（キャッシュ削除の孤児の掃除など）を [done] が
+/// 見つかるまで進める。
+///
+/// `testWidgets` の擬似時間ではディスク完了待ちの future が進まないので、
+/// 本物の時間を少し流す（`runAsync`）→ 擬似時間側の続きを流す（`pump`）を
+/// 繰り返す。
+///
+/// 本物の時間で約 10 秒待っても現れなければ失敗にする（黙って先へ進むと、
+/// 後ろの expect が原因の分かりにくい失敗になる）。
+Future<void> settleWithDiskIo(WidgetTester tester, Finder done) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 10));
+  while (done.evaluate().isEmpty) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('ディスク I/O を待っても $done が現れませんでした（約 10 秒）');
+    }
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 20)),
+    );
+    await tester.pump();
+  }
+  await tester.pumpAndSettle();
+}
+
 /// 指定したドロップダウンで選択肢を選ぶ。
 Future<void> selectOption(
   WidgetTester tester,
@@ -499,7 +522,7 @@ void main() {
     await tester.tap(find.byKey(StorageSettingsScreen.clearAllKey));
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(FilledButton, '削除する'));
-    await tester.pumpAndSettle();
+    await settleWithDiskIo(tester, find.text('すべてのデータを削除しました'));
 
     expect(queue.purgeCount, 1);
     expect((await harness.store.usage()).totalCount, 0);
@@ -516,7 +539,7 @@ void main() {
     await tester.tap(find.byKey(StorageSettingsScreen.clearAllKey));
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(FilledButton, '削除する'));
-    await tester.pumpAndSettle();
+    await settleWithDiskIo(tester, find.textContaining('データの削除に失敗しました'));
 
     expect(find.textContaining('データの削除に失敗しました'), findsOneWidget);
     expect(find.text('すべてのデータを削除しました'), findsNothing);
