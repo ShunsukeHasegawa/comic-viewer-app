@@ -1,13 +1,11 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../../../core/device/app_resume_monitor.dart';
 import '../../../core/device/connectivity_monitor.dart';
-import '../../../core/network/api_exception.dart';
 import '../../../core/utils/format.dart';
 import '../../../data/api/volumes_api.dart';
 import '../../../domain/models/volume_manifest.dart';
@@ -19,7 +17,13 @@ import '../data/download_store.dart';
 import '../data/free_space_probe.dart';
 import '../domain/archive_task_id.dart';
 import '../domain/volume_download.dart';
+import 'download_failure_policy.dart';
+import 'download_progress_book.dart';
 import 'download_settings.dart';
+import 'reconcile_planner.dart';
+
+export 'download_failure_policy.dart' show maxDownloadAttempts;
+export 'download_progress_book.dart' show progressPersistIntervalBytes;
 
 part 'download_queue.g.dart';
 
@@ -29,20 +33,11 @@ typedef RetryDelay = Future<void> Function(Duration duration);
 @Riverpod(keepAlive: true)
 RetryDelay downloadRetryDelay(Ref ref) => Future<void>.delayed;
 
-/// 1 巻あたりの転送の試行回数（初回を含む）。
-const maxDownloadAttempts = 3;
-
 /// 空き容量チェックの余裕分。
 ///
 /// ぴったり入るだけの空きしか無い状態で始めると、OS やほかのアプリの書き込みで
 /// 途中で詰まる。
 const freeSpaceMarginBytes = 64 * 1024 * 1024;
-
-/// 進捗を DB へ書く間隔（バイト）。
-///
-/// 毎回書くと 1 巻で数千回の UPDATE になる。再開位置は OS の転送が持って
-/// いるので、DB の値は表示の復元用で多少古くてよい。
-const progressPersistIntervalBytes = 4 * 1024 * 1024;
 
 /// 巻単位のダウンロードキュー。
 ///
@@ -68,8 +63,8 @@ class DownloadQueue extends _$DownloadQueue {
   /// （落とし直しに失敗した瞬間に、読める ZIP を指す行が台帳から消えてしまう）。
   final _installed = <int, VolumeDownload>{};
 
-  /// 最後に DB へ書いた受信バイト数。
-  final _persistedBytes = <int, int>{};
+  /// 進捗を DB へ書く間引き（最後に書いた受信バイト数）。
+  final _persistThrottle = ProgressPersistThrottle();
 
   /// 巻ごとの「今の転送」。
   ///
@@ -144,13 +139,10 @@ class DownloadQueue extends _$DownloadQueue {
   final _cancelling = <String>{};
 
   /// 巻ごとの転送の試行回数（再試行の上限）。
-  final _attempts = <int, int>{};
+  final _attempts = DownloadAttempts();
 
   /// OS に渡して未確定の巻の残りバイト数（空き容量の判定に含める。F7）。
-  ///
-  /// 空き容量を 1 巻ずつ見ると、まとめて積んだ 30 巻がどれも「入る」と
-  /// 判定され、後半が転送の途中で容量不足になる。
-  final _reservedBytes = <int, int>{};
+  final _reservations = SpaceReservations();
 
   /// 進行中の非同期処理（テストで「落ち着くまで待つ」ために使う）。
   final _pending = <Future<void>>{};
@@ -340,7 +332,7 @@ class DownloadQueue extends _$DownloadQueue {
             );
     await _save(download);
     if (!ref.mounted) return;
-    _attempts.remove(volumeId);
+    _attempts.reset(volumeId);
     _checkNotificationPermissionOnce();
     _scheduleSubmit(volumeId);
   }
@@ -518,7 +510,7 @@ class DownloadQueue extends _$DownloadQueue {
     final deferToPause =
         _tasks.containsKey(volumeId) && _pausing.contains(volumeId);
     if (deferToPause) _resumeRequested.add(volumeId);
-    _attempts.remove(volumeId);
+    _attempts.reset(volumeId);
     await _save(
       current.copyWith(
         status: VolumeDownloadStatus.queued,
@@ -554,8 +546,8 @@ class DownloadQueue extends _$DownloadQueue {
 
     final task = _tasks[volumeId];
     _clearTask(volumeId);
-    _attempts.remove(volumeId);
-    _persistedBytes.remove(volumeId);
+    _attempts.reset(volumeId);
+    _persistThrottle.forget(volumeId);
     _installed.remove(volumeId);
 
     // 先に台帳を消す。メモリ（state）からは await の**前に**消す（F4）。
@@ -727,8 +719,12 @@ class DownloadQueue extends _$DownloadQueue {
       // 待機のまま残り、次の契機（回線の復帰 / 前面復帰 / Wi-Fi 待ちの解除 /
       // 次の起動）まで積み直さない。自宅サーバーを時間で叩き続けないため、
       // 時間での再試行はあえて持たない。
-      if (_isOffline(error) && !_installed.containsKey(volumeId)) return;
-      await _fail(volumeId, _messageOf(error), generation: generation);
+      if (isOfflineError(error) && !_installed.containsKey(volumeId)) return;
+      await _fail(
+        volumeId,
+        downloadErrorMessage(error),
+        generation: generation,
+      );
       return;
     }
     if (_isStale(generation)) return;
@@ -782,10 +778,10 @@ class DownloadQueue extends _$DownloadQueue {
     // 中断中の転送は数えない）。9 分の時間切れなどの一時的な停止は台帳が
     // 待機中 / 取得中のままなので、引き続き押さえる。
     final ledger = state.value ?? const <int, VolumeDownload>{};
-    final reservedByOthers = _reservedBytes.entries
-        .where((entry) => entry.key != volumeId)
-        .where((entry) => ledger[entry.key]?.isActive ?? false)
-        .fold<int>(0, (sum, entry) => sum + entry.value);
+    final reservedByOthers = _reservations.reservedByOthers(
+      volumeId,
+      isActive: (id) => ledger[id]?.isActive ?? false,
+    );
     if (await _hasNotEnoughSpace(manifest.archiveBytes + reservedByOthers)) {
       await _fail(
         volumeId,
@@ -810,7 +806,11 @@ class DownloadQueue extends _$DownloadQueue {
     try {
       await store.writeManifest(manifest);
     } on FileSystemException catch (error) {
-      await _fail(volumeId, _fileSystemMessage(error), generation: generation);
+      await _fail(
+        volumeId,
+        fileSystemFailureMessage(error),
+        generation: generation,
+      );
       return;
     }
 
@@ -827,7 +827,7 @@ class DownloadQueue extends _$DownloadQueue {
       if (archiveUrl.filesVersion != manifest.filesVersion) {
         await _fail(
           volumeId,
-          _failureMessage(
+          transferFailureMessage(
             const TransferFailure(kind: TransferFailureKind.resumeMismatch),
           ),
           generation: generation,
@@ -838,8 +838,12 @@ class DownloadQueue extends _$DownloadQueue {
     } on Object catch (error) {
       if (_isStale(generation)) return;
       // マニフェストの取得の失敗と同じ扱い（圏外の初回は待機のまま残す）。
-      if (_isOffline(error) && !_installed.containsKey(volumeId)) return;
-      await _fail(volumeId, _messageOf(error), generation: generation);
+      if (isOfflineError(error) && !_installed.containsKey(volumeId)) return;
+      await _fail(
+        volumeId,
+        downloadErrorMessage(error),
+        generation: generation,
+      );
       return;
     }
     download = state.value?[volumeId];
@@ -858,8 +862,8 @@ class DownloadQueue extends _$DownloadQueue {
     _liveTasks.add(volumeId);
     // 先頭から取る転送。前の転送が走った記録は引き継がない。
     _hadProgress.remove(volumeId);
-    _reservedBytes[volumeId] = manifest.archiveBytes;
-    _persistedBytes[volumeId] = 0;
+    _reservations.reserve(volumeId, manifest.archiveBytes);
+    _persistThrottle.restart(volumeId);
     // 世代にかかわる項目（filesVersion / pageCount / archive_etag）は**検証が
     // 通ってから**台帳に書く（[_complete]）。取り直しの途中で落ちても、台帳は
     // 端末にある旧世代を指したままにしておく（#11 のページ解決が実体の無い
@@ -1107,24 +1111,22 @@ class DownloadQueue extends _$DownloadQueue {
   void _onProgress(int volumeId, int received, int? total) {
     final current = state.value?[volumeId];
     if (current == null || !current.isActive) return;
-    final totalBytes = total != null && total > 0 ? total : current.totalBytes;
-    final next = current.copyWith(
-      status: VolumeDownloadStatus.downloading,
-      receivedBytes: received,
-      totalBytes: totalBytes,
-    );
+    final next = applyProgress(current, received, total);
+    final totalBytes = next.totalBytes;
     _emit(next);
     // 進捗が届く = 走っている（`running` を取りこぼしても一時停止できる）。
     _liveTasks.add(volumeId);
     _runningTasks.add(volumeId);
     _hadProgress.add(volumeId);
     if (totalBytes > 0) {
-      _reservedBytes[volumeId] = math.max(0, totalBytes - received);
+      _reservations.reserveRemaining(
+        volumeId,
+        total: totalBytes,
+        received: received,
+      );
     }
 
-    final persisted = _persistedBytes[volumeId] ?? 0;
-    if ((received - persisted).abs() < progressPersistIntervalBytes) return;
-    _persistedBytes[volumeId] = received;
+    if (!_persistThrottle.shouldPersist(volumeId, received)) return;
     final store = _store;
     if (store != null) _track(store.save(next));
   }
@@ -1138,14 +1140,22 @@ class DownloadQueue extends _$DownloadQueue {
     required int generation,
   }) async {
     final volumeId = task.volumeId;
-    switch (failure.kind) {
-      case TransferFailureKind.notFound || TransferFailureKind.fileSystem:
+    final action = failureActionFor(
+      failure,
+      isWaitingForWifi: () => _isWaitingForWifi,
+    );
+    switch (action) {
+      case FailureAction.giveUp:
         // 待っても直らない（削除済み / セーフモードで配信されない / 容量不足）。
         _clearTask(volumeId);
         await _forgetQuietly(task);
-        await _fail(volumeId, _failureMessage(failure), generation: generation);
+        await _fail(
+          volumeId,
+          transferFailureMessage(failure),
+          generation: generation,
+        );
 
-      case TransferFailureKind.unauthorized:
+      case FailureAction.recheckSession:
         // F2: ネイティブの 401 は「タスクに焼き込んだ古いトークン」に対する
         // もので、今のトークンが失効したとは限らない。すぐにログアウト
         // （数 GB の破棄）させず、マニフェストを Dio で取り直して確かめる。
@@ -1159,9 +1169,7 @@ class DownloadQueue extends _$DownloadQueue {
         if (_isStale(generation)) return;
         _scheduleSubmit(volumeId);
 
-      case TransferFailureKind.forbidden ||
-          TransferFailureKind.archiveReplaced ||
-          TransferFailureKind.resumeMismatch:
+      case FailureAction.reissueFromScratch:
         // 署名付き URL が使えなくなった（#22）か、ZIP が差し替わっていた。
         // - 403: 期限切れ（最長 24 時間。長く中断していた巻の再開など）/ 改ざん /
         //   発行元トークンの失効。発行し直せば取れる。ログインごと失効していれば、
@@ -1180,34 +1188,19 @@ class DownloadQueue extends _$DownloadQueue {
         _scheduleTempSweep();
         _scheduleSubmit(volumeId);
 
-      case TransferFailureKind.connection || TransferFailureKind.other
-          when failure.httpCode == null && _isWaitingForWifi:
-        // F3: Wi-Fi 限定で Wi-Fi が切れた失敗は回数に数えない（数えると
-        // Wi-Fi が 3 回途切れるだけで「失敗」になる）。積み直せば、ネイティブが
-        // Wi-Fi に戻るまで待ってから取り始める。
-        // `other` も含めるのは、Android では Wi-Fi の制約が外れると WorkManager
-        // がワーカーを止め、その失敗が connection ではなく理由無し / 一般の
-        // 例外（CancellationException）として届くため（モバイル回線が生きて
-        // いるので、パッケージの「オフラインなら再試行待ち」も効かない）。
-        // HTTP の応答があった失敗は除く。サーバーまで届いている = Wi-Fi 切れ
-        // ではない。Wi-Fi 待ちの判定（VPN だけの回線などを従量制とみなす）と
-        // OS の制約が食い違うと、決まって 4xx を返す巻を数えずに待ち時間無しで
-        // 積み直し続け、自宅サーバーを叩き続ける。下の「数えて待つ」側に回す。
+      case FailureAction.resubmitUncounted:
+        // F3: Wi-Fi 限定で Wi-Fi が切れた失敗は回数に数えない。積み直せば、
+        // ネイティブが Wi-Fi に戻るまで待ってから取り始める（判断の詳細は
+        // [failureActionFor]）。
         await _resubmit(task, generation: generation);
 
-      case TransferFailureKind.connection ||
-          TransferFailureKind.server ||
-          TransferFailureKind.tooManyRequests ||
-          TransferFailureKind.other:
+      case FailureAction.retryWithBackoff:
         if (!await _countAttempt(task, failure, generation: generation)) {
           return;
         }
-        // 2 秒 → 4 秒。自宅サーバーを叩き続けない。429 の Retry-After は
-        // 見ない（パッケージの失敗の更新に応答ヘッダーが載る保証が無い）ので、
-        // 5xx と同じ間隔で待ち、上限で失敗にする。
-        final attempt = _attempts[volumeId] ?? 1;
+        // 上限で失敗にする。待つ間隔は [retryBackoff]。
         await ref.read(downloadRetryDelayProvider)(
-          Duration(seconds: 1 << attempt),
+          retryBackoff(_attempts.current(volumeId)),
         );
         if (_isStale(generation) || !_isCurrent(task)) return;
         await _resubmit(task, generation: generation);
@@ -1224,13 +1217,14 @@ class DownloadQueue extends _$DownloadQueue {
     required int generation,
   }) async {
     final volumeId = task.volumeId;
-    final attempt = (_attempts[volumeId] ?? 0) + 1;
-    _attempts[volumeId] = attempt;
-    if (attempt < maxDownloadAttempts) return true;
-    _attempts.remove(volumeId);
+    if (_attempts.count(volumeId)) return true;
     if (_tasks[volumeId] == task) _clearTask(volumeId);
     await _forgetQuietly(task);
-    await _fail(volumeId, _failureMessage(failure), generation: generation);
+    await _fail(
+      volumeId,
+      transferFailureMessage(failure),
+      generation: generation,
+    );
     return false;
   }
 
@@ -1417,7 +1411,7 @@ class DownloadQueue extends _$DownloadQueue {
             archive.lengthSync() == manifest.archiveBytes)) {
       await _finish(volumeId, manifest, generation: generation);
       if (_tasks[volumeId] == task) _clearTask(volumeId);
-      _attempts.remove(volumeId);
+      _attempts.reset(volumeId);
       await _forgetQuietly(task);
       return;
     }
@@ -1442,7 +1436,7 @@ class DownloadQueue extends _$DownloadQueue {
         if (!_isStale(generation)) _scheduleSubmit(volumeId);
         return;
       }
-      _persistedBytes[volumeId] = 0;
+      _persistThrottle.restart(volumeId);
       await _fail(
         volumeId,
         failure,
@@ -1465,13 +1459,17 @@ class DownloadQueue extends _$DownloadQueue {
       await _deleteQuietly(staging);
       await _forgetQuietly(task);
       if (!current) return;
-      await _fail(volumeId, _fileSystemMessage(error), generation: generation);
+      await _fail(
+        volumeId,
+        fileSystemFailureMessage(error),
+        generation: generation,
+      );
       return;
     }
 
     await _finish(volumeId, manifest, generation: generation);
     if (_tasks[volumeId] == task) _clearTask(volumeId);
-    _attempts.remove(volumeId);
+    _attempts.reset(volumeId);
     await _forgetQuietly(task);
     _scheduleTempSweep();
   }
@@ -1495,7 +1493,11 @@ class DownloadQueue extends _$DownloadQueue {
         if (!_isStale(generation)) await store.deleteFiles(volumeId);
         return;
       }
-      await _fail(volumeId, _fileSystemMessage(error), generation: generation);
+      await _fail(
+        volumeId,
+        fileSystemFailureMessage(error),
+        generation: generation,
+      );
       return;
     }
     await store.deleteOtherVersions(
@@ -1552,18 +1554,8 @@ class DownloadQueue extends _$DownloadQueue {
 
   /// 起動時に、OS 側の転送と台帳を突き合わせる。
   ///
-  /// | 台帳 | 自分のタグの転送 | 処理 |
-  /// | --- | --- | --- |
-  /// | 待機 / 取得中 | 待機 / 走行中 | そのまま見守る |
-  /// | 待機 / 取得中 | 完了 | 確定する |
-  /// | 待機 / 取得中 | 一時停止 | 再開。だめなら積み直す |
-  /// | 待機 / 取得中 | 失敗 | 失敗として解釈する（回数は数え直す） |
-  /// | 待機 / 取得中 | 取り消し | 通知の Cancel。中断にする |
-  /// | 待機 / 取得中 | 無し / 消えた | 積み直す（新しいトークンで） |
-  /// | 中断 / 失敗 | 一時停止 | 再開データとして残す |
-  /// | 中断 / 失敗 / 完了 | それ以外 | 止めて捨てる |
-  /// | 無し | 何か | 止めて捨てる |
-  /// | 何でも | 別のタグ | 止めて捨てる |
+  /// 巻ごとの扱いは [reconcileActionFor] の表のとおり。他のタグの転送は
+  /// 止めて捨てる。
   ///
   /// プラグインの自動再投入は使わない（古いトークンのまま、この照合と並んで
   /// 積み直すので二重になる。F5）。
@@ -1573,99 +1565,42 @@ class DownloadQueue extends _$DownloadQueue {
   ) async {
     final store = _store;
     if (store == null) return;
-    final tag = _sessionTag;
 
     // 照合の前に届いた完了を一覧に反映する（F6）。記録が消えていても、
     // 完了が届いたなら書き上がった ZIP がある（下の sweep で孤児として消さない）。
-    final early = {..._earlyCompleted};
+    final merged = mergeEarlyCompleted(snapshots, _earlyCompleted);
     _earlyCompleted.clear();
-    final merged = [
-      for (final snapshot in snapshots)
-        if (early.remove(snapshot.taskId))
-          TransferSnapshot(
-            taskId: snapshot.taskId,
-            state: TransferState.completed,
-          )
-        else
-          snapshot,
-      for (final taskId in early)
-        TransferSnapshot(taskId: taskId, state: TransferState.completed),
-    ];
-
-    final foreign = <(TransferSnapshot, ArchiveTaskId?)>[];
-    final byVolume = <int, List<(ArchiveTaskId, TransferSnapshot)>>{};
-    for (final snapshot in merged) {
-      final task = ArchiveTaskId.tryParse(snapshot.taskId);
-      if (task == null || tag == null || task.sessionTag != tag) {
-        foreign.add((snapshot, task));
-        continue;
-      }
-      (byVolume[task.volumeId] ??= []).add((task, snapshot));
-    }
+    final groups = groupForReconcile(merged, _sessionTag);
 
     final installs = <ArchiveTaskId>[];
     final resumes = <ArchiveTaskId>[];
     final failures = <ArchiveTaskId>[];
     final discards = <(TransferSnapshot, ArchiveTaskId?)>[];
-    for (final MapEntry(key: volumeId, value: tasks) in byVolume.entries) {
-      // 同じ巻に世代違いが残っていたら、新しい世代だけを見る。同じ世代の
-      // 別の投入（ID のノンス違い）が残っていたら、今の転送 → 書き上がった
-      // もの → 生きているもの → 続きを取れるもの、の順に 1 つだけ選び、
-      // 残りは捨てる（生きていれば取り消す。二重に落とさない）。
-      final current = _tasks[volumeId];
-      tasks.sort((a, b) {
-        final byVersion = b.$1.filesVersion.compareTo(a.$1.filesVersion);
-        if (byVersion != 0) return byVersion;
-        final byCurrent = (b.$1 == current ? 1 : 0).compareTo(
-          a.$1 == current ? 1 : 0,
-        );
-        if (byCurrent != 0) return byCurrent;
-        return _reconcileRank(a.$2.state).compareTo(_reconcileRank(b.$2.state));
-      });
-      for (final (task, snapshot) in tasks.skip(1)) {
+    for (final MapEntry(key: volumeId, value: candidates)
+        in groups.byVolume.entries) {
+      final (:chosen, :duplicates) = pickReconcileCandidate(
+        candidates,
+        _tasks[volumeId],
+      );
+      for (final (task, snapshot) in duplicates) {
         discards.add((snapshot, task));
       }
-      final (task, snapshot) = tasks.first;
+      final (task, snapshot) = chosen;
+      // 台帳は巻ごとに読み直す（照合の await の間に中断 / 削除されうる）。
       final download = state.value?[volumeId];
 
-      if (download == null) {
-        discards.add((snapshot, task));
-        continue;
-      }
-      if (download.isCompleted) {
-        // 中断した「更新あり」の取り直し（台帳は旧世代の完了に戻してある）。
-        // 再開データは「更新あり」から続きを取るために残し、止める前に
-        // 書き上がっていたものは確定する（数百 MB を落とし直させない）。
-        final isPausedRefetch = task.filesVersion > download.filesVersion;
-        if (isPausedRefetch && snapshot.state == TransferState.paused) {
-          _tasks[volumeId] = task;
-        } else if (isPausedRefetch &&
-            snapshot.state == TransferState.completed) {
-          _tasks[volumeId] = task;
-          installs.add(task);
-        } else {
+      switch (reconcileActionFor(task, snapshot.state, download)) {
+        case ReconcileAction.discard:
           discards.add((snapshot, task));
-        }
-        continue;
-      }
-      if (!download.isActive) {
-        // ユーザーが止めた転送の再開データは残す（「再開」で続きから取る）。
-        if (snapshot.state == TransferState.paused) {
+        case ReconcileAction.keepPaused:
           _tasks[volumeId] = task;
-        } else {
-          discards.add((snapshot, task));
-        }
-        continue;
-      }
-      switch (snapshot.state) {
-        case TransferState.enqueued ||
-            TransferState.running ||
-            TransferState.waitingToRetry:
+        case ReconcileAction.watch:
           _tasks[volumeId] = task;
           _liveTasks.add(volumeId);
-          _reservedBytes[volumeId] = math.max(
-            0,
-            download.totalBytes - download.receivedBytes,
+          _reservations.reserveRemaining(
+            volumeId,
+            total: download!.totalBytes,
+            received: download.receivedBytes,
           );
           if (snapshot.state == TransferState.running) {
             _runningTasks.add(volumeId);
@@ -1674,24 +1609,20 @@ class DownloadQueue extends _$DownloadQueue {
               download.copyWith(status: VolumeDownloadStatus.downloading),
             );
           }
-        case TransferState.completed:
+        case ReconcileAction.install:
           _tasks[volumeId] = task;
           installs.add(task);
-        case TransferState.paused:
+        case ReconcileAction.resume:
           _tasks[volumeId] = task;
           resumes.add(task);
-        case TransferState.failed:
+        case ReconcileAction.retryFailure:
           _tasks[volumeId] = task;
-          _attempts.remove(volumeId);
+          _attempts.reset(volumeId);
           failures.add(task);
-        case TransferState.canceled:
+        case ReconcileAction.canceledByUser:
           // アプリが死んでいる間に通知の Cancel ボタンで止められた。
           discards.add((snapshot, task));
-          await _savePaused(download);
-        case TransferState.notFound:
-          // プロセスごと殺されて消えた（holding queue の中身はメモリにしか
-          // 無い）。下で新しいトークンで積み直す。
-          discards.add((snapshot, task));
+          await _savePaused(download!);
       }
       if (_isStale(generation)) return;
     }
@@ -1701,7 +1632,7 @@ class DownloadQueue extends _$DownloadQueue {
     for (final (snapshot, task) in discards) {
       await _discardSnapshot(snapshot, task);
     }
-    for (final (snapshot, task) in foreign) {
+    for (final (snapshot, task) in groups.foreign) {
       await _discardSnapshot(snapshot, task, foreign: true);
     }
     if (_isStale(generation)) return;
@@ -1744,27 +1675,12 @@ class DownloadQueue extends _$DownloadQueue {
     }
   }
 
-  /// 照合で同じ巻・同じ世代の転送が複数あるときの優先順（小さいほど優先）。
-  static int _reconcileRank(TransferState state) => switch (state) {
-    TransferState.completed => 0,
-    TransferState.running => 1,
-    TransferState.enqueued || TransferState.waitingToRetry => 2,
-    TransferState.paused => 3,
-    TransferState.failed => 4,
-    TransferState.canceled || TransferState.notFound => 5,
-  };
-
   Future<void> _discardSnapshot(
     TransferSnapshot snapshot,
     ArchiveTaskId? task, {
     bool foreign = false,
   }) async {
-    final alive =
-        snapshot.state == TransferState.enqueued ||
-        snapshot.state == TransferState.running ||
-        snapshot.state == TransferState.waitingToRetry ||
-        snapshot.state == TransferState.paused;
-    if (alive) {
+    if (isAliveForDiscard(snapshot.state)) {
       _cancelling.add(snapshot.taskId);
       try {
         await _transport?.cancel(snapshot.taskId);
@@ -1803,7 +1719,7 @@ class DownloadQueue extends _$DownloadQueue {
     _hadProgress.remove(volumeId);
     _awaitingInstall.remove(volumeId);
     _installing.remove(volumeId);
-    _reservedBytes.remove(volumeId);
+    _reservations.release(volumeId);
     _resumeRequested.remove(volumeId);
     _pausedSeen.remove(volumeId);
     _resumeOnPaused.remove(volumeId);
@@ -1915,7 +1831,7 @@ class DownloadQueue extends _$DownloadQueue {
     // 取り消し（[remove]）と競合した確定を書き戻さない。実体を消した後に
     // completed の行だけ復活すると、読めない「ダウンロード済み」が UI に出る。
     if (!(state.value?.containsKey(download.volumeId) ?? false)) return;
-    _persistedBytes.remove(download.volumeId);
+    _persistThrottle.forget(download.volumeId);
     _installed.remove(download.volumeId);
     await _save(
       download.copyWith(
@@ -2052,7 +1968,7 @@ class DownloadQueue extends _$DownloadQueue {
 
   void _resetMemory() {
     _installed.clear();
-    _persistedBytes.clear();
+    _persistThrottle.clear();
     _tasks.clear();
     _liveTasks.clear();
     _runningTasks.clear();
@@ -2069,7 +1985,7 @@ class DownloadQueue extends _$DownloadQueue {
     _submitting.clear();
     _cancelling.clear();
     _attempts.clear();
-    _reservedBytes.clear();
+    _reservations.clear();
     _submitChain = Future.value();
     _tempSweepQueued = false;
     _eventChain = Future.value();
@@ -2120,58 +2036,5 @@ class DownloadQueue extends _$DownloadQueue {
     } on FileSystemException {
       // 消せなくても次の起動の掃除（sweep）が拾う。
     }
-  }
-
-  /// 回線が無い / 届かない失敗か（待てば直る見込みがある）。
-  static bool _isOffline(Object error) =>
-      error is NetworkException || error is ApiTimeoutException;
-
-  static String _messageOf(Object error) => switch (error) {
-    final ApiException error => error.message,
-    final FileSystemException error => _fileSystemMessage(error),
-    _ => 'ダウンロードに失敗しました。',
-  };
-
-  static String _failureMessage(
-    TransferFailure failure,
-  ) => switch (failure.kind) {
-    TransferFailureKind.unauthorized => const UnauthorizedException().message,
-    TransferFailureKind.forbidden => const ForbiddenException().message,
-    TransferFailureKind.notFound => const NotFoundException().message,
-    TransferFailureKind.server => const ServerException(
-      statusCode: 500,
-    ).message,
-    TransferFailureKind.tooManyRequests =>
-      const TooManyRequestsException().message,
-    TransferFailureKind.connection => const NetworkException().message,
-    TransferFailureKind.resumeMismatch || TransferFailureKind.archiveReplaced =>
-      'ダウンロード中にサーバー側のデータが更新されました。もう一度お試しください。',
-    TransferFailureKind.fileSystem =>
-      _isOutOfSpace(failure.message)
-          ? _outOfSpaceMessage
-          : '端末にデータを保存できませんでした。',
-    TransferFailureKind.other => 'ダウンロードに失敗しました。',
-  };
-
-  static const _outOfSpaceMessage = '端末の空き容量が足りません。不要なデータを削除してからやり直してください。';
-
-  /// ネイティブの失敗は errno を持たないので、文言で容量不足を見分ける。
-  static bool _isOutOfSpace(String message) {
-    final lower = message.toLowerCase();
-    return lower.contains('enospc') ||
-        lower.contains('no space') ||
-        lower.contains('not enough space') ||
-        lower.contains('insufficient');
-  }
-
-  /// 端末側の書き込み失敗。容量不足（ENOSPC）だけは原因を明示する。
-  static String _fileSystemMessage(FileSystemException error) {
-    // errno 28 = ENOSPC（Android / iOS / Linux / macOS 共通）。
-    // Windows は ERROR_DISK_FULL(112) / ERROR_HANDLE_DISK_FULL(39)。
-    const outOfSpace = {28, 39, 112};
-    if (outOfSpace.contains(error.osError?.errorCode)) {
-      return _outOfSpaceMessage;
-    }
-    return '端末にデータを保存できませんでした。';
   }
 }
