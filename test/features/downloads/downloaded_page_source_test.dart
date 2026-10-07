@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:comic_laz/domain/models/volume_manifest.dart';
@@ -203,4 +205,233 @@ void main() {
       isNull,
     );
   });
+
+  // #25: ページ送りのたびに UI isolate で ZIP を解析し直すとカクつく。
+  group('解析の控えと isolate への切り出し（#25）', () {
+    test('先読みで同じ巻を同時に読んでも、解析は 1 回にまとめ、以降は読むだけ', () async {
+      final installed = await installVolume(pages: 5);
+      final runner = _CountingRunner();
+      final source = ZipDownloadedPageSource(
+        installed.store,
+        runner: runner.call,
+      );
+
+      // 表示中のページ + 先読み 4 ページが同時に来る。
+      final pages = await Future.wait([
+        for (var page = 0; page < 5; page++)
+          source.readPage(
+            volumeId: _volumeId,
+            page: page,
+            filesVersion: _filesVersion,
+          ),
+      ]);
+      expect(
+        [for (final bytes in pages) bytes!.first],
+        [for (var i = 0; i < 5; i++) 0x42 + i],
+      );
+      // 解析 1 回 + 読み出し 5 回。すべて runner（= 別 isolate）の先で走る。
+      expect(runner.calls, 6);
+
+      await source.readPage(
+        volumeId: _volumeId,
+        page: 2,
+        filesVersion: _filesVersion,
+      );
+      expect(runner.calls, 7, reason: '次のページ送りでは解析し直さない');
+    });
+
+    // Windows では開いたままのファイルを消せない。控えがハンドルを握って
+    // いると、削除 / ログアウトの全削除が黙って失敗し ZIP が残る。
+    test('読んだ後でも巻の実体を消せ、消した後は古い控えで読まない', () async {
+      final installed = await installVolume();
+      final source = ZipDownloadedPageSource(installed.store);
+      expect(
+        await source.readPage(
+          volumeId: _volumeId,
+          page: 0,
+          filesVersion: _filesVersion,
+        ),
+        isNotNull,
+      );
+
+      await installed.store.deleteFiles(_volumeId);
+      expect(installed.store.volumeDirectory(_volumeId).existsSync(), isFalse);
+
+      // 台帳が残ったまま実体だけ消えても（削除の途中など）次の経路へ落とす。
+      expect(
+        await source.readPage(
+          volumeId: _volumeId,
+          page: 0,
+          filesVersion: _filesVersion,
+        ),
+        isNull,
+      );
+    });
+
+    test('ログアウトの全削除の後は読まない（台帳も実体も無い）', () async {
+      final installed = await installVolume();
+      final source = ZipDownloadedPageSource(installed.store);
+      await source.readPage(
+        volumeId: _volumeId,
+        page: 0,
+        filesVersion: _filesVersion,
+      );
+
+      await installed.store.deleteAllRows();
+      await installed.store.deleteAllFiles();
+
+      expect(
+        await source.readPage(
+          volumeId: _volumeId,
+          page: 0,
+          filesVersion: _filesVersion,
+        ),
+        isNull,
+      );
+    });
+
+    // 同じ世代のまま取り直す経路（既存の ZIP を消して rename）がある。古い
+    // オフセットのまま新しいファイルを読むと、壊れた画像や別のページが出る。
+    test('同じ世代のまま差し替わった ZIP は解析し直して読む', () async {
+      final installed = await installVolume();
+      final source = ZipDownloadedPageSource(installed.store);
+      final before = await source.readPage(
+        volumeId: _volumeId,
+        page: 1,
+        filesVersion: _filesVersion,
+      );
+      expect(before!.length, 64);
+
+      installed.store
+          .archiveFile(volumeId: _volumeId, filesVersion: _filesVersion)
+          .writeAsBytesSync(zipWithPages(3, bytesPerPage: 300));
+
+      final after = await source.readPage(
+        volumeId: _volumeId,
+        page: 1,
+        filesVersion: _filesVersion,
+      );
+      expect(after, isNotNull);
+      expect(after!.length, 300);
+      expect(after.first, 0x43);
+    });
+
+    test('取り直しで台帳の世代が進んだら、新しい世代の ZIP を読む', () async {
+      final installed = await installVolume();
+      final source = ZipDownloadedPageSource(installed.store);
+      await source.readPage(
+        volumeId: _volumeId,
+        page: 0,
+        filesVersion: _filesVersion,
+      );
+
+      const next = _filesVersion + 1;
+      final archive = zipWithPages(3, bytesPerPage: 200);
+      installed.store
+          .archiveFile(volumeId: _volumeId, filesVersion: next)
+          .writeAsBytesSync(archive);
+      await installed.store.writeManifest(
+        testManifest(
+          id: _volumeId,
+          filesVersion: next,
+          archiveBytes: archive.length,
+        ),
+      );
+      await installed.store.save(
+        VolumeDownload(
+          volumeId: _volumeId,
+          bookId: 12,
+          filesVersion: next,
+          status: VolumeDownloadStatus.completed,
+          totalBytes: archive.length,
+          pageCount: 3,
+        ),
+      );
+
+      final bytes = await source.readPage(
+        volumeId: _volumeId,
+        page: 0,
+        filesVersion: next,
+      );
+      expect(bytes!.length, 200);
+      expect(
+        await source.readPage(
+          volumeId: _volumeId,
+          page: 0,
+          filesVersion: _filesVersion,
+        ),
+        isNull,
+        reason: '台帳が新しい世代を指したら、古い世代の URL には答えない',
+      );
+    });
+
+    // 確定の途中で落ちた巻はマニフェストが後から書かれる。無かったときの
+    // 「絞り込まない」を控えたまま使い続けない。
+    test('後から書かれたマニフェストのページ一覧を反映する', () async {
+      final installed = await installVolume(writeManifest: false);
+      final source = ZipDownloadedPageSource(installed.store);
+      expect(
+        await source.readPage(
+          volumeId: _volumeId,
+          page: 2,
+          filesVersion: _filesVersion,
+        ),
+        isNotNull,
+      );
+
+      await installed.store.writeManifest(
+        installed.manifest.copyWith(
+          pages: [
+            for (final page in installed.manifest.pages)
+              if (page.index != 2) page,
+          ],
+        ),
+      );
+
+      // 1 回目は控えの食い違いに気づいて作り直し、新しい一覧で弾く。
+      expect(
+        await source.readPage(
+          volumeId: _volumeId,
+          page: 0,
+          filesVersion: _filesVersion,
+        ),
+        isNotNull,
+      );
+      expect(
+        await source.readPage(
+          volumeId: _volumeId,
+          page: 2,
+          filesVersion: _filesVersion,
+        ),
+        isNull,
+      );
+    });
+
+    test('別 isolate を起こせなくても例外を出さず次の経路へ落とす', () async {
+      final installed = await installVolume();
+      final source = ZipDownloadedPageSource(
+        installed.store,
+        runner: <R>(computation) => Future<R>.error(StateError('no isolate')),
+      );
+
+      expect(
+        await source.readPage(
+          volumeId: _volumeId,
+          page: 0,
+          filesVersion: _filesVersion,
+        ),
+        isNull,
+      );
+    });
+  });
+}
+
+/// 本物の `Isolate.run` に渡しつつ、外へ出した回数を数える。
+class _CountingRunner {
+  var calls = 0;
+
+  Future<R> call<R>(FutureOr<R> Function() computation) {
+    calls++;
+    return Isolate.run(computation);
+  }
 }
