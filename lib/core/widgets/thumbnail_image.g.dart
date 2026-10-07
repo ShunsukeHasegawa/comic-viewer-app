@@ -66,4 +66,4 @@ final class ThumbnailBuilderProvider
   }
 }
 
-String _$thumbnailBuilderHash() => r'ffd09cdd643bbd121b1c907e44d184a716aceced';
+String _$thumbnailBuilderHash() => r'34b18aec85a17e1cce506a4b88b89a01000925ea';

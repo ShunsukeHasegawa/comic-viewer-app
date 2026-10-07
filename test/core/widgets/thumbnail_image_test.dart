@@ -21,7 +21,7 @@ Future<void> pumpThumbnail(
   final container = ProviderContainer(
     overrides: testOverrides(
       apiBaseUrl: 'https://comic.lazgram.com',
-      thumbnailBuilder: (context, request, fit, {backdrop = false}) {
+      thumbnailBuilder: (context, request, fit, {backdrop = false, onShown}) {
         requests.add(request);
         return const SizedBox.expand();
       },

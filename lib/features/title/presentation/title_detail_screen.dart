@@ -200,7 +200,11 @@ class _Hero extends StatelessWidget {
 
     return Stack(
       children: [
-        Positioned.fill(child: _HeroBackground(detail: detail)),
+        // 背景は文字やボタンの再描画、巻一覧のスクロールと無関係に描き直さない
+        // （ShaderMask の saveLayer を毎フレーム描かない）。
+        Positioned.fill(
+          child: RepaintBoundary(child: _HeroBackground(detail: detail)),
+        ),
         Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -265,7 +269,7 @@ class _Hero extends StatelessWidget {
 /// 絵の大きさとグラデーションはヒーローの高さではなく、画面の幅と文字の
 /// 開始位置から決める。ヒーローの高さに合わせると、あらすじを展開した
 /// ときに絵が拡大されてしまう。
-class _HeroBackground extends ConsumerWidget {
+class _HeroBackground extends ConsumerStatefulWidget {
   const _HeroBackground({required this.detail});
 
   final BookDetail detail;
@@ -282,30 +286,82 @@ class _HeroBackground extends ConsumerWidget {
   static const _placeholderBlurSigma = 12.0;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final layers = _backgroundLayers(ref.watch(mediaUrlsProvider), detail);
+  ConsumerState<_HeroBackground> createState() => _HeroBackgroundState();
+
+  /// 背景に使う画像。1 巻の 1 ページ目と、それが来るまで敷く 1 巻のサムネイル。
+  ///
+  /// ページ URL には `files_version` が要るので、アーカイブが無い巻
+  /// （`files_version` が `null`）ではサムネイルだけを背景にする。
+  /// 敷くのは一覧（`/api/books` は最終巻）と同じ絵ではなく 1 巻のものにする。
+  /// ページ 1 枚目と同じ絵なので、ぼかしが取れるように差し替わる。
+  static ({ComicImageRequest? page, ComicImageRequest? thumbnail})?
+  _backgroundLayers(MediaUrls urls, BookDetail detail) {
+    if (detail.volumes.isEmpty) return null;
+    final first = detail.volumes.first;
+    final filesVersion = first.filesVersion;
+    final thumbnail = ComicImageRequest.thumbnail(urls, first.thumbnail);
+    final page = filesVersion == null
+        ? null
+        : ComicImageRequest.page(
+            urls,
+            volumeId: first.id,
+            page: 1,
+            filesVersion: filesVersion,
+          );
+    if (page == null && thumbnail == null) return null;
+    return (page: page, thumbnail: thumbnail);
+  }
+}
+
+class _HeroBackgroundState extends ConsumerState<_HeroBackground> {
+  /// 見えきったページ画像（キャッシュキー）。これと同じページを出している
+  /// 間は、下のぼかしたサムネイルを外す。不透明なページに隠れて見えないのに、
+  /// 残すとスクロールのたびに全幅のぼかしを描き直すことになる。
+  String? _shownPageKey;
+
+  @override
+  Widget build(BuildContext context) {
+    final layers = _HeroBackground._backgroundLayers(
+      ref.watch(mediaUrlsProvider),
+      widget.detail,
+    );
     // 画像が無い / 読み込み中でも文字は白なので、下地は必ず暗くしておく。
     if (layers == null) return const ColoredBox(color: Colors.black);
 
     final build = ref.watch(thumbnailBuilderProvider);
     final (:page, :thumbnail) = layers;
+    final pageKey = page?.cacheKey;
     final image = Stack(
       fit: StackFit.expand,
       children: [
         if (thumbnail != null)
           if (page == null)
             build(context, thumbnail, BoxFit.cover, backdrop: true)
-          else
+          else if (_shownPageKey != pageKey)
             // ページ画像が来るまでのつなぎ。一覧で読み込み済みのことが多く、
             // 単色の板よりタイトルの雰囲気がすぐ伝わる。
             ImageFiltered(
               imageFilter: ImageFilter.blur(
-                sigmaX: _placeholderBlurSigma,
-                sigmaY: _placeholderBlurSigma,
+                sigmaX: _HeroBackground._placeholderBlurSigma,
+                sigmaY: _HeroBackground._placeholderBlurSigma,
               ),
               child: build(context, thumbnail, BoxFit.cover, backdrop: true),
             ),
-        if (page != null) build(context, page, BoxFit.cover, backdrop: true),
+        if (page != null)
+          // つなぎを外しても同じ要素のまま残す（読み込み直し / 溶かし直しをさせない）。
+          KeyedSubtree(
+            key: ValueKey(pageKey),
+            child: build(
+              context,
+              page,
+              BoxFit.cover,
+              backdrop: true,
+              onShown: () {
+                if (!mounted || _shownPageKey == pageKey) return;
+                setState(() => _shownPageKey = pageKey);
+              },
+            ),
+          ),
       ],
     );
     // 文字が始まる位置（`_HeroChrome` の高さ + 絵を見せる高さ）。
@@ -314,13 +370,13 @@ class _HeroBackground extends ConsumerWidget {
         8 +
         kMinInteractiveDimension +
         _heroImageHeight;
-    final darkEnd = textTop + _darkenDistance;
+    final darkEnd = textTop + _HeroBackground._darkenDistance;
 
     return LayoutBuilder(
       builder: (context, constraints) {
         final height = constraints.maxHeight;
         final imageHeight = math.max(
-          constraints.maxWidth * _imageAspect,
+          constraints.maxWidth * _HeroBackground._imageAspect,
           darkEnd,
         );
         double stopAt(double y) =>
@@ -366,30 +422,6 @@ class _HeroBackground extends ConsumerWidget {
         );
       },
     );
-  }
-
-  /// 背景に使う画像。1 巻の 1 ページ目と、それが来るまで敷く 1 巻のサムネイル。
-  ///
-  /// ページ URL には `files_version` が要るので、アーカイブが無い巻
-  /// （`files_version` が `null`）ではサムネイルだけを背景にする。
-  /// 敷くのは一覧（`/api/books` は最終巻）と同じ絵ではなく 1 巻のものにする。
-  /// ページ 1 枚目と同じ絵なので、ぼかしが取れるように差し替わる。
-  static ({ComicImageRequest? page, ComicImageRequest? thumbnail})?
-  _backgroundLayers(MediaUrls urls, BookDetail detail) {
-    if (detail.volumes.isEmpty) return null;
-    final first = detail.volumes.first;
-    final filesVersion = first.filesVersion;
-    final thumbnail = ComicImageRequest.thumbnail(urls, first.thumbnail);
-    final page = filesVersion == null
-        ? null
-        : ComicImageRequest.page(
-            urls,
-            volumeId: first.id,
-            page: 1,
-            filesVersion: filesVersion,
-          );
-    if (page == null && thumbnail == null) return null;
-    return (page: page, thumbnail: thumbnail);
   }
 }
 

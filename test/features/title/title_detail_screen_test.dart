@@ -220,6 +220,48 @@ void main() {
     );
   });
 
+  testWidgets('ページ画像が見えきったら、下のぼかしたサムネイルを外す', (tester) async {
+    // 不透明なページに隠れて見えないぼかしを残すと、スクロールのたびに
+    // 全幅のぼかしを描き直し続ける（低い端末でコマ落ちする）。
+    await pumpDetail(
+      tester,
+      booksApi: FakeBooksApi(
+        bookDetail: sampleDetail(
+          volumes: const [
+            BookVolume(
+              id: 340,
+              volume: 1,
+              thumbnail: '/books/thumbnail/340?m=1',
+              filesVersion: 1,
+            ),
+          ],
+        ),
+      ),
+    );
+    expect(find.byType(ImageFiltered), findsOneWidget, reason: '読み込み中はつなぎを敷く');
+
+    StubThumbnail page() => tester
+        .widgetList<StubThumbnail>(find.byType(StubThumbnail))
+        .singleWhere((stub) => stub.request.page != null);
+    final pageElement = tester.element(find.byWidget(page()));
+    page().onShown!();
+    await tester.pump();
+
+    expect(find.byType(ImageFiltered), findsNothing);
+    expect(
+      tester
+          .widgetList<StubThumbnail>(find.byType(StubThumbnail))
+          .where((stub) => stub.backdrop && stub.request.page == null),
+      isEmpty,
+      reason: '背景のサムネイルの描画もやめる（巻一覧の行のサムネイルは別）',
+    );
+    expect(
+      tester.element(find.byWidget(page())),
+      same(pageElement),
+      reason: 'ページ画像は作り直さない（溶かし直しをさせない）',
+    );
+  });
+
   testWidgets('アーカイブが無いタイトルはサムネイルをぼかさずに背景にする', (tester) async {
     // ページ URL には files_version が要る。無い巻で組み立てると壊れた URL に
     // なるので、サムネイルで代用する。これが最終的な絵なのでぼかさない。

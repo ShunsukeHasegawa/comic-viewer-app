@@ -14,6 +14,7 @@ class ComicImage extends ConsumerWidget {
     required this.errorBuilder,
     this.fit = BoxFit.cover,
     this.fadeInDuration,
+    this.onShown,
     super.key,
   });
 
@@ -30,6 +31,10 @@ class ComicImage extends ConsumerWidget {
   /// メモリ上のキャッシュから同期で出せたときは溶かさない。
   final Duration? fadeInDuration;
 
+  /// 画像が見えきった（溶かし終えた）ときに呼ぶ。下に敷いたつなぎの層を
+  /// 外す合図に使う。再構築のたびに呼ばれうるので、受け手が 1 度に絞る。
+  final VoidCallback? onShown;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final loader = ref.watch(comicImageLoaderProvider);
@@ -43,10 +48,15 @@ class ComicImage extends ConsumerWidget {
         fit: fit,
         // 1 フレーム目が来るまでは「読み込み中」。
         frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
-          if (wasSynchronouslyLoaded) return child;
+          if (wasSynchronouslyLoaded) {
+            _notifyShownAfterFrame();
+            return child;
+          }
           final duration = fadeInDuration;
           if (duration == null) {
-            return frame == null ? loadingBuilder(context) : child;
+            if (frame == null) return loadingBuilder(context);
+            _notifyShownAfterFrame();
+            return child;
           }
           // 子の数と並びを変えない（AnimatedOpacity の状態を引き継いで溶かす）。
           return Stack(
@@ -60,6 +70,7 @@ class ComicImage extends ConsumerWidget {
                 opacity: frame == null ? 0 : 1,
                 duration: duration,
                 curve: Curves.easeOut,
+                onEnd: frame == null ? null : onShown,
                 child: child,
               ),
             ],
@@ -68,5 +79,12 @@ class ComicImage extends ConsumerWidget {
         errorBuilder: (context, error, _) => errorBuilder(context, error),
       ),
     };
+  }
+
+  /// 描画中（frameBuilder の中）に呼び手の状態を変えさせない。
+  void _notifyShownAfterFrame() {
+    final onShown = this.onShown;
+    if (onShown == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) => onShown());
   }
 }

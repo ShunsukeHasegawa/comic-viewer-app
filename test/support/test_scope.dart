@@ -118,8 +118,11 @@ List<Override> testOverrides({
     ),
     thumbnailBuilderProvider.overrideWithValue(
       thumbnailBuilder ??
-          (context, request, fit, {backdrop = false}) =>
-              StubThumbnail(request: request, backdrop: backdrop),
+          (context, request, fit, {backdrop = false, onShown}) => StubThumbnail(
+            request: request,
+            backdrop: backdrop,
+            onShown: onShown,
+          ),
     ),
     // 古い世代のキャッシュ掃除は、キャッシュ本体を作らずに済むよう既定で無効。
     staleCacheEvictorProvider.overrideWithValue(
@@ -235,11 +238,15 @@ class StubThumbnail extends StatelessWidget {
   const StubThumbnail({
     required this.request,
     this.backdrop = false,
+    this.onShown,
     super.key,
   });
 
   final ComicImageRequest request;
   final bool backdrop;
+
+  /// 背景用の画像が見えきった合図。テストから呼んで「読み込めた」ことにする。
+  final VoidCallback? onShown;
 
   @override
   Widget build(BuildContext context) => const SizedBox.expand();

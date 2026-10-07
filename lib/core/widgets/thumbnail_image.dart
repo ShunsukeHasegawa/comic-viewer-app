@@ -11,12 +11,14 @@ part 'thumbnail_image.g.dart';
 /// サムネイル画像の描画方法。テストでは差し替える。
 ///
 /// [backdrop] は背景用（タイトル詳細のヒーロー）。読み込み中 / 失敗時は
-/// 何も描かずに下の層を見せ、読み込めたら溶かして出す。
+/// 何も描かずに下の層を見せ、読み込めたら溶かして出す。[onShown] は
+/// 溶かし終えたときに呼ぶ（下に敷いたつなぎを外す合図。背景用のみ）。
 typedef ThumbnailBuilder = Widget Function(
   BuildContext context,
   ComicImageRequest request,
   BoxFit fit, {
   bool backdrop,
+  VoidCallback? onShown,
 });
 
 /// 背景用の画像を溶かして出す時間。
@@ -28,11 +30,12 @@ const backdropFadeInDuration = Duration(milliseconds: 250);
 /// （API と同じオリジンのみ）。ウィジェット側でトークンを扱わない。
 @Riverpod(keepAlive: true)
 ThumbnailBuilder thumbnailBuilder(Ref ref) {
-  return (context, request, fit, {backdrop = false}) => backdrop
+  return (context, request, fit, {backdrop = false, onShown}) => backdrop
       ? ComicImage(
           request: request,
           fit: fit,
           fadeInDuration: backdropFadeInDuration,
+          onShown: onShown,
           loadingBuilder: (context) => const SizedBox.shrink(),
           errorBuilder: (context, _) => const SizedBox.shrink(),
         )
