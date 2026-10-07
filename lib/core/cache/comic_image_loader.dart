@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:dio/dio.dart';
@@ -268,11 +269,20 @@ class ComicImageProvider extends ImageProvider<ComicImageProvider> {
     required this.loader,
     required this.request,
     this.scale = 1,
+    this.decodeBox,
   });
 
   final ComicImageLoader loader;
   final ComicImageRequest request;
   final double scale;
+
+  /// 指定すると、この枠（物理ピクセル）を覆える最小の大きさまで縮めて
+  /// デコードする（縦横比は保ち、原寸より大きくはしない）。
+  ///
+  /// 一覧のサムネイルや背景を原寸でデコードすると `ImageCache`（既定 100MB）を
+  /// 食い、ビューアの先読みしたページを押し出す（#28）。ビューアのページは
+  /// 拡大に耐える解像度が要るので `null`（原寸）のままにする。
+  final ({int width, int height})? decodeBox;
 
   @override
   Future<ComicImageProvider> obtainKey(ImageConfiguration configuration) =>
@@ -293,7 +303,17 @@ class ComicImageProvider extends ImageProvider<ComicImageProvider> {
   Future<ui.Codec> _decode(ImageDecoderCallback decode) async {
     try {
       final bytes = await loader.load(request);
-      return await decode(await ui.ImmutableBuffer.fromUint8List(bytes));
+      final box = decodeBox;
+      return await decode(
+        await ui.ImmutableBuffer.fromUint8List(bytes),
+        getTargetSize: box == null
+            ? null
+            : (width, height) => coverTargetSize(
+                intrinsicWidth: width,
+                intrinsicHeight: height,
+                box: box,
+              ),
+      );
     } on Object {
       // 失敗した completer は `ImageCache` に残り続ける（`putIfAbsent` は
       // pending のものをそのまま返す）。追い出さないと、ビューアの「再読み込み」も
@@ -312,11 +332,37 @@ class ComicImageProvider extends ImageProvider<ComicImageProvider> {
   bool operator ==(Object other) =>
       other is ComicImageProvider &&
       other.request == request &&
-      other.scale == scale;
+      other.scale == scale &&
+      other.decodeBox == decodeBox;
+
+  /// 大きさ違いは別の項目にする（縮めた絵をビューアの原寸の代わりに出さない）。
+  /// 失敗時の追い出し（`evict(this)`）も同じ大きさの項目に当たる。
+  @override
+  int get hashCode => Object.hash(request, scale, decodeBox);
 
   @override
-  int get hashCode => Object.hash(request, scale);
+  String toString() => 'ComicImageProvider(${request.cacheKey}, $decodeBox)';
 
-  @override
-  String toString() => 'ComicImageProvider(${request.cacheKey})';
+  /// [box] を覆える（`BoxFit.cover` で隙間が出ない）最小のデコードの大きさ。
+  ///
+  /// 片方の辺だけ指定すると、エンジンが縦横比を保ってもう片方を決める。
+  /// 原寸のほうが小さければ縮めない（引き伸ばしても細部は増えない）。
+  @visibleForTesting
+  static ui.TargetImageSize coverTargetSize({
+    required int intrinsicWidth,
+    required int intrinsicHeight,
+    required ({int width, int height}) box,
+  }) {
+    if (intrinsicWidth <= 0 || intrinsicHeight <= 0) {
+      return const ui.TargetImageSize();
+    }
+    final scale = math.max(
+      box.width / intrinsicWidth,
+      box.height / intrinsicHeight,
+    );
+    if (scale >= 1) return const ui.TargetImageSize();
+    return ui.TargetImageSize(
+      width: math.max(1, (intrinsicWidth * scale).ceil()),
+    );
+  }
 }

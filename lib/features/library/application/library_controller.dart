@@ -141,22 +141,30 @@ class LibraryController extends _$LibraryController {
     // 取れなかった場合は**前回の内容を残す**（チップが消えて絞り込みを
     // 解除できなくなるのを防ぐ）。カテゴリ / タグは端末にも控えてあるので、
     // 再起動直後の圏外でも絞り込みチップを出せる（#11）。
-    final reading = await _tolerate(
+    // 3 つは互いに独立しているので同時に始める（順に待つと往復の分だけ
+    // 一覧の表示が遅れる。#28）。失敗時の代替は取得ごとに今まで通り。
+    final readingTask = _tolerate(
       userApi.fetchReading,
       previous?.reading ?? const <ReadingBook>[],
     );
-    final categories = await _taxonomy(
+    final categoriesTask = _taxonomy(
       fetch: taxonomyApi.fetchCategories,
       read: offline.readCategories,
       write: offline.saveCategories,
       previous: previous?.categories,
     );
-    final tags = await _taxonomy(
+    final tagsTask = _taxonomy(
       fetch: taxonomyApi.fetchTags,
       read: offline.readTags,
       write: offline.saveTags,
       previous: previous?.tags,
     );
+    // 全部の終わりを待ってから投げる（セッション失効などで 1 つが投げても、
+    // 残りの失敗を未処理のエラーにしない）。
+    await Future.wait([readingTask, categoriesTask, tagsTask]);
+    final reading = await readingTask;
+    final categories = await categoriesTask;
+    final tags = await tagsTask;
 
     // ダウンロードが消えたタイトル / 巻の控えを片付ける。一覧の読み込みは
     // 起動時と明示的な更新で必ず通るので、掃除の契機としてここに置く。

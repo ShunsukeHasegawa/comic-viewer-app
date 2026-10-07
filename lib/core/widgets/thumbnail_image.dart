@@ -24,7 +24,8 @@ typedef ThumbnailBuilder = Widget Function(
 /// 背景用の画像を溶かして出す時間。
 const backdropFadeInDuration = Duration(milliseconds: 250);
 
-/// 既定は自前の一時キャッシュ（#8）経由の画像。
+/// 既定は自前の一時キャッシュ（#8）経由の画像。一覧も背景も表示する大きさで
+/// デコードする（原寸のまま `ImageCache` に載せてビューアのページを押し出さない。#28）。
 ///
 /// 認証ヘッダは `ComicImageLoader` が使う `Dio` のインターセプタが付ける
 /// （API と同じオリジンのみ）。ウィジェット側でトークンを扱わない。
@@ -36,12 +37,14 @@ ThumbnailBuilder thumbnailBuilder(Ref ref) {
           fit: fit,
           fadeInDuration: backdropFadeInDuration,
           onShown: onShown,
+          decodeToLayout: true,
           loadingBuilder: (context) => const SizedBox.shrink(),
           errorBuilder: (context, _) => const SizedBox.shrink(),
         )
       : ComicImage(
           request: request,
           fit: fit,
+          decodeToLayout: true,
           loadingBuilder: (context) => const ThumbnailPlaceholder(),
           errorBuilder: (context, _) =>
               const ThumbnailPlaceholder(failed: true),
