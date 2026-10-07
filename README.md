@@ -104,8 +104,10 @@ Web 版は Sanctum の SPA Cookie 認証だが、アプリでは **Bearer トー
 `user` を返さない実装でも `GET /api/user` で補う。
 
 - トークンは `flutter_secure_storage` に保存（iOS は `first_unlock_this_device` = iCloud キーチェーンへ同期しない）
-- `AuthInterceptor` が `Authorization: Bearer` を付ける（画像・アーカイブも同じ経路）。
+- `AuthInterceptor` が `Authorization: Bearer` を付ける（画像も同じ経路）。
   付与と 401 の扱いは **API と同じオリジン**に限る（CDN / 署名付き URL へトークンを送らない）
+- 巻の ZIP は OS のバックグラウンド転送が取るので、Bearer ではなく `archive-url` が発行する
+  署名付き URL（その巻だけ・最長 24 時間・ログアウトで失効）を渡す（#22）
 - **401 のみ**セッション失効として扱い、トークンを破棄して端末内データを消す。
   403 は「認証済みだが権限が無い」（セーフモードなど）なのでログアウトはさせない
 - ログアウト / 失効時の端末内データ破棄は `SessionDataPurger` として登録する

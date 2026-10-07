@@ -71,16 +71,77 @@ void main() {
     });
   });
 
-  group('archiveUri', () {
-    // OS の転送は dio を通らないので、dio と同じ規則で組み立てないと
-    // 別のパス（サブパスの抜け落ち）へ取りに行ってしまう。
-    test('ベース URL のサブパスを保ったまま ZIP の URL を組み立てる', () {
-      final dio = Dio(BaseOptions(baseUrl: 'https://example.com/comic/'));
-      final api = HttpVolumesApi(client: ApiClient(dio), dio: dio);
+  group('fetchArchiveUrl（#22）', () {
+    test('サーバー（VolumeService::buildArchiveSignedUrl）の形をそのまま読む', () async {
+      const url =
+          'https://comic.lazgram.com/api/v2/volumes/340/archive'
+          '?expires=1759924800&t=12&v=1758763245&signature=0f3a';
+      final fixture = buildApi(
+        (options) async => FakeHttpAdapter.jsonResponse({
+          'url': url,
+          'expires_at': '2026-10-08T21:00:00+09:00',
+          'files_version': 1758763245,
+        }),
+      );
+
+      final archiveUrl = await fixture.api.fetchArchiveUrl(340);
+
+      expect(archiveUrl.url, url, reason: '署名はクエリ全体に掛かるので手を加えない');
+      expect(archiveUrl.filesVersion, 1758763245);
+      expect(archiveUrl.expiresAt, DateTime.utc(2026, 10, 8, 12));
+      expect(
+        fixture.adapter.requests.single.uri.toString(),
+        'https://comic.lazgram.com/api/v2/volumes/340/archive-url',
+      );
+    });
+
+    test('スキームとホストは API と同じものに付け替える（パスとクエリはそのまま）', () async {
+      // TLS を終端するプロキシの後ろだとサーバーは http:// の URL を作りうる。
+      // ネイティブの転送は cleartext を許していないので全部失敗する。署名は
+      // パスとクエリにしか掛かっていないので、付け替えても通る。
+      final fixture = buildApi(
+        (options) async => FakeHttpAdapter.jsonResponse({
+          'url':
+              'http://10.0.0.2/api/v2/volumes/340/archive'
+              '?expires=1759924800&t=12&v=1758763245&signature=0f3a',
+          'expires_at': '2026-10-08T21:00:00+09:00',
+          'files_version': 1758763245,
+        }),
+      );
+
+      final archiveUrl = await fixture.api.fetchArchiveUrl(340);
 
       expect(
-        api.archiveUri(340).toString(),
-        'https://example.com/comic/api/v2/volumes/340/archive',
+        archiveUrl.url,
+        'https://comic.lazgram.com/api/v2/volumes/340/archive'
+        '?expires=1759924800&t=12&v=1758763245&signature=0f3a',
+      );
+    });
+
+    test('files_version の無い応答は読めない応答として扱う', () async {
+      // 0 で読むと、毎回「サーバー側のデータが更新されました」になって理由が分からない。
+      final fixture = buildApi(
+        (options) async => FakeHttpAdapter.jsonResponse({
+          'url': 'https://comic.lazgram.com/api/v2/volumes/340/archive',
+        }),
+      );
+
+      await expectLater(
+        fixture.api.fetchArchiveUrl(340),
+        throwsA(isA<UnexpectedResponseException>()),
+      );
+    });
+
+    test('配信できない巻は発行時点で 404 として型で返す', () async {
+      final fixture = buildApi(
+        (options) async => FakeHttpAdapter.jsonResponse({
+          'message': 'Not Found',
+        }, statusCode: 404),
+      );
+
+      await expectLater(
+        fixture.api.fetchArchiveUrl(340),
+        throwsA(isA<NotFoundException>()),
       );
     });
   });

@@ -95,7 +95,7 @@ test/         lib と同じ構成。共通フェイクは test/support/
   cache の**直下**（images / downloads に置くと孤児の掃除とログアウトの全削除で消える）。
 - Android はバックアップ / 端末間転送を**全部**除外している（`data_extraction_rules.xml`
   / `backup_rules.xml` / `allowBackup="false"`）。戻すときは「DB だけ復元されて台帳と
-  ZIP が食い違う」「Bearer 入りの転送記録が持ち出される」を先に検討する。
+  ZIP が食い違う」「署名付き URL 入りの転送記録が持ち出される」を先に検討する。
   `test/platform/platform_config_test.dart` が退行を止める。
 - OS の保護機能はチャネル `com.lazgram.comic_laz/device_protection`（`DeviceProtection`。
   iOS は `AppDelegate.swift`、Android は `MainActivity.kt`）だけ。プラグインは足さない。
@@ -114,10 +114,20 @@ test/         lib と同じ構成。共通フェイクは test/support/
   `_reconcile` で OS 側の転送と台帳を突き合わせる（プラグインの自動再投入は使わない）。
 - 止める意図（中断）は**先に台帳へ書く**。OS から届く `paused` は台帳が中断なら
   ユーザー操作、待機中 / 取得中のままなら 9 分の時間切れなどの一時的なものとして扱う。
+- 転送には `GET /api/v2/volumes/{id}/archive-url` が発行する署名付き URL を渡し、
+  **`Authorization` を付けない**（#22。付けると転送タスクの記録にログイン用トークンが
+  平文で残る）。発行は投入のたびに Dio で行い、URL には手を加えない（署名がクエリ全体に
+  掛かる）。スキームとホストは API の `baseUrl` に付け替える（プロキシの後ろで `http://`
+  が返っても転送を壊さない。署名はパスとクエリにしか掛からない）。発行した
+  `files_version` がマニフェストと違えば積まずに理由を出す。
+- ネイティブの 403（URL の期限切れ / 改ざん / 発行元トークンの失効）と 409（発行後に
+  ZIP が差し替わった）は、書きかけを捨てて URL を発行し直し、先頭から取り直す
+  （回数は `maxDownloadAttempts` で数える）。ログインごと失効していれば発行が 401 になる。
 - ネイティブの 401 ですぐにログアウトさせない。マニフェストを Dio で取り直し、
-  失効していれば `AuthInterceptor` → `handleSessionExpired` の 1 経路に合流させる。
-- タスクの記録には Bearer が平文で残る（パッケージの永続領域）。ログアウトでは
-  `transport.reset()` をファイル削除より先に呼ぶ。
+  失効していれば `AuthInterceptor` → `handleSessionExpired` の 1 経路に合流させる
+  （署名付き URL では 401 は返らない。#22 より前に積んだ Bearer 入りの転送の分）。
+- タスクの記録には署名付き URL が残る（その巻の ZIP だけ・最長 24 時間・ログアウトで
+  失効）。ログアウトでは `transport.reset()` をファイル削除より先に呼ぶ。
 - ネイティブの転送は https 前提。開発用の http サーバーでは ZIP のダウンロードは
   失敗する（debug 用の cleartext 許可 / `NSAllowsLocalNetworking` は入れていない）。
 - 「続きを読む」/ 履歴から巻を開くのは `pushVolumeViaTitle`（`core/router/open_volume.dart`）。
@@ -187,9 +197,12 @@ test/         lib と同じ構成。共通フェイクは test/support/
 - 残存リスク: iOS の `UserDefaults`（background_downloader のネイティブ状態）はバックアップ
   から外せない。Dart が繋がっていない間（アプリ終了中）に届いた転送の状態 / 再開データは
   `com.bbflight.background_downloader.{statusUpdateMap,progressUpdateMap,resumeDataMap}.v2`
-  に Task の JSON ごと入り、**Bearer 入りのヘッダを含む**。次の起動の
-  `ArchiveTransport.start` で取り出されるまでの間はバックアップに載りうる（取り出す前に
-  消すと完了を失うので消さない。根本対策は巻単位の短命トークンで、サーバー側の変更が要る。依頼の中身は `docs/server-requests.md`）。
+  に Task の JSON ごと入り、**署名付き URL を含む**（#22 で Bearer は付けなくなった）。
+  次の起動の `ArchiveTransport.start` で取り出されるまでの間はバックアップに載りうる
+  （取り出す前に消すと完了を失うので消さない）。漏れても取れるのはその巻の ZIP だけで、
+  最長 24 時間・ログアウトで 403 になる。ただし #22 より前に積んで一時停止 / 中断中の
+  転送は Bearer 入りのまま残る（再開データを失わないよう、照合で捨てて積み直さない。
+  再開・削除・ログアウトで消える。サーバーは `archive` で Bearer も受けるので再開できる）。
   nsurlsessiond の一時ファイルは OS 管理。SQLite の削除済みページは VACUUM
   まで残りうる。圏外起動中の `safe_mode` 変更は次にサーバーへ届くまで気づけない。
 
@@ -250,7 +263,11 @@ test/         lib と同じ構成。共通フェイクは test/support/
   そのユーザーの全端末へ送る。送信は notification（title / body / image）で、そのユーザー宛ての
   更新が 1 タイトルだけのときだけ data `{book_id}`（文字列）が付く。
 - オフライン向けに `GET /api/v2/volumes/{id}/manifest`、`GET /api/v2/volumes/{id}/archive` が
-  **サーバー側に実装済み**。
+  **サーバー側に実装済み**。`GET /api/v2/volumes/{id}/archive-url`（Bearer 必須。Cookie は 400）
+  → `{url, expires_at, files_version}`。`url` は Authorization 無しで GET し、応答は
+  `archive` と同じ（Range / ETag / 304）。403 = 署名不正・期限切れ・発行元トークンの失効、
+  409 = 発行後の ZIP 差し替え、発行後にセーフモードになった巻は 404。`expires_at` は最長
+  24 時間（トークンの期限が先ならそちら）。
   実装前に `gh api repos/ShunsukeHasegawa/comic-viewer/contents/<path>` で
   コントローラ / リソースの形を確認すること（推測で書かない）。
 - 画像: `/books/view/{volumeId}/{page}`（数値のみ）、`/books/thumbnail/{volumeId}?m=`。

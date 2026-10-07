@@ -5,14 +5,12 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
-import '../../../core/config/app_config.dart';
 import '../../../core/device/app_resume_monitor.dart';
 import '../../../core/device/connectivity_monitor.dart';
 import '../../../core/network/api_exception.dart';
 import '../../../core/utils/format.dart';
 import '../../../data/api/volumes_api.dart';
 import '../../../domain/models/volume_manifest.dart';
-import '../../auth/data/auth_store.dart';
 import '../../offline/application/offline_detail_warmer.dart';
 import '../data/archive_transport.dart';
 import '../data/archive_verifier.dart';
@@ -816,9 +814,34 @@ class DownloadQueue extends _$DownloadQueue {
       return;
     }
 
-    final uri = api.archiveUri(volumeId);
-    final headers = await _authHeaders(uri);
-    if (_isStale(generation)) return;
+    // 転送には署名付き URL を渡し、`Authorization` を付けない（#22）。付けると
+    // 転送タスクの記録にログイン用トークンが平文で残る。発行は Dio で行う
+    // （マニフェストと同じく、401 は AuthInterceptor の 1 経路に任せる）。
+    final Uri uri;
+    try {
+      final archiveUrl = await api.fetchArchiveUrl(volumeId);
+      if (_isStale(generation)) return;
+      // マニフェストを取ってから発行するまでの間に ZIP が差し替わった。この URL
+      // で落とすとマニフェスト（ページ数の検証に使う）と世代がずれる。積み直すと
+      // 差し替えが続く間は回り続けるので、理由を出してユーザーの再試行に任せる。
+      if (archiveUrl.filesVersion != manifest.filesVersion) {
+        await _fail(
+          volumeId,
+          _failureMessage(
+            const TransferFailure(kind: TransferFailureKind.resumeMismatch),
+          ),
+          generation: generation,
+        );
+        return;
+      }
+      uri = Uri.parse(archiveUrl.url);
+    } on Object catch (error) {
+      if (_isStale(generation)) return;
+      // マニフェストの取得の失敗と同じ扱い（圏外の初回は待機のまま残す）。
+      if (_isOffline(error) && !_installed.containsKey(volumeId)) return;
+      await _fail(volumeId, _messageOf(error), generation: generation);
+      return;
+    }
     download = state.value?[volumeId];
     if (download == null || !download.isActive) return;
 
@@ -851,7 +874,7 @@ class DownloadQueue extends _$DownloadQueue {
         ArchiveTransferRequest(
           taskId: task.toString(),
           uri: uri,
-          headers: headers,
+          headers: const {},
           directory: store.stagingDirectoryRelative(volumeId),
           filename: DownloadStore.stagingFilename(manifest.filesVersion),
           creationTime: _nextCreationTime(),
@@ -894,21 +917,6 @@ class DownloadQueue extends _$DownloadQueue {
     if (!accepted) {
       _clearTask(volumeId);
       await _fail(volumeId, '転送を開始できませんでした。', generation: generation);
-    }
-  }
-
-  /// Bearer は API と同じ配信元にだけ付ける（将来 CDN / 署名付き URL に
-  /// なったときに、他のホストへトークンを送らない）。
-  Future<Map<String, String>> _authHeaders(Uri uri) async {
-    if (!ref.read(appConfigProvider).isApiOrigin(uri)) return const {};
-    try {
-      final token = await ref.read(authStoreProvider).readToken();
-      if (token == null || token.isEmpty) return const {};
-      return {'Authorization': 'Bearer $token'};
-    } on Object catch (error) {
-      // 読めなければ付けずに送る（401 は確認の経路で扱う）。
-      debugPrint('[downloads] token read failed: $error');
-      return const {};
     }
   }
 
@@ -1131,10 +1139,8 @@ class DownloadQueue extends _$DownloadQueue {
   }) async {
     final volumeId = task.volumeId;
     switch (failure.kind) {
-      case TransferFailureKind.forbidden ||
-          TransferFailureKind.notFound ||
-          TransferFailureKind.fileSystem:
-        // 待っても直らない（権限 / 削除済み / 容量不足）。
+      case TransferFailureKind.notFound || TransferFailureKind.fileSystem:
+        // 待っても直らない（削除済み / セーフモードで配信されない / 容量不足）。
         _clearTask(volumeId);
         await _forgetQuietly(task);
         await _fail(volumeId, _failureMessage(failure), generation: generation);
@@ -1153,9 +1159,15 @@ class DownloadQueue extends _$DownloadQueue {
         if (_isStale(generation)) return;
         _scheduleSubmit(volumeId);
 
-      case TransferFailureKind.resumeMismatch:
-        // 再開しようとしたら ZIP が差し替わっていた。続きを足すと別世代が
-        // 混ざるので、マニフェストから取り直して先頭から落とす。
+      case TransferFailureKind.forbidden ||
+          TransferFailureKind.archiveReplaced ||
+          TransferFailureKind.resumeMismatch:
+        // 署名付き URL が使えなくなった（#22）か、ZIP が差し替わっていた。
+        // - 403: 期限切れ（最長 24 時間。長く中断していた巻の再開など）/ 改ざん /
+        //   発行元トークンの失効。発行し直せば取れる。ログインごと失効していれば、
+        //   発行（Dio）が 401 になって AuthInterceptor の 1 経路に合流する。
+        // - 409 / 再開時の ETag の不一致: 続きを足すと別世代が混ざる。
+        // どちらも書きかけは使えないので、マニフェストから取り直して先頭から落とす。
         if (!await _countAttempt(task, failure, generation: generation)) {
           return;
         }
@@ -1163,6 +1175,9 @@ class DownloadQueue extends _$DownloadQueue {
         await _deleteStaging(task);
         await _forgetQuietly(task);
         if (_isStale(generation)) return;
+        // Android が残した書きかけの一時ファイルも掃除する（[_resubmit] と同じく
+        // 投入より先に鎖に載せる）。
+        _scheduleTempSweep();
         _scheduleSubmit(volumeId);
 
       case TransferFailureKind.connection || TransferFailureKind.other
@@ -2117,26 +2132,26 @@ class DownloadQueue extends _$DownloadQueue {
     _ => 'ダウンロードに失敗しました。',
   };
 
-  static String _failureMessage(TransferFailure failure) =>
-      switch (failure.kind) {
-        TransferFailureKind.unauthorized =>
-          const UnauthorizedException().message,
-        TransferFailureKind.forbidden => const ForbiddenException().message,
-        TransferFailureKind.notFound => const NotFoundException().message,
-        TransferFailureKind.server => const ServerException(
-          statusCode: 500,
-        ).message,
-        TransferFailureKind.tooManyRequests =>
-          const TooManyRequestsException().message,
-        TransferFailureKind.connection => const NetworkException().message,
-        TransferFailureKind.resumeMismatch =>
-          'ダウンロード中にサーバー側のデータが更新されました。もう一度お試しください。',
-        TransferFailureKind.fileSystem =>
-          _isOutOfSpace(failure.message)
-              ? _outOfSpaceMessage
-              : '端末にデータを保存できませんでした。',
-        TransferFailureKind.other => 'ダウンロードに失敗しました。',
-      };
+  static String _failureMessage(
+    TransferFailure failure,
+  ) => switch (failure.kind) {
+    TransferFailureKind.unauthorized => const UnauthorizedException().message,
+    TransferFailureKind.forbidden => const ForbiddenException().message,
+    TransferFailureKind.notFound => const NotFoundException().message,
+    TransferFailureKind.server => const ServerException(
+      statusCode: 500,
+    ).message,
+    TransferFailureKind.tooManyRequests =>
+      const TooManyRequestsException().message,
+    TransferFailureKind.connection => const NetworkException().message,
+    TransferFailureKind.resumeMismatch || TransferFailureKind.archiveReplaced =>
+      'ダウンロード中にサーバー側のデータが更新されました。もう一度お試しください。',
+    TransferFailureKind.fileSystem =>
+      _isOutOfSpace(failure.message)
+          ? _outOfSpaceMessage
+          : '端末にデータを保存できませんでした。',
+    TransferFailureKind.other => 'ダウンロードに失敗しました。',
+  };
 
   static const _outOfSpaceMessage = '端末の空き容量が足りません。不要なデータを削除してからやり直してください。';
 

@@ -174,6 +174,7 @@ TransferFailure _httpFailure(int code, String message) => TransferFailure(
     401 => TransferFailureKind.unauthorized,
     403 => TransferFailureKind.forbidden,
     404 => TransferFailureKind.notFound,
+    409 => TransferFailureKind.archiveReplaced,
     429 => TransferFailureKind.tooManyRequests,
     >= 500 && < 600 => TransferFailureKind.server,
     _ => TransferFailureKind.other,

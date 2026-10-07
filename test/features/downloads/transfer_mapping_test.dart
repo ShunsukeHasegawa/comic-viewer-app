@@ -91,8 +91,12 @@ void main() {
       expect(failure.httpCode, 401);
     });
 
-    test('403 は権限の問題なので再試行しない forbidden に写す', () {
+    test('403 は署名付き URL の失効なので forbidden に写す（キューが発行し直す。#22）', () {
       expect(httpFailure(403).kind, TransferFailureKind.forbidden);
+    });
+
+    test('409 は発行後に ZIP が差し替わったので archiveReplaced に写す（#22）', () {
+      expect(httpFailure(409).kind, TransferFailureKind.archiveReplaced);
     });
 
     test('404 は巻が消えたので再試行しない notFound に写す', () {

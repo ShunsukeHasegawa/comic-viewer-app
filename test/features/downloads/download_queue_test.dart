@@ -183,8 +183,9 @@ void main() {
       expect(first.directory, 'downloads/$volumeId');
       expect(first.filename, '111.zip.download');
       expect(
-        first.uri.toString(),
-        'http://localhost:8000/api/v2/volumes/$volumeId/archive',
+        first.uri.path,
+        '/api/v2/volumes/$volumeId/archive',
+        reason: '発行された署名付き URL（#22）',
       );
     });
 
@@ -294,19 +295,59 @@ void main() {
       expect(scope.harness.transport.enqueued, hasLength(1));
     });
 
-    test('Bearer は API と同じオリジンにしか付けない', () async {
+    test('転送には署名付き URL を渡し、Authorization を付けない（#22）', () async {
+      // 付けると転送タスクの記録（Android はパッケージの永続領域、iOS は
+      // UserDefaults）にログイン用トークンが平文で残り、API 全体に使えてしまう。
       final scope = setUpQueue();
       await enqueueAndSubmit(scope);
-      expect(scope.harness.transport.requestOf(volumeId).headers, {
-        'Authorization': 'Bearer token-1',
-      }, reason: 'ZIP は自宅サーバーの認証付きエンドポイント');
+
+      final request = scope.harness.transport.requestOf(volumeId);
+      expect(request.headers, isEmpty);
+      expect(
+        request.uri.toString(),
+        FakeVolumesApi.archiveUrlOf(
+          volumeId,
+          filesVersion: scope.harness.api.manifest.filesVersion,
+          signature: 'sig-1',
+        ),
+        reason: '署名はクエリ全体に掛かるので、発行された URL に手を加えない',
+      );
     });
 
-    test('将来 CDN / 署名付き URL に変わっても、他のホストへトークンを送らない', () async {
-      final other = setUpQueue();
-      other.harness.api.archiveOrigin = 'https://cdn.example.com';
-      await enqueueAndSubmit(other);
-      expect(other.harness.transport.requestOf(volumeId).headers, isEmpty);
+    test('マニフェストの後に ZIP が差し替わっていたら、積まずに理由を出す', () async {
+      // その URL で落とすとページ数の検証に使うマニフェストと世代がずれる。
+      // 積み直すと差し替えが続く間は回り続けるので、ユーザーの再試行に任せる。
+      final scope = setUpQueue();
+      scope.harness.api.archiveUrlFilesVersion =
+          scope.harness.api.manifest.filesVersion + 1;
+
+      await enqueueAndSubmit(scope);
+
+      expect(scope.harness.transport.enqueued, isEmpty);
+      final download = downloadOf(scope.container)!;
+      expect(download.status, VolumeDownloadStatus.failed);
+      expect(download.failureReason, contains('更新されました'));
+    });
+
+    test('圏外で URL を発行できなかった初回の巻は待機のまま残す', () async {
+      // マニフェストの取得と同じ扱い（まとめて積んだ巻を一斉に「失敗」にしない）。
+      final scope = setUpQueue();
+      scope.harness.api.archiveUrlError = const NetworkException();
+
+      await enqueueAndSubmit(scope);
+
+      expect(scope.harness.transport.enqueued, isEmpty);
+      expect(downloadOf(scope.container)!.status, VolumeDownloadStatus.queued);
+    });
+
+    test('配信できなくなった巻は、URL の発行の 404 で理由を出す', () async {
+      final scope = setUpQueue();
+      scope.harness.api.archiveUrlError = const NotFoundException();
+
+      await enqueueAndSubmit(scope);
+
+      expect(scope.harness.transport.enqueued, isEmpty);
+      expect(downloadOf(scope.container)!.status, VolumeDownloadStatus.failed);
     });
 
     test('更新で世代が変わったら旧世代のタスクを取り消す', () async {
@@ -944,10 +985,58 @@ void main() {
 
       expect(scope.harness.api.manifestCalls, 2);
       expect(scope.harness.transport.enqueued, hasLength(2));
-      expect(scope.harness.transport.enqueued.last.headers, {
-        'Authorization': 'Bearer token-2',
-      }, reason: '生きていれば新しいトークンで積み直す');
+      expect(
+        scope.harness.api.archiveUrlCalls,
+        2,
+        reason: '生きていれば URL を発行し直して積み直す',
+      );
       expect(downloadOf(scope.container)!.isActive, isTrue);
+    });
+
+    for (final (kind, code, why) in [
+      (TransferFailureKind.forbidden, 403, '期限切れ / 発行元トークンの失効'),
+      (TransferFailureKind.archiveReplaced, 409, '発行後に ZIP が差し替わった'),
+    ]) {
+      test('署名付き URL の $code（$why）では、URL を発行し直して先頭から取り直す（#22）', () async {
+        final scope = setUpQueue();
+        await enqueueAndSubmit(scope);
+        final first = scope.harness.transport.requestOf(volumeId);
+        final staging = scope.harness.transport.stagingFileOf(first.taskId)
+          ..createSync(recursive: true)
+          ..writeAsStringSync('書きかけ');
+
+        scope.harness.transport.fail(volumeId, kind, httpCode: code);
+        await settle();
+
+        final second = scope.harness.transport.requestOf(volumeId);
+        expect(second.taskId, isNot(first.taskId));
+        expect(second.uri, isNot(first.uri), reason: '同じ URL は何度送っても断られる');
+        expect(second.headers, isEmpty);
+        expect(staging.existsSync(), isFalse, reason: '書きかけに続きを足すと別世代が混ざりうる');
+        expect(
+          scope.harness.transport.resumed,
+          isEmpty,
+          reason: '再開データは古い URL に紐づいている',
+        );
+        expect(downloadOf(scope.container)!.isActive, isTrue);
+      });
+    }
+
+    test('403 が続くなら上限で失敗にする（自宅サーバーを叩き続けない）', () async {
+      final scope = setUpQueue();
+      await enqueueAndSubmit(scope);
+
+      for (var i = 0; i < maxDownloadAttempts; i++) {
+        scope.harness.transport.fail(
+          volumeId,
+          TransferFailureKind.forbidden,
+          httpCode: 403,
+        );
+        await settle();
+      }
+
+      expect(scope.harness.transport.enqueued, hasLength(maxDownloadAttempts));
+      expect(downloadOf(scope.container)!.status, VolumeDownloadStatus.failed);
     });
 
     test('本当に失効していれば AuthInterceptor の 1 経路でだけログアウトする', () async {
@@ -1018,7 +1107,7 @@ void main() {
       await enqueueAndSubmit(scope);
       final before = scope.harness.transport.tempSweeps;
 
-      scope.harness.transport.fail(volumeId, TransferFailureKind.forbidden);
+      scope.harness.transport.fail(volumeId, TransferFailureKind.notFound);
       await settle();
 
       expect(
@@ -1044,7 +1133,7 @@ void main() {
       await settle();
       final before = scope.harness.transport.tempSweeps;
 
-      scope.harness.transport.fail(volumeId, TransferFailureKind.forbidden);
+      scope.harness.transport.fail(volumeId, TransferFailureKind.notFound);
       await settle();
 
       final modes = scope.harness.transport.tempSweepModes.skip(before);
@@ -1100,7 +1189,7 @@ void main() {
       // 何も走っていないので全部を消す掃除が始まる。その途中で次の巻が積まれる。
       // （起動時の照合の掃除の記録は消しておく）
       scope.harness.log.clear();
-      scope.harness.transport.fail(volumeId, TransferFailureKind.forbidden);
+      scope.harness.transport.fail(volumeId, TransferFailureKind.notFound);
       await waitUntil(() => scope.harness.log.contains('sweep'));
       await scope.queue.enqueue(volumeId: 341, bookId: bookId);
       await waitUntil(enqueued341);
@@ -1264,11 +1353,12 @@ void main() {
       expect(scope.harness.transport.enqueued, hasLength(1));
     });
 
-    test('権限が無い巻（403）は再試行しない', () async {
+    test('消えた巻（404）は再試行しない', () async {
+      // 403 は署名付き URL の失効なので発行し直す（#22。上の「署名付き URL の 403」）。
       final scope = setUpQueue();
       await enqueueAndSubmit(scope);
 
-      scope.harness.transport.fail(volumeId, TransferFailureKind.forbidden);
+      scope.harness.transport.fail(volumeId, TransferFailureKind.notFound);
       await settle();
 
       expect(downloadOf(scope.container)!.status, VolumeDownloadStatus.failed);
@@ -1480,6 +1570,91 @@ void main() {
       );
       expect(download.failureReason, isNotNull);
       expect(scope.harness.archiveFile(filesVersion: 111).existsSync(), isTrue);
+    });
+
+    group('署名付き URL（#22）でも旧世代を手放さない', () {
+      // 旧世代の ZIP を残したまま取り直す。どこで止まっても、オフラインで
+      // 読めていた巻を黙って読めなくしない（CLAUDE.md）。
+      void expectOldGenerationKept(
+        QueueScope scope, {
+        required bool withReason,
+      }) {
+        final download = downloadOf(scope.container)!;
+        expect(download.hasInstalledArchive, isTrue);
+        expect(download.filesVersion, 111);
+        if (withReason) {
+          expect(download.status, VolumeDownloadStatus.completed);
+          expect(download.failureReason, isNotNull, reason: '失敗を黙って隠さない');
+        }
+        expect(
+          scope.harness.archiveFile(filesVersion: 111).existsSync(),
+          isTrue,
+        );
+      }
+
+      for (final (name, error) in [
+        ('圏外', const NetworkException() as Object),
+        ('404', const NotFoundException()),
+      ]) {
+        test('URL を発行できない（$name）ときは旧世代の完了に戻して理由を出す', () async {
+          final scope = await setUpOutdated();
+          final before = scope.harness.transport.enqueued.length;
+          scope.harness.api.archiveUrlError = error;
+
+          await enqueueAndSubmit(scope);
+
+          expect(scope.harness.transport.enqueued, hasLength(before));
+          expectOldGenerationKept(scope, withReason: true);
+        });
+      }
+
+      test('発行した URL の世代がマニフェストと違えば、旧世代の完了に戻して理由を出す', () async {
+        final scope = await setUpOutdated();
+        final before = scope.harness.transport.enqueued.length;
+        scope.harness.api.archiveUrlFilesVersion = 333;
+
+        await enqueueAndSubmit(scope);
+
+        expect(scope.harness.transport.enqueued, hasLength(before));
+        expectOldGenerationKept(scope, withReason: true);
+      });
+
+      for (final (kind, code) in [
+        (TransferFailureKind.forbidden, 403),
+        (TransferFailureKind.archiveReplaced, 409),
+      ]) {
+        test('取り直しの $code で発行し直す間も、旧世代の ZIP は読めるまま残す', () async {
+          final scope = await setUpOutdated();
+          await enqueueAndSubmit(scope);
+          final before = scope.harness.transport.enqueued.length;
+
+          scope.harness.transport.fail(volumeId, kind, httpCode: code);
+          await settle();
+
+          expect(
+            scope.harness.transport.enqueued,
+            hasLength(before + 1),
+            reason: '発行し直して積み直す',
+          );
+          expectOldGenerationKept(scope, withReason: false);
+        });
+      }
+
+      test('取り直しの 403 が上限に達したら、旧世代の完了に戻して理由を出す', () async {
+        final scope = await setUpOutdated();
+        await enqueueAndSubmit(scope);
+
+        for (var i = 0; i < maxDownloadAttempts; i++) {
+          scope.harness.transport.fail(
+            volumeId,
+            TransferFailureKind.forbidden,
+            httpCode: 403,
+          );
+          await settle();
+        }
+
+        expectOldGenerationKept(scope, withReason: true);
+      });
     });
 
     test('検証に落ちても旧世代の ZIP は読めるまま残す', () async {

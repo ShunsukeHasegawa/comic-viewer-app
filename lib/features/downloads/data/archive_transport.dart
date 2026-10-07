@@ -115,8 +115,14 @@ enum TransferFailureKind {
   /// 401。タスクに焼き込んだトークンが古いだけかもしれないので、すぐに
   /// ログアウト扱いにしない（キューがマニフェストを取り直して確かめる）。
   unauthorized,
+
+  /// 403。署名付き URL の期限切れ / 改ざん / 発行元トークンの失効（#22）。
+  /// 発行し直せば取れるので、キューは URL を取り直して積み直す。
   forbidden,
   notFound,
+
+  /// 409。署名付き URL の発行後に ZIP が差し替わった（#22）。
+  archiveReplaced,
   server,
   tooManyRequests,
   connection,

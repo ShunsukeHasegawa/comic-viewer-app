@@ -265,18 +265,20 @@ void main() {
       expect(harness.transport.forgotten, contains(taskIdOf(volumeId)));
     });
 
-    test('プラグインの自動再投入に任せず、新しいトークンで積み直す', () async {
+    test('プラグインの自動再投入に任せず、URL を発行し直して積み直す', () async {
       await saveRow(VolumeDownloadStatus.downloading);
       // プロセスごと殺されて holding queue の中身が消えた。
       snapshots({taskIdOf(volumeId): TransferState.notFound});
-      harness.authStore.token = 'token-2';
 
       await start();
 
       expect(harness.transport.enqueued, hasLength(1));
-      expect(harness.transport.enqueued.single.headers, {
-        'Authorization': 'Bearer token-2',
-      }, reason: '古いトークンを焼き込んだまま積み直すと 401 になる（F5）');
+      expect(
+        harness.api.archiveUrlCalls,
+        1,
+        reason: '古い URL のまま積み直すと期限切れ / 失効で 403 になる（F5）',
+      );
+      expect(harness.transport.enqueued.single.headers, isEmpty);
       expect(harness.transport.forgotten, contains(taskIdOf(volumeId)));
     });
 

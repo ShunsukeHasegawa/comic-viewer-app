@@ -8,6 +8,7 @@ import 'package:comic_laz/core/device/app_resume_monitor.dart';
 import 'package:comic_laz/core/device/connectivity_monitor.dart';
 import 'package:comic_laz/core/device/network_kind_monitor.dart';
 import 'package:comic_laz/data/api/volumes_api.dart';
+import 'package:comic_laz/domain/models/archive_url.dart';
 import 'package:comic_laz/domain/models/volume_manifest.dart';
 import 'package:comic_laz/features/auth/data/auth_store.dart';
 import 'package:comic_laz/features/downloads/application/download_queue.dart';
@@ -29,7 +30,7 @@ import 'auth_fakes.dart';
 import 'cache_fakes.dart';
 import 'progress_fakes.dart';
 
-/// ネットワークを触らない [VolumesApi]（マニフェストだけ）。
+/// ネットワークを触らない [VolumesApi]（マニフェストと署名付き URL）。
 ///
 /// ZIP 本体は OS の転送（[FakeArchiveTransport]）が運ぶ。
 class FakeVolumesApi implements VolumesApi {
@@ -51,10 +52,15 @@ class FakeVolumesApi implements VolumesApi {
   /// 401 を受けた AuthInterceptor の振る舞いを模す）。
   Future<void> Function()? onManifest;
 
-  /// ZIP の配信元（Bearer を付けてよい相手かの判定に使われる）。
-  String archiveOrigin = DownloadHarness.apiBaseUrl;
+  /// 署名付き URL の発行で投げる例外。
+  Object? archiveUrlError;
+
+  /// 発行する URL の `files_version`。`null` ならその巻のマニフェストと同じ
+  /// （マニフェストを取ってから発行するまでに ZIP が差し替わった場合を模す）。
+  int? archiveUrlFilesVersion;
 
   int manifestCalls = 0;
+  int archiveUrlCalls = 0;
 
   @override
   Future<VolumeManifest> fetchManifest(int volumeId) async {
@@ -64,9 +70,31 @@ class FakeVolumesApi implements VolumesApi {
     return manifests[volumeId] ?? manifest;
   }
 
+  /// 発行のたびに署名の違う URL を返す（発行し直したことをテストで見分ける）。
   @override
-  Uri archiveUri(int volumeId) =>
-      Uri.parse('$archiveOrigin/api/v2/volumes/$volumeId/archive');
+  Future<ArchiveUrl> fetchArchiveUrl(int volumeId) async {
+    archiveUrlCalls++;
+    if (archiveUrlError case final error?) throw error;
+    final filesVersion =
+        archiveUrlFilesVersion ??
+        (manifests[volumeId] ?? manifest).filesVersion;
+    return ArchiveUrl(
+      url: archiveUrlOf(
+        volumeId,
+        filesVersion: filesVersion,
+        signature: 'sig-$archiveUrlCalls',
+      ),
+      filesVersion: filesVersion,
+    );
+  }
+
+  static String archiveUrlOf(
+    int volumeId, {
+    required int filesVersion,
+    required String signature,
+  }) =>
+      '${DownloadHarness.apiBaseUrl}/api/v2/volumes/$volumeId/archive'
+      '?expires=1759924800&t=1&v=$filesVersion&signature=$signature';
 }
 
 /// プラットフォームチャネルに触らない [ArchiveTransport]。
