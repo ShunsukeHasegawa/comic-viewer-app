@@ -9,18 +9,19 @@ import '../../../core/device/connectivity_monitor.dart';
 import '../../../core/utils/format.dart';
 import '../../../data/api/volumes_api.dart';
 import '../../../domain/models/volume_manifest.dart';
-import '../../offline/application/offline_detail_warmer.dart';
 import '../data/archive_transport.dart';
-import '../data/archive_verifier.dart';
 import '../data/background_archive_transport.dart';
 import '../data/download_store.dart';
 import '../data/free_space_probe.dart';
 import '../domain/archive_task_id.dart';
 import '../domain/volume_download.dart';
+import 'archive_installer.dart';
 import 'download_failure_policy.dart';
-import 'download_progress_book.dart';
+import 'download_queue_memory.dart';
 import 'download_settings.dart';
-import 'reconcile_planner.dart';
+import 'startup_reconciler.dart';
+import 'transfer_cleanup.dart';
+import 'transfer_event_reducer.dart';
 
 export 'download_failure_policy.dart' show maxDownloadAttempts;
 export 'download_progress_book.dart' show progressPersistIntervalBytes;
@@ -54,111 +55,30 @@ const freeSpaceMarginBytes = 64 * 1024 * 1024;
 /// ため、Dart では止めない。Android の 9 分の時間切れは holding queue を
 /// 迂回して同時実行数を崩すので foreground 実行で避ける（背面で始まった巻には
 /// 効かない残りの穴がある。`foregroundModeFor` 参照）。
+///
+/// このクラスは調停役で、公開の操作（積む / 中断 / 再開 / 削除 / 破棄）・投入・
+/// 再試行・台帳の書き込み・世代の管理を持つ。次の処理は部品に分けてある（#32）:
+/// - 起動時の照合の実行: [StartupReconciler]（判断の表は reconcile_planner.dart）
+/// - 転送イベントの反映: [TransferEventReducer]
+/// - 確定（検証・rename・台帳の完了）: [ArchiveInstaller]
+/// - 取り消し・書きかけ / 記録 / 一時ファイルの後始末: [TransferCleanup]
+///
+/// 部品は巻ごとの印と鎖（[DownloadQueueMemory]）をこのクラスと共有し、台帳や
+/// 投入はここ（[DownloadQueueHost]）に頼む。
 @Riverpod(keepAlive: true)
 class DownloadQueue extends _$DownloadQueue {
-  /// 取り直しを始めた時点で端末にあった「完了済みの世代」。
-  ///
-  /// 「更新あり」の取り直しが失敗 / 中断しても、台帳はここへ戻す。
-  /// 通信の失敗で手元のキャッシュ（オフラインで読める旧世代）を捨てないため
-  /// （落とし直しに失敗した瞬間に、読める ZIP を指す行が台帳から消えてしまう）。
-  final _installed = <int, VolumeDownload>{};
+  /// 巻ごとの印と鎖。部品（照合 / イベントの reducer / 確定 / 後始末）と
+  /// 共有する（[DownloadQueueMemory]。#32）。
+  final _memory = DownloadQueueMemory();
 
-  /// 進捗を DB へ書く間引き（最後に書いた受信バイト数）。
-  final _persistThrottle = ProgressPersistThrottle();
-
-  /// 巻ごとの「今の転送」。
-  ///
-  /// 走行中だけでなく、一時停止中（再開データがある）・再試行待ちも含む。
-  /// ここに無い転送のイベントは、古い世代や取り消し済みのものとして扱う。
-  final _tasks = <int, ArchiveTaskId>{};
-
-  /// OS 側で待機中 / 走行中の巻（二重に積まない判定に使う）。
-  final _liveTasks = <int>{};
-
-  /// OS 側で実際に走っている（`running` / 進捗が届いた）巻。
-  ///
-  /// 一時停止できるのはこれだけ（F11）。Android のパッケージは、holding
-  /// queue や Wi-Fi 待ちで待機しているだけのタスクにも「止めた」と返す
-  /// （印を付けるだけ）ので、待機中のものは取り消しに回す。
-  final _runningTasks = <int>{};
-
-  /// 今の転送が一度でも走った（`running` / 進捗 / paused が届いた）巻。
-  ///
-  /// 待機中の巻を中断するとき、取り消すか一時停止の印に任せるかを決める
-  /// （F11）。Android の時間切れ（`BDPlugin.doEnqueue` へ直接渡す）と
-  /// Wi-Fi 設定の変更（`localResumeData`）による再投入は、再開データを
-  /// ネイティブ側にしか持たず Dart の保存領域に載せない。パッケージの
-  /// 再開データの有無だけで決めると、その巻の中断が取り消しになり、
-  /// 書きかけを捨てて先頭から落とし直しになる。印を付けておけば、走り
-  /// 出したときにネイティブの再開データで続きを取れる状態のまま止まる。
-  /// 新しく積んだ（先頭から取る）とき・転送を手放したときに外す。
-  final _hadProgress = <int>{};
-
-  /// OS に一時停止を頼んでいる最中の巻（その往復の間に「再開」が押されうる）。
-  final _pausing = <int>{};
-
-  /// 一時停止を頼んでいる最中に「再開」が押された巻（F3）。
-  final _resumeRequested = <int>{};
-
-  /// 一時停止を頼んでいる最中に、OS から paused が届いた巻。
-  final _pausedSeen = <int>{};
-
-  /// OS から paused が届いたら続きを取る巻（止め終わる前に「再開」された）。
-  final _resumeOnPaused = <int>{};
-
-  /// 一時停止を受け付けてもらったが、まだ paused が届いていない巻。
-  ///
-  /// 「止めた」はネイティブが受け付けただけで、再開データは止め終わりの
-  /// paused と一緒に届く。その前に resume すると断られ、先頭から積み直しに
-  /// なる。
-  final _pausedEventPending = <int>{};
-
-  /// 起動時の照合の前に届いた完了（taskId）。
-  ///
-  /// 照合の一覧（記録）に載っていなくても、完了が届いたなら書き上がった
-  /// ZIP がある。照合がそれを孤児として掃除しないよう、一覧に足す（F6）。
-  final _earlyCompleted = <String>{};
-
-  /// 投入の処理中にもう一度頼まれた巻（終わったら改めて投入を確かめる）。
-  final _submitAgain = <int>{};
-
-  /// 転送は終わったが、確定（検証・rename）がまだの巻。
-  ///
-  /// マニフェストが手元に無く、オフラインで確定できなかったものが残る。
-  /// 回線が戻ったらやり直す。
-  final _awaitingInstall = <int>{};
-
-  /// 確定の処理に載っている巻（二重に積まない）。
-  final _installing = <int>{};
-
-  /// 投入の処理に載っている巻（二重に積まない）。
-  final _submitting = <int>{};
-
-  /// 自分で取り消した転送。届いた canceled を「通知の Cancel ボタン」と
-  /// 取り違えないために覚えておく。
-  final _cancelling = <String>{};
-
-  /// 巻ごとの転送の試行回数（再試行の上限）。
-  final _attempts = DownloadAttempts();
-
-  /// OS に渡して未確定の巻の残りバイト数（空き容量の判定に含める。F7）。
-  final _reservations = SpaceReservations();
+  late final _host = _QueueHost(this);
+  late final _cleanup = TransferCleanup(_memory, _host);
+  late final _installer = ArchiveInstaller(_memory, _host, _cleanup);
+  late final _events = TransferEventReducer(_memory, _host, _cleanup);
+  late final _reconciler = StartupReconciler(_memory, _host, _cleanup);
 
   /// 進行中の非同期処理（テストで「落ち着くまで待つ」ために使う）。
   final _pending = <Future<void>>{};
-
-  /// 投入を積んだ順に 1 本ずつ流す（`creationTime` の順番を崩さない）。
-  /// 一時ファイルの掃除も同じ鎖に載せる（[_scheduleTempSweep]）。
-  Future<void> _submitChain = Future.value();
-
-  /// 一時ファイルの掃除が鎖に載って、まだ始まっていない（重ねて載せない）。
-  bool _tempSweepQueued = false;
-
-  /// 転送のイベントを届いた順に 1 つずつ処理する。
-  Future<void> _eventChain = Future.value();
-
-  /// 確定（検証・rename）を 1 巻ずつ行う（同じ巻の完了の再送と競らせない）。
-  Future<void> _installChain = Future.value();
 
   /// 起動時の照合が終わるまで、転送のイベントを待たせる。
   ///
@@ -204,7 +124,7 @@ class DownloadQueue extends _$DownloadQueue {
     // 後から書き戻さないよう世代を進め、メモリ上の状態を捨てる。
     _generation++;
     final generation = _generation;
-    _resetMemory();
+    _memory.reset();
     final ready = _ready = Completer<void>();
     ref.onDispose(() {
       if (!ready.isCompleted) ready.complete();
@@ -214,7 +134,7 @@ class DownloadQueue extends _$DownloadQueue {
     _transport = transport;
     // 先に購読する。`start` の中で、アプリが死んでいる間に終わった転送の
     // 完了が届く。
-    final events = transport.events.listen(_onEvent);
+    final events = transport.events.listen(_events.onEvent);
     ref.onDispose(events.cancel);
 
     // Wi-Fi 限定の設定は OS の転送に反映する（走行中の転送にも効かせる）。
@@ -292,7 +212,7 @@ class DownloadQueue extends _$DownloadQueue {
               snapshots = const [];
             }
             if (_isStale(generation)) return;
-            await _reconcile(snapshots, generation);
+            await _reconciler.run(snapshots, generation);
           } finally {
             if (!ready.isCompleted) ready.complete();
           }
@@ -332,7 +252,7 @@ class DownloadQueue extends _$DownloadQueue {
             );
     await _save(download);
     if (!ref.mounted) return;
-    _attempts.reset(volumeId);
+    _memory.attempts.reset(volumeId);
     _checkNotificationPermissionOnce();
     _scheduleSubmit(volumeId);
   }
@@ -357,10 +277,11 @@ class DownloadQueue extends _$DownloadQueue {
     // 転送はもう終わっていて、確定（検証・rename）を待っているだけ（F2）。
     // ここで止めると書き上がった ZIP を捨てる（確定の途中なら rename が
     // 失敗して「保存できませんでした」になる）。止める意味が無いので確定させる。
-    if (_installing.contains(volumeId) || _awaitingInstall.contains(volumeId)) {
+    if (_memory.installing.contains(volumeId) ||
+        _memory.awaitingInstall.contains(volumeId)) {
       return;
     }
-    final task = _tasks[volumeId];
+    final task = _memory.tasks[volumeId];
 
     if (task == null) {
       // 止める意図を台帳へ書く（F1）。投入の処理（マニフェスト取得中）は
@@ -368,10 +289,10 @@ class DownloadQueue extends _$DownloadQueue {
       await _savePaused(current);
       return;
     }
-    if (_pausing.contains(volumeId)) {
+    if (_memory.pausing.contains(volumeId)) {
       // 先の中断の処理中に「再開」され、もう一度「中断」された。最後の操作に
       // 従う（先の中断がそのまま止める）。
-      _resumeRequested.remove(volumeId);
+      _memory.resumeRequested.remove(volumeId);
       await _savePaused(current);
       return;
     }
@@ -380,7 +301,7 @@ class DownloadQueue extends _$DownloadQueue {
     // この処理が引き受ける。**最初の await より前に**印を付ける（台帳の
     // 書き込みを待つ間に押された「再開」が、止め終わる前に resume して
     // 断られ、先頭から積み直すことのないように）。
-    _pausing.add(volumeId);
+    _memory.pausing.add(volumeId);
     var paused = false;
     var pauseFailed = false;
     var wasRunning = false;
@@ -394,8 +315,8 @@ class DownloadQueue extends _$DownloadQueue {
       // 止める前に再開された（OS には何もしていないので、そのまま続く）/
       // 削除 / 積み直し / ログアウトされた（後はそちらに任せる）。
       if (!ref.mounted ||
-          _tasks[volumeId] != task ||
-          _resumeRequested.contains(volumeId)) {
+          _memory.tasks[volumeId] != task ||
+          _memory.resumeRequested.contains(volumeId)) {
         return;
       }
       // 走っている転送は一時停止する。待機中のものは、再開データがある
@@ -404,17 +325,17 @@ class DownloadQueue extends _$DownloadQueue {
       // だけなので、後で走り出して同時実行の枠を一瞬使ってから止まる。
       // それでも取り消すと、canceled は最終状態なのでパッケージが再開データを
       // 捨て、書きかけごと先頭から落とし直しになる。
-      wasRunning = _runningTasks.contains(volumeId);
+      wasRunning = _memory.runningTasks.contains(volumeId);
       // 一度走った巻は、Dart から見えなくてもネイティブが再開データを
-      // 持っている（[_hadProgress]）。再起動でそれを忘れた後は、ユーザーの
-      // 一時停止で Dart に届いた再開データで判断する。
+      // 持っている（[DownloadQueueMemory.hadProgress]）。再起動でそれを
+      // 忘れた後は、ユーザーの一時停止で Dart に届いた再開データで判断する。
       final canPause =
           wasRunning ||
-          _hadProgress.contains(volumeId) ||
+          _memory.hadProgress.contains(volumeId) ||
           await _hasResumeData(task);
       if (!ref.mounted ||
-          _tasks[volumeId] != task ||
-          _resumeRequested.contains(volumeId)) {
+          _memory.tasks[volumeId] != task ||
+          _memory.resumeRequested.contains(volumeId)) {
         return;
       }
       if (canPause) {
@@ -428,13 +349,13 @@ class DownloadQueue extends _$DownloadQueue {
     } finally {
       // ここまでに押された「再開」はこの後で扱う。この後に押されたものは
       // resume() 自身が扱う（同期的に引き継ぐので取りこぼさない）。
-      _pausing.remove(volumeId);
-      pausedSeen = _pausedSeen.remove(volumeId);
-      resumeRequested = _resumeRequested.remove(volumeId);
+      _memory.pausing.remove(volumeId);
+      pausedSeen = _memory.pausedSeen.remove(volumeId);
+      resumeRequested = _memory.resumeRequested.remove(volumeId);
     }
     if (!ref.mounted) return;
     // 止めている間に削除 / 積み直し / ログアウトされた。後はそちらに任せる。
-    if (_tasks[volumeId] != task) return;
+    if (_memory.tasks[volumeId] != task) return;
 
     if (resumeRequested) {
       // F3: OS に止めてもらっている間に「再開」が押された（台帳は待機中に
@@ -443,34 +364,34 @@ class DownloadQueue extends _$DownloadQueue {
       // 「待機中」で動かなくなる。止めていない / 止められなかったなら、
       // そのまま走り続ける（書き上がっていれば完了が確定する）。
       if (!paused) return;
-      _liveTasks.remove(volumeId);
-      _runningTasks.remove(volumeId);
+      _memory.liveTasks.remove(volumeId);
+      _memory.runningTasks.remove(volumeId);
       if (pausedSeen) {
         await _resumeOrSubmit(task, generation: _generation);
       } else {
-        _resumeOnPaused.add(volumeId);
+        _memory.resumeOnPaused.add(volumeId);
       }
       return;
     }
     if (paused) {
-      _liveTasks.remove(volumeId);
-      _runningTasks.remove(volumeId);
-      if (!pausedSeen) _pausedEventPending.add(volumeId);
+      _memory.liveTasks.remove(volumeId);
+      _memory.runningTasks.remove(volumeId);
+      if (!pausedSeen) _memory.pausedEventPending.add(volumeId);
       return;
     }
     if (wasRunning && !pauseFailed) {
       // 走っていたのに「止められない」と返った = ネイティブにはもう走っている
       // タスクが無い（書き上がって完了が届く途中 / 失敗した）。取り消しに回すと
       // 書き上がった ZIP（書き込み先そのもの）を消してしまう。取り消さず、
-      // 届く最終状態に任せる: 完了なら [_install] が確定し、失敗なら台帳
+      // 届く最終状態に任せる: 完了なら確定（[ArchiveInstaller]）し、失敗なら台帳
       // （中断）のまま片付く。
-      _liveTasks.remove(volumeId);
-      _runningTasks.remove(volumeId);
+      _memory.liveTasks.remove(volumeId);
+      _memory.runningTasks.remove(volumeId);
       return;
     }
     // 再開データの無い待機中（holding queue で待っているだけ / 再試行待ち）の
     // 転送は捨てるものが無いので取り消す。中断中の表示のまま落としきらせない。
-    await _cancelTask(task);
+    await _cleanup.cancelTask(task);
   }
 
   /// OS 側にこの巻の転送（待機・走行・一時停止中の再開データ・確定待ち）が
@@ -479,7 +400,7 @@ class DownloadQueue extends _$DownloadQueue {
   /// 「更新あり」の取り直しを中断した巻は、台帳が旧世代の完了に戻っていても
   /// 転送は残っている。自動削除（#13）は完了行しか見ないので、これで除く
   /// （消すと取り直しの続きと旧世代がまとめて失われる）。
-  bool hasPendingTransfer(int volumeId) => _tasks.containsKey(volumeId);
+  bool hasPendingTransfer(int volumeId) => _memory.tasks.containsKey(volumeId);
 
   /// 起動時の照合（OS 側の転送と台帳の突き合わせ）が終わったとき完了する。
   ///
@@ -508,9 +429,10 @@ class DownloadQueue extends _$DownloadQueue {
     // 処理が終わると、下で再開データの無い resume をして断られ、書きかけを
     // 捨てて先頭から積み直すことになる。
     final deferToPause =
-        _tasks.containsKey(volumeId) && _pausing.contains(volumeId);
-    if (deferToPause) _resumeRequested.add(volumeId);
-    _attempts.reset(volumeId);
+        _memory.tasks.containsKey(volumeId) &&
+        _memory.pausing.contains(volumeId);
+    if (deferToPause) _memory.resumeRequested.add(volumeId);
+    _memory.attempts.reset(volumeId);
     await _save(
       current.copyWith(
         status: VolumeDownloadStatus.queued,
@@ -519,18 +441,18 @@ class DownloadQueue extends _$DownloadQueue {
     );
     if (!ref.mounted || deferToPause) return;
 
-    final task = _tasks[volumeId];
+    final task = _memory.tasks[volumeId];
     if (task != null) {
       // 台帳の書き込みを待つ間に中断が始まった。
-      if (_pausing.contains(volumeId)) {
-        _resumeRequested.add(volumeId);
+      if (_memory.pausing.contains(volumeId)) {
+        _memory.resumeRequested.add(volumeId);
         return;
       }
-      if (_liveTasks.contains(volumeId)) return;
+      if (_memory.liveTasks.contains(volumeId)) return;
       if (_deferResumeUntilPaused(volumeId)) return;
       if (await _tryResume(task)) return;
-      _clearTask(volumeId);
-      await _forgetQuietly(task);
+      _memory.clearTask(volumeId);
+      await _cleanup.forgetQuietly(task);
       if (!ref.mounted) return;
     }
     // 再開データが無い（アプリの再起動で消えた / 失敗で捨てられた）ので積み直す。
@@ -544,21 +466,21 @@ class DownloadQueue extends _$DownloadQueue {
     await future;
     if (!ref.mounted) return;
 
-    final task = _tasks[volumeId];
-    _clearTask(volumeId);
-    _attempts.reset(volumeId);
-    _persistThrottle.forget(volumeId);
-    _installed.remove(volumeId);
+    final task = _memory.tasks[volumeId];
+    _memory.clearTask(volumeId);
+    _memory.attempts.reset(volumeId);
+    _memory.persistThrottle.forget(volumeId);
+    _memory.installed.remove(volumeId);
 
     // 先に台帳を消す。メモリ（state）からは await の**前に**消す（F4）。
-    // DB の削除を待つ間に確定（[_finish] / [_complete]）が進むと、state に
+    // DB の削除を待つ間に確定（[ArchiveInstaller]）が進むと、state に
     // 行が残っていれば completed を保存し、その保存が削除の後に届いて
     // 「実体の無いダウンロード済み」が次の起動で復活する。取り消しの
     // await の間に届いた完了も、行が無いので取り込まない。
     final store = _store;
     _forget(volumeId);
     await store?.deleteRow(volumeId);
-    if (task != null) await _cancelTask(task);
+    if (task != null) await _cleanup.cancelTask(task);
     await store?.deleteFiles(volumeId);
   }
 
@@ -588,7 +510,7 @@ class DownloadQueue extends _$DownloadQueue {
     _generation++;
     // タグが決まるまでは、届いたイベントをすべて前のセッションのものとして扱う。
     _sessionTag = null;
-    _resetMemory();
+    _memory.reset();
 
     var store = _store;
     if (store == null) {
@@ -646,16 +568,16 @@ class DownloadQueue extends _$DownloadQueue {
 
   /// 投入を積む（積んだ順に 1 本ずつ流す）。
   void _scheduleSubmit(int volumeId) {
-    if (!_submitting.add(volumeId)) {
+    if (!_memory.submitting.add(volumeId)) {
       // 投入の処理中（マニフェスト取得 / 投入の await 中）に中断 → 再開された
       // などで、もう一度頼まれた。今の処理はその中断を見て畳むかもしれないので、
       // 終わってから改めて確かめる（積めていれば何もしない）。
-      _submitAgain.add(volumeId);
+      _memory.submitAgain.add(volumeId);
       return;
     }
     final generation = _generation;
     final ready = _ready;
-    final link = _submitChain.then((_) async {
+    final link = _memory.submitChain.then((_) async {
       try {
         // 起動時の照合が終わるまで待つ。照合の前は OS 側に同じ巻の転送が
         // 残っているか分からず、二重に積んだり書きかけを消したりしかねない。
@@ -663,19 +585,19 @@ class DownloadQueue extends _$DownloadQueue {
         await _submit(volumeId, generation);
       } finally {
         if (generation == _generation) {
-          _submitting.remove(volumeId);
-          // 今の処理で積めていれば（_tasks にある）取り直さない。
+          _memory.submitting.remove(volumeId);
+          // 今の処理で積めていれば（_memory.tasks にある）取り直さない。
           final download = ref.mounted ? (state.value?[volumeId]) : null;
-          if (_submitAgain.remove(volumeId) &&
+          if (_memory.submitAgain.remove(volumeId) &&
               download != null &&
               download.isActive &&
-              !_tasks.containsKey(volumeId)) {
+              !_memory.tasks.containsKey(volumeId)) {
             _scheduleSubmit(volumeId);
           }
         }
       }
     });
-    _submitChain = link.catchError((Object _) {});
+    _memory.submitChain = link.catchError((Object _) {});
     _track(link);
   }
 
@@ -685,12 +607,12 @@ class DownloadQueue extends _$DownloadQueue {
     for (final download in state.value?.values ?? const <VolumeDownload>[]) {
       if (!download.isActive) continue;
       final volumeId = download.volumeId;
-      if (_awaitingInstall.contains(volumeId)) {
-        final task = _tasks[volumeId];
-        if (task != null) _scheduleInstall(task);
+      if (_memory.awaitingInstall.contains(volumeId)) {
+        final task = _memory.tasks[volumeId];
+        if (task != null) _installer.schedule(task);
         continue;
       }
-      if (_tasks.containsKey(volumeId)) continue;
+      if (_memory.tasks.containsKey(volumeId)) continue;
       _scheduleSubmit(volumeId);
     }
   }
@@ -719,7 +641,9 @@ class DownloadQueue extends _$DownloadQueue {
       // 待機のまま残り、次の契機（回線の復帰 / 前面復帰 / Wi-Fi 待ちの解除 /
       // 次の起動）まで積み直さない。自宅サーバーを時間で叩き続けないため、
       // 時間での再試行はあえて持たない。
-      if (isOfflineError(error) && !_installed.containsKey(volumeId)) return;
+      if (isOfflineError(error) && !_memory.installed.containsKey(volumeId)) {
+        return;
+      }
       await _fail(
         volumeId,
         downloadErrorMessage(error),
@@ -733,15 +657,15 @@ class DownloadQueue extends _$DownloadQueue {
     if (download == null || !download.isActive) return;
 
     // 同じ巻の転送が既にある。
-    final existing = _tasks[volumeId];
+    final existing = _memory.tasks[volumeId];
     if (existing != null) {
       final sameGeneration =
           existing.filesVersion == manifest.filesVersion &&
           existing.sessionTag == tag;
       if (sameGeneration &&
-          (_liveTasks.contains(volumeId) ||
-              _installing.contains(volumeId) ||
-              _awaitingInstall.contains(volumeId))) {
+          (_memory.liveTasks.contains(volumeId) ||
+              _memory.installing.contains(volumeId) ||
+              _memory.awaitingInstall.contains(volumeId))) {
         return;
       }
       if (sameGeneration) {
@@ -749,11 +673,11 @@ class DownloadQueue extends _$DownloadQueue {
         if (_deferResumeUntilPaused(volumeId)) return;
         if (await _tryResume(existing)) return;
         if (_isStale(generation)) return;
-        _clearTask(volumeId);
-        await _forgetQuietly(existing);
+        _memory.clearTask(volumeId);
+        await _cleanup.forgetQuietly(existing);
       } else {
         // 更新で世代が変わった。旧世代の転送は要らない。
-        await _cancelTask(existing);
+        await _cleanup.cancelTask(existing);
       }
       if (_isStale(generation)) return;
     }
@@ -768,7 +692,7 @@ class DownloadQueue extends _$DownloadQueue {
     if (archive.existsSync() &&
         (manifest.archiveBytes == 0 ||
             archive.lengthSync() == manifest.archiveBytes)) {
-      await _finish(volumeId, manifest, generation: generation);
+      await _installer.finish(volumeId, manifest, generation: generation);
       return;
     }
 
@@ -778,7 +702,7 @@ class DownloadQueue extends _$DownloadQueue {
     // 中断中の転送は数えない）。9 分の時間切れなどの一時的な停止は台帳が
     // 待機中 / 取得中のままなので、引き続き押さえる。
     final ledger = state.value ?? const <int, VolumeDownload>{};
-    final reservedByOthers = _reservations.reservedByOthers(
+    final reservedByOthers = _memory.reservations.reservedByOthers(
       volumeId,
       isActive: (id) => ledger[id]?.isActive ?? false,
     );
@@ -793,7 +717,7 @@ class DownloadQueue extends _$DownloadQueue {
     if (_isStale(generation)) return;
 
     // 前回の残り（転送が消えた後の書きかけ）は使えないので捨てる。
-    await _deleteQuietly(
+    await TransferCleanup.deleteQuietly(
       store.stagingFile(
         volumeId: volumeId,
         filesVersion: manifest.filesVersion,
@@ -838,7 +762,9 @@ class DownloadQueue extends _$DownloadQueue {
     } on Object catch (error) {
       if (_isStale(generation)) return;
       // マニフェストの取得の失敗と同じ扱い（圏外の初回は待機のまま残す）。
-      if (isOfflineError(error) && !_installed.containsKey(volumeId)) return;
+      if (isOfflineError(error) && !_memory.installed.containsKey(volumeId)) {
+        return;
+      }
       await _fail(
         volumeId,
         downloadErrorMessage(error),
@@ -858,16 +784,16 @@ class DownloadQueue extends _$DownloadQueue {
       nonce: ArchiveTaskId.newNonce(),
     );
     // 投入の前に登録する（直後に届くイベントを「今の転送」と判断できるように）。
-    _tasks[volumeId] = task;
-    _liveTasks.add(volumeId);
+    _memory.tasks[volumeId] = task;
+    _memory.liveTasks.add(volumeId);
     // 先頭から取る転送。前の転送が走った記録は引き継がない。
-    _hadProgress.remove(volumeId);
-    _reservations.reserve(volumeId, manifest.archiveBytes);
-    _persistThrottle.restart(volumeId);
+    _memory.hadProgress.remove(volumeId);
+    _memory.reservations.reserve(volumeId, manifest.archiveBytes);
+    _memory.persistThrottle.restart(volumeId);
     // 世代にかかわる項目（filesVersion / pageCount / archive_etag）は**検証が
-    // 通ってから**台帳に書く（[_complete]）。取り直しの途中で落ちても、台帳は
-    // 端末にある旧世代を指したままにしておく（#11 のページ解決が実体の無い
-    // 世代を指さないように）。進捗表示に要る全体バイト数だけ先に入れる。
+    // 通ってから**台帳に書く（[ArchiveInstaller]）。取り直しの途中で落ちても、
+    // 台帳は端末にある旧世代を指したままにしておく（#11 のページ解決が実体の
+    // 無い世代を指さないように）。進捗表示に要る全体バイト数だけ先に入れる。
     await _save(
       download.copyWith(receivedBytes: 0, totalBytes: manifest.archiveBytes),
     );
@@ -891,13 +817,15 @@ class DownloadQueue extends _$DownloadQueue {
     // 投入を待っている間に中断 / 削除 / ログアウトされた。投入済みなら止める
     // （「中断中」と表示したまま数百 MB を落としきらせない）。
     if (_isStale(generation) ||
-        _tasks[volumeId] != task ||
+        _memory.tasks[volumeId] != task ||
         !(state.value?[volumeId]?.isActive ?? false)) {
       if (!accepted) return;
-      if (_tasks[volumeId] == task) {
+      if (_memory.tasks[volumeId] == task) {
         // まだ自分の転送だが台帳は中断済み。OS 側で一時停止できていれば
-        // （[pause] が _liveTasks から外した）再開データを残す。
-        if (_liveTasks.contains(volumeId)) await _cancelTask(task);
+        // （[pause] が _memory.liveTasks から外した）再開データを残す。
+        if (_memory.liveTasks.contains(volumeId)) {
+          await _cleanup.cancelTask(task);
+        }
         return;
       }
       // F1: 中断 / 削除 / ログアウトの取り消しは、OS がまだこのタスクを
@@ -906,20 +834,20 @@ class DownloadQueue extends _$DownloadQueue {
       // 受け付けられたと分かった今、もう一度取り消す（何度送っても害は無い）。
       // 放っておくと誰も追っていない転送が数百 MB を落とし、同時実行の枠を
       // 塞いで後ろの巻を待たせる。
-      _cancelling.add(task.toString());
+      _memory.cancelling.add(task.toString());
       try {
         await transport.cancel(task.toString());
       } on Object catch (error) {
         debugPrint('[downloads] cancel after enqueue failed: $error');
       }
       if (!_isStale(generation)) {
-        await _deleteStagingUnlessCurrent(task);
-        await _forgetQuietly(task);
+        await _cleanup.deleteStagingUnlessCurrent(task);
+        await _cleanup.forgetQuietly(task);
       }
       return;
     }
     if (!accepted) {
-      _clearTask(volumeId);
+      _memory.clearTask(volumeId);
       await _fail(volumeId, '転送を開始できませんでした。', generation: generation);
     }
   }
@@ -932,203 +860,6 @@ class DownloadQueue extends _$DownloadQueue {
     final next = now > _lastCreationMs ? now : _lastCreationMs + 1;
     _lastCreationMs = next;
     return DateTime.fromMillisecondsSinceEpoch(next);
-  }
-
-  // ---------------------------------------------------------------- イベント
-
-  void _onEvent(TransferEvent event) {
-    final ready = _ready;
-    final generation = _generation;
-    if (!ready.isCompleted &&
-        event is TransferStateChanged &&
-        event.state == TransferState.completed) {
-      // 照合の前に届いた完了。照合の一覧に載っていなくても書き上がった ZIP が
-      // あるので、照合に教えて孤児として掃除させない（F6）。
-      _earlyCompleted.add(event.taskId);
-    }
-    final link = _eventChain.then((_) async {
-      await ready.future;
-      if (_isStale(generation)) return;
-      await _handleEvent(event, generation);
-    });
-    _eventChain = link.catchError((Object _) {});
-    _track(link);
-  }
-
-  Future<void> _handleEvent(TransferEvent event, int generation) async {
-    final task = ArchiveTaskId.tryParse(event.taskId);
-    final tag = _sessionTag;
-    if (task == null || tag == null || task.sessionTag != tag) {
-      // 前のセッション（ログアウト前）の転送、または壊れた ID。取り込まない。
-      await _discardForeign(event, task);
-      return;
-    }
-    final isCurrent = _tasks[task.volumeId] == task;
-    switch (event) {
-      case TransferProgressed(:final received, :final total):
-        if (isCurrent) _onProgress(task.volumeId, received, total);
-      case TransferStateChanged(:final state, :final failure):
-        await _onStateChanged(
-          task,
-          state,
-          failure,
-          isCurrent: isCurrent,
-          generation: generation,
-        );
-    }
-  }
-
-  Future<void> _onStateChanged(
-    ArchiveTaskId task,
-    TransferState transferState,
-    TransferFailure? failure, {
-    required bool isCurrent,
-    required int generation,
-  }) async {
-    final volumeId = task.volumeId;
-    final download = state.value?[volumeId];
-    switch (transferState) {
-      case TransferState.enqueued || TransferState.waitingToRetry:
-        if (!isCurrent) return;
-        _liveTasks.add(volumeId);
-        _runningTasks.remove(volumeId);
-        // 「待機中」。Wi-Fi 待ちかどうかの表示は DownloadGate が出す。
-        if (download != null &&
-            download.isActive &&
-            download.status != VolumeDownloadStatus.queued) {
-          await _save(download.copyWith(status: VolumeDownloadStatus.queued));
-        }
-      case TransferState.running:
-        if (!isCurrent) return;
-        _liveTasks.add(volumeId);
-        _runningTasks.add(volumeId);
-        _hadProgress.add(volumeId);
-        if (download != null &&
-            download.isActive &&
-            download.status != VolumeDownloadStatus.downloading) {
-          await _save(
-            download.copyWith(status: VolumeDownloadStatus.downloading),
-          );
-        }
-      case TransferState.paused:
-        // F1: 台帳が「中断」ならユーザーが止めたもの（既に書いてある）。
-        // 台帳が待機中 / 取得中のままなら、9 分の時間切れや Wi-Fi 設定の
-        // 反映による一時的な停止で、ネイティブがすぐ再投入する。どちらも
-        // 台帳は変えない（「中断中」にすると、勝手に止まったように見える）。
-        if (!isCurrent) return;
-        // 時間切れの再投入が走り出すまでは走っていない（F11）。ただし
-        // 再開データはネイティブにあるので、中断は印に任せる（[_hadProgress]）。
-        _runningTasks.remove(volumeId);
-        _hadProgress.add(volumeId);
-        _pausedEventPending.remove(volumeId);
-        if (_pausing.contains(volumeId)) _pausedSeen.add(volumeId);
-        if (_resumeOnPaused.remove(volumeId)) {
-          // F3: 止め終わる前に「再開」が押されていた。再開データが揃ったので
-          // 続きを取る。
-          if (download != null && download.isActive) {
-            _track(_resumeOrSubmit(task, generation: generation));
-          }
-          return;
-        }
-        if (!(download?.isActive ?? false)) _liveTasks.remove(volumeId);
-      case TransferState.canceled:
-        final expected = _cancelling.remove(task.toString());
-        if (isCurrent && !expected && download != null && download.isActive) {
-          // 通知の Cancel ボタン（Dart を経由しない取り消し）。ユーザーが
-          // 止めたので中断として扱う。取り直しなら旧世代へ戻し、完了済みの
-          // ZIP と台帳は消さない（削除は画面の操作だけにする）。
-          _clearTask(volumeId);
-          await _savePaused(download);
-          await _deleteStaging(task);
-          await _forgetQuietly(task);
-          return;
-        }
-        // 自分で取り消したもの。まだ今の転送なら（isCurrent）触らない。
-        if (isCurrent && !expected) _clearTask(volumeId);
-        if (isCurrent && expected) return;
-        await _deleteStagingUnlessCurrent(task);
-        await _forgetQuietly(task);
-      case TransferState.failed || TransferState.notFound:
-        if (!isCurrent) {
-          await _deleteStagingUnlessCurrent(task);
-          await _forgetQuietly(task);
-          return;
-        }
-        _liveTasks.remove(volumeId);
-        _runningTasks.remove(volumeId);
-        // 失敗でパッケージは再開データを捨てている（積み直しは先頭から）。
-        _hadProgress.remove(volumeId);
-        if (download == null || !download.isActive) {
-          _clearTask(volumeId);
-          await _forgetQuietly(task);
-          return;
-        }
-        // 再試行の待ち時間でイベントの処理（次の巻の進捗など）を止めない。
-        _track(
-          _applyFailure(
-            task,
-            failure ?? const TransferFailure(kind: TransferFailureKind.other),
-            generation: generation,
-          ),
-        );
-      case TransferState.completed:
-        if (isCurrent) {
-          _liveTasks.remove(volumeId);
-          _runningTasks.remove(volumeId);
-          _hadProgress.remove(volumeId);
-        }
-        _scheduleInstall(task);
-    }
-  }
-
-  /// 他のセッションの転送（または壊れた ID）を片付ける。
-  Future<void> _discardForeign(TransferEvent event, ArchiveTaskId? task) async {
-    final terminal =
-        event is TransferStateChanged &&
-        (event.state == TransferState.completed ||
-            event.state == TransferState.failed ||
-            event.state == TransferState.canceled ||
-            event.state == TransferState.notFound);
-    if (!terminal) {
-      // まだ動いている。止める（止まったら canceled で戻ってくる）。
-      if (_cancelling.add(event.taskId)) {
-        try {
-          await _transport?.cancel(event.taskId);
-        } on Object catch (error) {
-          debugPrint('[downloads] cancel foreign failed: $error');
-        }
-      }
-      return;
-    }
-    _cancelling.remove(event.taskId);
-    if (task != null) await _deleteStagingUnlessCurrent(task);
-    // 記録には前のユーザーの Bearer が入っている。パッケージはこの更新の
-    // 書き込みを非同期に積んでから通知してくるので、消した後に書き戻される
-    // ことがある。書き戻されても消し直す方で捨てる（#15）。
-    await _forgetForeignQuietly(event.taskId);
-  }
-
-  void _onProgress(int volumeId, int received, int? total) {
-    final current = state.value?[volumeId];
-    if (current == null || !current.isActive) return;
-    final next = applyProgress(current, received, total);
-    final totalBytes = next.totalBytes;
-    _emit(next);
-    // 進捗が届く = 走っている（`running` を取りこぼしても一時停止できる）。
-    _liveTasks.add(volumeId);
-    _runningTasks.add(volumeId);
-    _hadProgress.add(volumeId);
-    if (totalBytes > 0) {
-      _reservations.reserveRemaining(
-        volumeId,
-        total: totalBytes,
-        received: received,
-      );
-    }
-
-    if (!_persistThrottle.shouldPersist(volumeId, received)) return;
-    final store = _store;
-    if (store != null) _track(store.save(next));
   }
 
   // ---------------------------------------------------------------- 失敗
@@ -1147,8 +878,8 @@ class DownloadQueue extends _$DownloadQueue {
     switch (action) {
       case FailureAction.giveUp:
         // 待っても直らない（削除済み / セーフモードで配信されない / 容量不足）。
-        _clearTask(volumeId);
-        await _forgetQuietly(task);
+        _memory.clearTask(volumeId);
+        await _cleanup.forgetQuietly(task);
         await _fail(
           volumeId,
           transferFailureMessage(failure),
@@ -1164,8 +895,8 @@ class DownloadQueue extends _$DownloadQueue {
         if (!await _countAttempt(task, failure, generation: generation)) {
           return;
         }
-        _clearTask(volumeId);
-        await _forgetQuietly(task);
+        _memory.clearTask(volumeId);
+        await _cleanup.forgetQuietly(task);
         if (_isStale(generation)) return;
         _scheduleSubmit(volumeId);
 
@@ -1179,13 +910,13 @@ class DownloadQueue extends _$DownloadQueue {
         if (!await _countAttempt(task, failure, generation: generation)) {
           return;
         }
-        _clearTask(volumeId);
-        await _deleteStaging(task);
-        await _forgetQuietly(task);
+        _memory.clearTask(volumeId);
+        await _cleanup.deleteStaging(task);
+        await _cleanup.forgetQuietly(task);
         if (_isStale(generation)) return;
         // Android が残した書きかけの一時ファイルも掃除する（[_resubmit] と同じく
         // 投入より先に鎖に載せる）。
-        _scheduleTempSweep();
+        _cleanup.scheduleTempSweep();
         _scheduleSubmit(volumeId);
 
       case FailureAction.resubmitUncounted:
@@ -1200,7 +931,7 @@ class DownloadQueue extends _$DownloadQueue {
         }
         // 上限で失敗にする。待つ間隔は [retryBackoff]。
         await ref.read(downloadRetryDelayProvider)(
-          retryBackoff(_attempts.current(volumeId)),
+          retryBackoff(_memory.attempts.current(volumeId)),
         );
         if (_isStale(generation) || !_isCurrent(task)) return;
         await _resubmit(task, generation: generation);
@@ -1217,9 +948,9 @@ class DownloadQueue extends _$DownloadQueue {
     required int generation,
   }) async {
     final volumeId = task.volumeId;
-    if (_attempts.count(volumeId)) return true;
-    if (_tasks[volumeId] == task) _clearTask(volumeId);
-    await _forgetQuietly(task);
+    if (_memory.attempts.count(volumeId)) return true;
+    if (_memory.tasks[volumeId] == task) _memory.clearTask(volumeId);
+    await _cleanup.forgetQuietly(task);
     await _fail(
       volumeId,
       transferFailureMessage(failure),
@@ -1239,12 +970,12 @@ class DownloadQueue extends _$DownloadQueue {
   /// 残すので、ここには来ない。
   Future<void> _resubmit(ArchiveTaskId task, {required int generation}) async {
     if (_isStale(generation) || !_isCurrent(task)) return;
-    _clearTask(task.volumeId);
-    await _forgetQuietly(task);
+    _memory.clearTask(task.volumeId);
+    await _cleanup.forgetQuietly(task);
     if (_isStale(generation)) return;
     // 積み直しは新しい一時ファイルに書く。他の巻が走り続けていても、置き去りの
     // 書きかけを掃除する（投入より先に鎖に載せ、空き容量の判定に間に合わせる）。
-    _scheduleTempSweep();
+    _cleanup.scheduleTempSweep();
     _scheduleSubmit(task.volumeId);
   }
 
@@ -1256,8 +987,8 @@ class DownloadQueue extends _$DownloadQueue {
     if (_isStale(generation) || !_isCurrent(task)) return;
     if (await _tryResume(task)) return;
     if (_isStale(generation) || !_isCurrent(task)) return;
-    _clearTask(task.volumeId);
-    await _forgetQuietly(task);
+    _memory.clearTask(task.volumeId);
+    await _cleanup.forgetQuietly(task);
     if (_isStale(generation)) return;
     _scheduleSubmit(task.volumeId);
   }
@@ -1269,8 +1000,8 @@ class DownloadQueue extends _$DownloadQueue {
   /// （パッケージの `resume` は再開データが無ければ `false`）。断られて
   /// 積み直すと書きかけを捨てて先頭からになる。
   bool _deferResumeUntilPaused(int volumeId) {
-    if (!_pausedEventPending.contains(volumeId)) return false;
-    _resumeOnPaused.add(volumeId);
+    if (!_memory.pausedEventPending.contains(volumeId)) return false;
+    _memory.resumeOnPaused.add(volumeId);
     return true;
   }
 
@@ -1281,517 +1012,13 @@ class DownloadQueue extends _$DownloadQueue {
     } on Object catch (error) {
       debugPrint('[downloads] resume failed: $error');
     }
-    if (resumed && _tasks[task.volumeId] == task) {
-      _liveTasks.add(task.volumeId);
+    if (resumed && _memory.tasks[task.volumeId] == task) {
+      _memory.liveTasks.add(task.volumeId);
     }
     return resumed;
   }
 
-  // ---------------------------------------------------------------- 確定
-
-  void _scheduleInstall(ArchiveTaskId task) {
-    final volumeId = task.volumeId;
-    final isCurrent = _tasks[volumeId] == task;
-    if (isCurrent) {
-      if (_installing.contains(volumeId)) return;
-      _awaitingInstall.remove(volumeId);
-      _installing.add(volumeId);
-    }
-    final generation = _generation;
-    final link = _installChain.then((_) async {
-      try {
-        await _install(task, generation);
-      } finally {
-        if (generation == _generation && _tasks[volumeId] == task) {
-          _installing.remove(volumeId);
-        }
-      }
-    });
-    _installChain = link.catchError((Object _) {});
-    _track(link);
-  }
-
-  /// 転送が終わった巻を検証して確定する。
-  ///
-  /// 冪等にする（F9）。完了は `start` のたびに再送されうるし、rename の後・
-  /// forget の前に落ちると、次の起動でも同じ完了が届く。
-  Future<void> _install(ArchiveTaskId task, int generation) async {
-    final store = _store;
-    if (store == null || _isStale(generation)) return;
-    final volumeId = task.volumeId;
-    final staging = store.stagingFile(
-      volumeId: volumeId,
-      filesVersion: task.filesVersion,
-    );
-    final archive = store.archiveFile(
-      volumeId: volumeId,
-      filesVersion: task.filesVersion,
-    );
-
-    var download = state.value?[volumeId];
-    if (download != null &&
-        download.status == VolumeDownloadStatus.paused &&
-        _tasks[volumeId] == task) {
-      // 中断した「今の転送」の完了 = 止める前に書き上がっていた（中断と
-      // ネイティブの完了の競合。[pause] は止められなかった転送を取り消さずに
-      // 残す）。捨てると数百 MB を先頭から落とし直すことになるので確定する。
-      // 削除 / 別世代の積み直し / ログアウトなら今の転送から外れているので、
-      // 下で取り込まずに捨てる。
-      download = download.copyWith(status: VolumeDownloadStatus.queued);
-      await _save(download);
-      if (_isStale(generation)) return;
-    } else if (download != null &&
-        download.isCompleted &&
-        download.filesVersion < task.filesVersion &&
-        _tasks[volumeId] == task) {
-      // 中断した「更新あり」の取り直しが、止める前に書き上がっていた。取り直しの
-      // 中断は台帳を旧世代（完了）へ戻している（[_savePaused]）ので、上の
-      // 「中断」の分岐には来ない。捨てると次の「更新あり」で数百 MB を先頭から
-      // 落とし直すので確定する。検証に落ちたら旧世代へ戻せるよう覚えておく。
-      _installed[volumeId] = download;
-      download = download.copyWith(status: VolumeDownloadStatus.queued);
-      await _save(download);
-      if (_isStale(generation)) return;
-    }
-    // 既に確定済み（完了の再送）。
-    if (download != null &&
-        download.isCompleted &&
-        download.filesVersion == task.filesVersion &&
-        archive.existsSync()) {
-      if (_tasks[volumeId] == task) _clearTask(volumeId);
-      await _deleteStaging(task);
-      await _forgetQuietly(task);
-      return;
-    }
-    // 削除 / 中断 / 別世代の積み直しと競合した完了。取り込まない
-    // （消した巻を「ダウンロード済み」として復活させない）。
-    if (download == null || !download.isActive || _tasks[volumeId] != task) {
-      if (_tasks[volumeId] == task) _clearTask(volumeId);
-      await _deleteStagingUnlessCurrent(task);
-      await _forgetQuietly(task);
-      return;
-    }
-
-    var manifest = await store.readManifest(
-      volumeId: volumeId,
-      filesVersion: task.filesVersion,
-    );
-    if (manifest == null) {
-      try {
-        manifest = await ref.read(volumesApiProvider).fetchManifest(volumeId);
-      } on Object catch (error) {
-        if (_isStale(generation) || !_isCurrent(task)) return;
-        // オフラインで確定できない。書き上がったデータは残し、回線が戻ったら
-        // やり直す（数百 MB を落とし直させない）。
-        debugPrint('[downloads] manifest for install failed: $error');
-        _awaitingInstall.add(volumeId);
-        final current = state.value?[volumeId];
-        if (current != null && current.status != VolumeDownloadStatus.queued) {
-          await _save(current.copyWith(status: VolumeDownloadStatus.queued));
-        }
-        return;
-      }
-      if (_isStale(generation) || !_isCurrent(task)) return;
-      if (manifest.filesVersion != task.filesVersion) {
-        // 転送の間にサーバー側の ZIP が差し替わった。検証できないので取り直す。
-        _clearTask(volumeId);
-        await _deleteStaging(task);
-        await _forgetQuietly(task);
-        if (!_isStale(generation)) _scheduleSubmit(volumeId);
-        return;
-      }
-    }
-    if (_isStale(generation) || !_isCurrent(task)) return;
-
-    // rename の後・確定の前に落ちた（書きかけは既に本番のファイル名になって
-    // いる）。検証済みのものしか rename しないので、そのまま確定し直す。
-    if (!staging.existsSync() &&
-        archive.existsSync() &&
-        (manifest.archiveBytes == 0 ||
-            archive.lengthSync() == manifest.archiveBytes)) {
-      await _finish(volumeId, manifest, generation: generation);
-      if (_tasks[volumeId] == task) _clearTask(volumeId);
-      _attempts.reset(volumeId);
-      await _forgetQuietly(task);
-      return;
-    }
-
-    final failure = await _verify(manifest, staging);
-    if (_isStale(generation) || !_isCurrent(task)) return;
-    if (failure != null) {
-      // 転送中に ZIP が差し替わった（files_version が変わった）なら、壊れた
-      // のではないので自動で取り直す。同じなら本当に壊れているので止める
-      // （自動で取り直し続けると自宅サーバーを叩き続ける）。
-      VolumeManifest? latest;
-      try {
-        latest = await ref.read(volumesApiProvider).fetchManifest(volumeId);
-      } on Object {
-        latest = null;
-      }
-      if (_isStale(generation) || !_isCurrent(task)) return;
-      _clearTask(volumeId);
-      await _deleteQuietly(staging);
-      await _forgetQuietly(task);
-      if (latest != null && latest.filesVersion != task.filesVersion) {
-        if (!_isStale(generation)) _scheduleSubmit(volumeId);
-        return;
-      }
-      _persistThrottle.restart(volumeId);
-      await _fail(
-        volumeId,
-        failure,
-        generation: generation,
-        resetProgress: true,
-      );
-      return;
-    }
-
-    try {
-      if (archive.existsSync()) await archive.delete();
-      // 検証が通ってから初めて本番のファイル名にする。途中のデータが
-      // 「ダウンロード済み」と認識されることは無い。
-      await staging.rename(archive.path);
-    } on FileSystemException catch (error) {
-      // 削除と競合して書きかけが先に消えた（F2）。ユーザーの操作を
-      // 「保存できませんでした」の失敗で上書きしない。
-      final current = _isCurrent(task);
-      if (_tasks[volumeId] == task) _clearTask(volumeId);
-      await _deleteQuietly(staging);
-      await _forgetQuietly(task);
-      if (!current) return;
-      await _fail(
-        volumeId,
-        fileSystemFailureMessage(error),
-        generation: generation,
-      );
-      return;
-    }
-
-    await _finish(volumeId, manifest, generation: generation);
-    if (_tasks[volumeId] == task) _clearTask(volumeId);
-    _attempts.reset(volumeId);
-    await _forgetQuietly(task);
-    _scheduleTempSweep();
-  }
-
-  /// ZIP が本番のファイル名で手元にある巻を確定する。
-  Future<void> _finish(
-    int volumeId,
-    VolumeManifest manifest, {
-    required int generation,
-  }) async {
-    final store = _store;
-    if (store == null || _isStale(generation)) return;
-    // マニフェストは早期完了の経路でも必ず書く。rename 済み・マニフェスト未保存
-    // で落ちた巻をそのまま「ダウンロード済み」に確定させると、{v}.json が無い
-    // まま固定されて #11 のページ解決が恒久的にできなくなる。
-    try {
-      await store.writeManifest(manifest);
-    } on FileSystemException catch (error) {
-      if (!(state.value?.containsKey(volumeId) ?? false)) {
-        // 削除と競合した（ディレクトリが先に消えた）。失敗として書き戻さない。
-        if (!_isStale(generation)) await store.deleteFiles(volumeId);
-        return;
-      }
-      await _fail(
-        volumeId,
-        fileSystemFailureMessage(error),
-        generation: generation,
-      );
-      return;
-    }
-    await store.deleteOtherVersions(
-      volumeId: volumeId,
-      keepFilesVersion: manifest.filesVersion,
-    );
-
-    final download = state.value?[volumeId];
-    if (download == null) {
-      // 確定の途中で削除された。削除の後片付け（ディレクトリごと消す）が
-      // rename / マニフェストの書き込みと競合して残ったものを消す
-      // （台帳に無い実体を端末に残さない）。
-      if (!_isStale(generation)) await store.deleteFiles(volumeId);
-      return;
-    }
-    final archive = store.archiveFile(
-      volumeId: volumeId,
-      filesVersion: manifest.filesVersion,
-    );
-    final total = manifest.archiveBytes > 0
-        ? manifest.archiveBytes
-        : (archive.existsSync() ? archive.lengthSync() : 0);
-    await _complete(
-      download.copyWith(receivedBytes: total, totalBytes: total),
-      manifest,
-      generation: generation,
-    );
-  }
-
-  /// 落としたものが本物か確かめる。通らなければ理由を返す。
-  Future<String?> _verify(VolumeManifest manifest, File staging) async {
-    final actual = staging.existsSync() ? staging.lengthSync() : 0;
-    if (manifest.archiveBytes > 0 && actual != manifest.archiveBytes) {
-      return 'ダウンロードしたデータのサイズが一致しません'
-          '（${formatBytes(actual)} / ${formatBytes(manifest.archiveBytes)}）。';
-    }
-
-    final int pages;
-    try {
-      pages = await ref.read(archiveVerifierProvider)(staging);
-    } on ArchiveVerificationException catch (error) {
-      return error.message;
-    } on Object catch (error) {
-      return 'ダウンロードしたファイルを検証できませんでした（$error）。';
-    }
-
-    if (manifest.pageCount > 0 && pages != manifest.pageCount) {
-      return 'ページ数が一致しません（$pages / ${manifest.pageCount} ページ）。';
-    }
-    return null;
-  }
-
-  // ---------------------------------------------------------------- 照合
-
-  /// 起動時に、OS 側の転送と台帳を突き合わせる。
-  ///
-  /// 巻ごとの扱いは [reconcileActionFor] の表のとおり。他のタグの転送は
-  /// 止めて捨てる。
-  ///
-  /// プラグインの自動再投入は使わない（古いトークンのまま、この照合と並んで
-  /// 積み直すので二重になる。F5）。
-  Future<void> _reconcile(
-    List<TransferSnapshot> snapshots,
-    int generation,
-  ) async {
-    final store = _store;
-    if (store == null) return;
-
-    // 照合の前に届いた完了を一覧に反映する（F6）。記録が消えていても、
-    // 完了が届いたなら書き上がった ZIP がある（下の sweep で孤児として消さない）。
-    final merged = mergeEarlyCompleted(snapshots, _earlyCompleted);
-    _earlyCompleted.clear();
-    final groups = groupForReconcile(merged, _sessionTag);
-
-    final installs = <ArchiveTaskId>[];
-    final resumes = <ArchiveTaskId>[];
-    final failures = <ArchiveTaskId>[];
-    final discards = <(TransferSnapshot, ArchiveTaskId?)>[];
-    for (final MapEntry(key: volumeId, value: candidates)
-        in groups.byVolume.entries) {
-      final (:chosen, :duplicates) = pickReconcileCandidate(
-        candidates,
-        _tasks[volumeId],
-      );
-      for (final (task, snapshot) in duplicates) {
-        discards.add((snapshot, task));
-      }
-      final (task, snapshot) = chosen;
-      // 台帳は巻ごとに読み直す（照合の await の間に中断 / 削除されうる）。
-      final download = state.value?[volumeId];
-
-      switch (reconcileActionFor(task, snapshot.state, download)) {
-        case ReconcileAction.discard:
-          discards.add((snapshot, task));
-        case ReconcileAction.keepPaused:
-          _tasks[volumeId] = task;
-        case ReconcileAction.watch:
-          _tasks[volumeId] = task;
-          _liveTasks.add(volumeId);
-          _reservations.reserveRemaining(
-            volumeId,
-            total: download!.totalBytes,
-            received: download.receivedBytes,
-          );
-          if (snapshot.state == TransferState.running) {
-            _runningTasks.add(volumeId);
-            _hadProgress.add(volumeId);
-            await _save(
-              download.copyWith(status: VolumeDownloadStatus.downloading),
-            );
-          }
-        case ReconcileAction.install:
-          _tasks[volumeId] = task;
-          installs.add(task);
-        case ReconcileAction.resume:
-          _tasks[volumeId] = task;
-          resumes.add(task);
-        case ReconcileAction.retryFailure:
-          _tasks[volumeId] = task;
-          _attempts.reset(volumeId);
-          failures.add(task);
-        case ReconcileAction.canceledByUser:
-          // アプリが死んでいる間に通知の Cancel ボタンで止められた。
-          discards.add((snapshot, task));
-          await _savePaused(download!);
-      }
-      if (_isStale(generation)) return;
-    }
-
-    // 自分の転送を登録してから捨てる（同じ巻・同じ世代の書き込み先を、
-    // 別セッションの転送の後始末で消さないため）。
-    for (final (snapshot, task) in discards) {
-      await _discardSnapshot(snapshot, task);
-    }
-    for (final (snapshot, task) in groups.foreign) {
-      await _discardSnapshot(snapshot, task, foreign: true);
-    }
-    if (_isStale(generation)) return;
-
-    await store.sweep(
-      ledger: state.value ?? const {},
-      liveStagingPaths: {
-        for (final MapEntry(key: volumeId, value: task) in _tasks.entries)
-          store
-              .stagingFile(volumeId: volumeId, filesVersion: task.filesVersion)
-              .path,
-      },
-    );
-    if (_isStale(generation)) return;
-    // 失敗で置き去りになったパッケージの一時ファイル（F9）。積み直しを
-    // 始める前に消す（走っている転送があれば古いものだけ）。投入は照合が
-    // 終わる（_ready）まで待つので、ここでは投入と並ばない。
-    await _sweepTempFiles(staleOnly: _liveTasks.isNotEmpty);
-    if (_isStale(generation)) return;
-
-    for (final task in installs) {
-      _scheduleInstall(task);
-    }
-    for (final task in resumes) {
-      _track(_resumeOrSubmit(task, generation: generation));
-    }
-    for (final task in failures) {
-      _track(
-        _applyFailure(
-          task,
-          const TransferFailure(kind: TransferFailureKind.other),
-          generation: generation,
-        ),
-      );
-    }
-    for (final download in state.value?.values ?? const <VolumeDownload>[]) {
-      if (download.isActive && !_tasks.containsKey(download.volumeId)) {
-        _scheduleSubmit(download.volumeId);
-      }
-    }
-  }
-
-  Future<void> _discardSnapshot(
-    TransferSnapshot snapshot,
-    ArchiveTaskId? task, {
-    bool foreign = false,
-  }) async {
-    if (isAliveForDiscard(snapshot.state)) {
-      _cancelling.add(snapshot.taskId);
-      try {
-        await _transport?.cancel(snapshot.taskId);
-      } on Object catch (error) {
-        debugPrint('[downloads] cancel failed: $error');
-      }
-    }
-    if (task != null) await _deleteStagingUnlessCurrent(task);
-    if (foreign) {
-      // ログアウトの直後に落ちて、取り消しの書き戻しが残った記録など（#15）。
-      await _forgetForeignQuietly(snapshot.taskId);
-    } else {
-      await _forgetQuietly(snapshot.taskId);
-    }
-  }
-
-  // ---------------------------------------------------------------- 後始末
-
-  /// 転送を取り消し、書きかけと記録も捨てる。
-  Future<void> _cancelTask(ArchiveTaskId task) async {
-    if (_tasks[task.volumeId] == task) _clearTask(task.volumeId);
-    _cancelling.add(task.toString());
-    try {
-      await _transport?.cancel(task.toString());
-    } on Object catch (error) {
-      debugPrint('[downloads] cancel failed: $error');
-    }
-    await _deleteStagingUnlessCurrent(task);
-    await _forgetQuietly(task);
-  }
-
-  void _clearTask(int volumeId) {
-    _tasks.remove(volumeId);
-    _liveTasks.remove(volumeId);
-    _runningTasks.remove(volumeId);
-    _hadProgress.remove(volumeId);
-    _awaitingInstall.remove(volumeId);
-    _installing.remove(volumeId);
-    _reservations.release(volumeId);
-    _resumeRequested.remove(volumeId);
-    _pausedSeen.remove(volumeId);
-    _resumeOnPaused.remove(volumeId);
-    _pausedEventPending.remove(volumeId);
-  }
-
-  Future<void> _forgetQuietly(Object task) async {
-    try {
-      await _transport?.forget(task.toString());
-    } on Object catch (error) {
-      debugPrint('[downloads] forget failed: $error');
-    }
-  }
-
-  /// 前のセッションの転送の記録を、書き戻されても消し直す方で捨てる（#15）。
-  Future<void> _forgetForeignQuietly(String taskId) async {
-    try {
-      await _transport?.forgetForeign(taskId);
-    } on Object catch (error) {
-      debugPrint('[downloads] forget foreign failed: $error');
-    }
-  }
-
-  /// 置き去りの一時ファイルを消す（F9）。
-  ///
-  /// 投入と同じ鎖に載せる。転送側は「ネイティブの一覧を見る → 消す」の間に
-  /// await を挟むので、並んで積まれた転送の書きかけ（同じ名前）を一覧に無い
-  /// ものとして消しうる（完了時の移動が失敗する）。鎖の上では投入が走らない
-  /// ので、載った時点の [_liveTasks] で決めてよい: 何も生きていなければ全部、
-  /// 生きていればしばらく書き込まれていないものだけを消す。まとめて積んだ
-  /// 巻が走り続ける間も、失敗した巻の書きかけ（数百 MB）を溜めないため。
-  /// 最後の判断は転送側（ネイティブの一覧）でもう一度する。
-  void _scheduleTempSweep() {
-    if (!ref.mounted || _tempSweepQueued) return;
-    _tempSweepQueued = true;
-    final generation = _generation;
-    final ready = _ready;
-    final link = _submitChain.then((_) async {
-      _tempSweepQueued = false;
-      await ready.future;
-      if (_isStale(generation)) return;
-      await _sweepTempFiles(staleOnly: _liveTasks.isNotEmpty);
-    });
-    _submitChain = link.catchError((Object _) {});
-    _track(link);
-  }
-
-  Future<void> _sweepTempFiles({required bool staleOnly}) async {
-    try {
-      await _transport?.sweepOrphanTempFiles(staleOnly: staleOnly);
-    } on Object catch (error) {
-      debugPrint('[downloads] temp sweep failed: $error');
-    }
-  }
-
-  Future<void> _deleteStaging(ArchiveTaskId task) async {
-    final store = _store;
-    if (store == null) return;
-    await _deleteQuietly(
-      store.stagingFile(
-        volumeId: task.volumeId,
-        filesVersion: task.filesVersion,
-      ),
-    );
-  }
-
-  /// 同じ巻・同じ世代の「今の転送」が同じファイルに書いているなら消さない。
-  Future<void> _deleteStagingUnlessCurrent(ArchiveTaskId task) async {
-    final current = _tasks[task.volumeId];
-    if (current != null && current.filesVersion == task.filesVersion) return;
-    await _deleteStaging(task);
-  }
+  // ---------------------------------------------------------------- 台帳
 
   Future<void> _fail(
     int volumeId,
@@ -1819,45 +1046,7 @@ class DownloadQueue extends _$DownloadQueue {
         failureReason: reason,
       ),
     );
-    _scheduleTempSweep();
-  }
-
-  Future<void> _complete(
-    VolumeDownload download,
-    VolumeManifest manifest, {
-    required int generation,
-  }) async {
-    if (_isStale(generation)) return;
-    // 取り消し（[remove]）と競合した確定を書き戻さない。実体を消した後に
-    // completed の行だけ復活すると、読めない「ダウンロード済み」が UI に出る。
-    if (!(state.value?.containsKey(download.volumeId) ?? false)) return;
-    _persistThrottle.forget(download.volumeId);
-    _installed.remove(download.volumeId);
-    await _save(
-      download.copyWith(
-        status: VolumeDownloadStatus.completed,
-        filesVersion: manifest.filesVersion,
-        pageCount: manifest.pageCount,
-        archiveEtag: manifest.archiveEtag,
-        clearFailureReason: true,
-        // この世代の確定時刻。自動削除は、これより前の読了の記録（前回の
-        // ダウンロードや前のセッションのもの）で落とし直した巻を消さない。
-        completedAt: _store?.now() ?? DateTime.now(),
-      ),
-    );
-    _warmOfflineDetail(download.bookId);
-  }
-
-  /// 圏外でも詳細が開けるように、このタイトルの詳細を控える（#11）。
-  ///
-  /// 詳細画面（autoDispose）に任せると「ダウンロードを始めてすぐ一覧へ戻る」
-  /// だけで控えが作られず、圏外で一覧には出るのに詳細が開けないタイトルになる。
-  /// キューの完了は画面に依存しないので、ここから控える。表示を待たせないし、
-  /// 失敗しても取得自体は成功として扱う（次にオンラインで詳細を開けば控えられる）。
-  void _warmOfflineDetail(int bookId) {
-    if (!ref.mounted) return;
-    final warm = ref.read(offlineDetailWarmerProvider);
-    unawaited(warm(bookId).catchError((Object _) {}));
+    _cleanup.scheduleTempSweep();
   }
 
   /// 取り直しの起点になる「手元にある完了済みの世代」を覚える。
@@ -1870,10 +1059,10 @@ class DownloadQueue extends _$DownloadQueue {
       filesVersion: download.filesVersion,
     );
     if (!download.isCompleted || archive == null || !archive.existsSync()) {
-      _installed.remove(download.volumeId);
+      _memory.installed.remove(download.volumeId);
       return;
     }
-    _installed[download.volumeId] = download;
+    _memory.installed[download.volumeId] = download;
   }
 
   /// 中断として台帳を書く。
@@ -1893,15 +1082,15 @@ class DownloadQueue extends _$DownloadQueue {
 
   /// 取り直しの戻り先（手元にある旧世代の完了行）を取り出す。
   ///
-  /// 普段は取り直しを始めたときに覚えた [_installed] を使う。アプリの再起動で
-  /// それを忘れた後も、台帳の行は世代の項目（filesVersion / pageCount /
+  /// 普段は取り直しを始めたときに覚えた [DownloadQueueMemory.installed] を
+  /// 使う。アプリの再起動でそれを忘れた後も、台帳の行は世代の項目（filesVersion / pageCount /
   /// archive_etag）を検証が通ってからしか書かないので旧世代を指したまま。
   /// その ZIP が実在すれば、そこから完了行を作り直す。作り直さないと、
   /// 再起動後の「更新を中止」や失敗で「中断中 / 失敗（旧世代が読める）」という
   /// 行になり、完了に戻る道が「再開」しか無くなる（「更新あり」も自動削除も
   /// 完了行しか見ない）。
   VolumeDownload? _takeInstalled(VolumeDownload current) {
-    final remembered = _installed.remove(current.volumeId);
+    final remembered = _memory.installed.remove(current.volumeId);
     if (remembered != null) return remembered;
     if (current.isCompleted || !current.hasInstalledArchive) return null;
     final store = _store;
@@ -1963,34 +1152,8 @@ class DownloadQueue extends _$DownloadQueue {
       ref.read(downloadGateProvider) == DownloadGate.waitingForWifi;
 
   bool _isCurrent(ArchiveTaskId task) =>
-      _tasks[task.volumeId] == task &&
+      _memory.tasks[task.volumeId] == task &&
       (state.value?[task.volumeId]?.isActive ?? false);
-
-  void _resetMemory() {
-    _installed.clear();
-    _persistThrottle.clear();
-    _tasks.clear();
-    _liveTasks.clear();
-    _runningTasks.clear();
-    _hadProgress.clear();
-    _pausing.clear();
-    _resumeRequested.clear();
-    _pausedSeen.clear();
-    _resumeOnPaused.clear();
-    _pausedEventPending.clear();
-    _earlyCompleted.clear();
-    _submitAgain.clear();
-    _awaitingInstall.clear();
-    _installing.clear();
-    _submitting.clear();
-    _cancelling.clear();
-    _attempts.clear();
-    _reservations.clear();
-    _submitChain = Future.value();
-    _tempSweepQueued = false;
-    _eventChain = Future.value();
-    _installChain = Future.value();
-  }
 
   /// 投げっぱなしの処理を追跡する（例外はログに出して握る。UI に漏らさない）。
   void _track(Future<void> work) {
@@ -2022,6 +1185,10 @@ class DownloadQueue extends _$DownloadQueue {
 
   bool _isStale(int generation) => generation != _generation || !ref.mounted;
 
+  /// [_QueueHost] から `ref` / `state` を読むための中継（protected のため）。
+  Ref get _ref => ref;
+  Map<int, VolumeDownload>? get _ledger => state.value;
+
   Future<bool> _hasNotEnoughSpace(int requiredBytes) async {
     if (requiredBytes <= 0) return false;
     final free = await ref.read(freeSpaceProbeProvider)();
@@ -2029,12 +1196,87 @@ class DownloadQueue extends _$DownloadQueue {
     if (free == null) return false;
     return free < requiredBytes + freeSpaceMarginBytes;
   }
+}
 
-  Future<void> _deleteQuietly(File file) async {
-    try {
-      if (file.existsSync()) await file.delete();
-    } on FileSystemException {
-      // 消せなくても次の起動の掃除（sweep）が拾う。
-    }
-  }
+/// 部品から [DownloadQueue] へ戻る窓口（#32）。
+///
+/// `DownloadQueue` 自身に [DownloadQueueHost] を実装させると、台帳の書き込みなど
+/// が Notifier の公開メソッドになってしまうため、内部クラスで中継する。
+class _QueueHost implements DownloadQueueHost {
+  _QueueHost(this._queue);
+
+  final DownloadQueue _queue;
+
+  @override
+  Ref get ref => _queue._ref;
+
+  @override
+  bool get mounted => _queue._ref.mounted;
+
+  @override
+  int get generation => _queue._generation;
+
+  @override
+  bool isStale(int generation) => _queue._isStale(generation);
+
+  @override
+  Completer<void> get ready => _queue._ready;
+
+  @override
+  DownloadStore? get store => _queue._store;
+
+  @override
+  ArchiveTransport? get transport => _queue._transport;
+
+  @override
+  String? get sessionTag => _queue._sessionTag;
+
+  @override
+  Map<int, VolumeDownload>? get ledger => _queue._ledger;
+
+  @override
+  bool isCurrent(ArchiveTaskId task) => _queue._isCurrent(task);
+
+  @override
+  void track(Future<void> work) => _queue._track(work);
+
+  @override
+  void emit(VolumeDownload? download) => _queue._emit(download);
+
+  @override
+  Future<void> save(VolumeDownload download) => _queue._save(download);
+
+  @override
+  Future<void> savePaused(VolumeDownload current) =>
+      _queue._savePaused(current);
+
+  @override
+  Future<void> fail(
+    int volumeId,
+    String reason, {
+    required int generation,
+    bool resetProgress = false,
+  }) => _queue._fail(
+    volumeId,
+    reason,
+    generation: generation,
+    resetProgress: resetProgress,
+  );
+
+  @override
+  void scheduleSubmit(int volumeId) => _queue._scheduleSubmit(volumeId);
+
+  @override
+  void scheduleInstall(ArchiveTaskId task) => _queue._installer.schedule(task);
+
+  @override
+  Future<void> resumeOrSubmit(ArchiveTaskId task, {required int generation}) =>
+      _queue._resumeOrSubmit(task, generation: generation);
+
+  @override
+  Future<void> applyFailure(
+    ArchiveTaskId task,
+    TransferFailure failure, {
+    required int generation,
+  }) => _queue._applyFailure(task, failure, generation: generation);
 }

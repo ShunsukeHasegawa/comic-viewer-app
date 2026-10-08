@@ -66,6 +66,16 @@ String _$downloadRetryDelayHash() =>
 /// ため、Dart では止めない。Android の 9 分の時間切れは holding queue を
 /// 迂回して同時実行数を崩すので foreground 実行で避ける（背面で始まった巻には
 /// 効かない残りの穴がある。`foregroundModeFor` 参照）。
+///
+/// このクラスは調停役で、公開の操作（積む / 中断 / 再開 / 削除 / 破棄）・投入・
+/// 再試行・台帳の書き込み・世代の管理を持つ。次の処理は部品に分けてある（#32）:
+/// - 起動時の照合の実行: [StartupReconciler]（判断の表は reconcile_planner.dart）
+/// - 転送イベントの反映: [TransferEventReducer]
+/// - 確定（検証・rename・台帳の完了）: [ArchiveInstaller]
+/// - 取り消し・書きかけ / 記録 / 一時ファイルの後始末: [TransferCleanup]
+///
+/// 部品は巻ごとの印と鎖（[DownloadQueueMemory]）をこのクラスと共有し、台帳や
+/// 投入はここ（[DownloadQueueHost]）に頼む。
 
 @ProviderFor(DownloadQueue)
 final downloadQueueProvider = DownloadQueueProvider._();
@@ -85,6 +95,16 @@ final downloadQueueProvider = DownloadQueueProvider._();
 /// ため、Dart では止めない。Android の 9 分の時間切れは holding queue を
 /// 迂回して同時実行数を崩すので foreground 実行で避ける（背面で始まった巻には
 /// 効かない残りの穴がある。`foregroundModeFor` 参照）。
+///
+/// このクラスは調停役で、公開の操作（積む / 中断 / 再開 / 削除 / 破棄）・投入・
+/// 再試行・台帳の書き込み・世代の管理を持つ。次の処理は部品に分けてある（#32）:
+/// - 起動時の照合の実行: [StartupReconciler]（判断の表は reconcile_planner.dart）
+/// - 転送イベントの反映: [TransferEventReducer]
+/// - 確定（検証・rename・台帳の完了）: [ArchiveInstaller]
+/// - 取り消し・書きかけ / 記録 / 一時ファイルの後始末: [TransferCleanup]
+///
+/// 部品は巻ごとの印と鎖（[DownloadQueueMemory]）をこのクラスと共有し、台帳や
+/// 投入はここ（[DownloadQueueHost]）に頼む。
 final class DownloadQueueProvider
     extends $AsyncNotifierProvider<DownloadQueue, Map<int, VolumeDownload>> {
   /// 巻単位のダウンロードキュー。
@@ -102,6 +122,16 @@ final class DownloadQueueProvider
   /// ため、Dart では止めない。Android の 9 分の時間切れは holding queue を
   /// 迂回して同時実行数を崩すので foreground 実行で避ける（背面で始まった巻には
   /// 効かない残りの穴がある。`foregroundModeFor` 参照）。
+  ///
+  /// このクラスは調停役で、公開の操作（積む / 中断 / 再開 / 削除 / 破棄）・投入・
+  /// 再試行・台帳の書き込み・世代の管理を持つ。次の処理は部品に分けてある（#32）:
+  /// - 起動時の照合の実行: [StartupReconciler]（判断の表は reconcile_planner.dart）
+  /// - 転送イベントの反映: [TransferEventReducer]
+  /// - 確定（検証・rename・台帳の完了）: [ArchiveInstaller]
+  /// - 取り消し・書きかけ / 記録 / 一時ファイルの後始末: [TransferCleanup]
+  ///
+  /// 部品は巻ごとの印と鎖（[DownloadQueueMemory]）をこのクラスと共有し、台帳や
+  /// 投入はここ（[DownloadQueueHost]）に頼む。
   DownloadQueueProvider._()
     : super(
         from: null,
@@ -121,7 +151,7 @@ final class DownloadQueueProvider
   DownloadQueue create() => DownloadQueue();
 }
 
-String _$downloadQueueHash() => r'e80d00845c9c2913f5f30c38ea9cab2b62f57d20';
+String _$downloadQueueHash() => r'56a1896fc8f94f335b8cf52c2ec6680edd5ebae0';
 
 /// 巻単位のダウンロードキュー。
 ///
@@ -138,6 +168,16 @@ String _$downloadQueueHash() => r'e80d00845c9c2913f5f30c38ea9cab2b62f57d20';
 /// ため、Dart では止めない。Android の 9 分の時間切れは holding queue を
 /// 迂回して同時実行数を崩すので foreground 実行で避ける（背面で始まった巻には
 /// 効かない残りの穴がある。`foregroundModeFor` 参照）。
+///
+/// このクラスは調停役で、公開の操作（積む / 中断 / 再開 / 削除 / 破棄）・投入・
+/// 再試行・台帳の書き込み・世代の管理を持つ。次の処理は部品に分けてある（#32）:
+/// - 起動時の照合の実行: [StartupReconciler]（判断の表は reconcile_planner.dart）
+/// - 転送イベントの反映: [TransferEventReducer]
+/// - 確定（検証・rename・台帳の完了）: [ArchiveInstaller]
+/// - 取り消し・書きかけ / 記録 / 一時ファイルの後始末: [TransferCleanup]
+///
+/// 部品は巻ごとの印と鎖（[DownloadQueueMemory]）をこのクラスと共有し、台帳や
+/// 投入はここ（[DownloadQueueHost]）に頼む。
 
 abstract class _$DownloadQueue
     extends $AsyncNotifier<Map<int, VolumeDownload>> {
