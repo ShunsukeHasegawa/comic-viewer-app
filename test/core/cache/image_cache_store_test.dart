@@ -323,6 +323,27 @@ void main() {
       expect(harness.hasFile('v1/100/1'), isFalse);
     });
 
+    // 期限切れが大量にあると全件の行オブジェクトを同時に持つため、端末の
+    // メモリを圧迫する。区切りをまたいでも保護対象を残して消し切る。
+    test('期限切れが200件を超えても区切って消し切り、保護した画像は残す', () async {
+      final harness = CacheHarness.create();
+      await harness.settingsStore.write(
+        const CacheSettings(retention: CacheRetention.days7),
+      );
+      await harness.recordMany(450, bytes: 10, prefix: 'v1/expired/');
+      await harness.record(
+        't/expired/pinned',
+        bytes: 10,
+        kind: CachedImageKind.thumbnail,
+      );
+      await harness.store.pin(bookId: 12, keys: ['t/expired/pinned']);
+
+      harness.clock.advance(const Duration(days: 8));
+      await harness.store.evictIfNeeded();
+
+      expect(await harness.keysByLastUsed(), ['t/expired/pinned']);
+    });
+
     test('無期限なら古くても残す', () async {
       final harness = CacheHarness.create();
       await harness.settingsStore.write(

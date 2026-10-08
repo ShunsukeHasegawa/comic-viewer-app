@@ -333,18 +333,21 @@ class ImageCacheStore {
   Future<void> _evict() async {
     final settings = await settingsStore.read();
 
-    // 期限切れ（保持期間を過ぎたもの）。保護印の付いた画像は SQL 側で外し、
-    // 期限切れの行だけを読む（全行も全部の印も Dart に読み込まない）。
+    // 期限切れ（保持期間を過ぎたもの）。種別を索引の先頭に合わせ、古い順に
+    // 少しずつ読む（全行も全部の印も Dart に読み込まない）。
     if (settings.retention.duration case final retention?) {
       final threshold = now().subtract(retention);
-      final expired =
-          await (database.select(database.cachedImages)..where(
-                (table) =>
-                    table.lastUsedAt.isSmallerThanValue(threshold) &
-                    _isNotPinned(table),
-              ))
-              .get();
-      await _deleteRows(expired);
+      for (final kind in CachedImageKind.values) {
+        while (true) {
+          final expired = await evictionCandidatesQuery(
+            database,
+            kind: kind,
+            olderThan: threshold,
+          ).get();
+          if (expired.isEmpty) break;
+          await _deleteRows(expired);
+        }
+      }
     }
 
     // 種別ごとの上限。
@@ -357,8 +360,38 @@ class ImageCacheStore {
     }
   }
 
+  /// LRU / 期限切れ掃除で古い順に読むクエリ。
+  ///
+  /// 実行計画のテストでも本番と同じ Drift クエリを組み立てるため公開する。
+  @visibleForTesting
+  static SimpleSelectStatement<$CachedImagesTable, CachedImageRow>
+  evictionCandidatesQuery(
+    AppDatabase database, {
+    required CachedImageKind kind,
+    DateTime? olderThan,
+  }) {
+    return database.select(database.cachedImages)
+      ..where(
+        (table) =>
+            table.kind.equalsValue(kind) &
+            (olderThan == null
+                ? const Constant(true)
+                : table.lastUsedAt.isSmallerThanValue(olderThan)) &
+            _isNotPinned(database, table),
+      )
+      // 同時刻でも区切りごとの順番が変わらないようキーで固定する。
+      ..orderBy([
+        (table) => OrderingTerm.asc(table.lastUsedAt),
+        (table) => OrderingTerm.asc(table.key),
+      ])
+      ..limit(_evictPageSize);
+  }
+
   /// 保護印（#11）が付いていない行。
-  Expression<bool> _isNotPinned($CachedImagesTable table) {
+  static Expression<bool> _isNotPinned(
+    AppDatabase database,
+    $CachedImagesTable table,
+  ) {
     final pinned = database.selectOnly(database.pinnedImages)
       ..addColumns([database.pinnedImages.key]);
     return table.key.isNotInQuery(pinned);
@@ -393,18 +426,7 @@ class ImageCacheStore {
       var total = await _bytesOf(kind);
       if (total <= limitBytes) return;
 
-      final rows =
-          await (database.select(database.cachedImages)
-                ..where(
-                  (table) => table.kind.equalsValue(kind) & _isNotPinned(table),
-                )
-                // 古い順（最後に使った時刻）に消す。同時刻はキーで順番を固定する。
-                ..orderBy([
-                  (table) => OrderingTerm.asc(table.lastUsedAt),
-                  (table) => OrderingTerm.asc(table.key),
-                ])
-                ..limit(_evictPageSize))
-              .get();
+      final rows = await evictionCandidatesQuery(database, kind: kind).get();
       // 残りが保護印つきだけなら、それ以上は消せない。
       if (rows.isEmpty) return;
 

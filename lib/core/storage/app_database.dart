@@ -18,6 +18,10 @@ enum CachedImageKind {
 /// 実体はファイルで、ここには LRU と容量計算に必要な情報だけを持つ。
 /// ダウンロード済みデータ（#9）は別テーブルで管理し、**LRU の対象にしない**。
 @DataClassName('CachedImageRow')
+@TableIndex.sql(
+  'CREATE INDEX IF NOT EXISTS cached_images_kind_last_used_at_key '
+  'ON cached_images (kind, last_used_at, "key")',
+)
 class CachedImages extends Table {
   /// キャッシュキー（`MediaUrls.pageCacheKey` / `thumbnailCacheKey`）。
   TextColumn get key => text()();
@@ -205,7 +209,7 @@ class AppDatabase extends _$AppDatabase {
     : super(executor ?? driftDatabase(name: 'comic_laz'));
 
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
 
   /// 既存の端末を作り直さずに列 / テーブルを足す。
   ///
@@ -235,6 +239,9 @@ class AppDatabase extends _$AppDatabase {
         await m.createTable(offlineMetadataEntries);
         await m.createTable(pinnedImages);
       }
+      // v5: 種別ごとの容量集計と、LRU / 保持期間の古い順の走査を軽くする。
+      // 既存行は消さず、索引だけを追加する。
+      if (from < 5) await m.createIndex(cachedImagesKindLastUsedAtKey);
     },
   );
 }

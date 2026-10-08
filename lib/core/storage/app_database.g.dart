@@ -2304,6 +2304,10 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $OfflineMetadataEntriesTable offlineMetadataEntries =
       $OfflineMetadataEntriesTable(this);
   late final $PinnedImagesTable pinnedImages = $PinnedImagesTable(this);
+  late final Index cachedImagesKindLastUsedAtKey = Index(
+    'cached_images_kind_last_used_at_key',
+    'CREATE INDEX IF NOT EXISTS cached_images_kind_last_used_at_key ON cached_images (kind, last_used_at, "key")',
+  );
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -2315,6 +2319,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     readingProgresses,
     offlineMetadataEntries,
     pinnedImages,
+    cachedImagesKindLastUsedAtKey,
   ];
 }
 
