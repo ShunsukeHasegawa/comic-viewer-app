@@ -103,6 +103,44 @@ class _FakeLocalPages implements DownloadedPageSource {
   }
 }
 
+/// 読み出し / 書き戻しの最中に全削除（ログアウト）が割り込むキャッシュ。
+class _InterruptedCacheStore extends ImageCacheStore {
+  _InterruptedCacheStore({
+    required super.database,
+    required super.directories,
+    required super.settingsStore,
+    super.now,
+  });
+
+  bool clearAfterRead = false;
+  bool clearBeforeWrite = false;
+
+  @override
+  Future<CachedImage?> read(String key) async {
+    final cached = await super.read(key);
+    if (clearAfterRead) await clear();
+    return cached;
+  }
+
+  @override
+  Future<void> write({
+    required String key,
+    required CachedImageKind kind,
+    required Uint8List bytes,
+    String? contentType,
+    int? generation,
+  }) async {
+    if (clearBeforeWrite) await clear();
+    await super.write(
+      key: key,
+      kind: kind,
+      bytes: bytes,
+      contentType: contentType,
+      generation: generation,
+    );
+  }
+}
+
 void main() {
   // 解決順は「ダウンロード済みローカル → 一時キャッシュ → ネットワーク」（#11）。
   group('ダウンロード済みローカル優先', () {
@@ -409,7 +447,11 @@ void main() {
   group('ログアウトとの競合', () {
     // ログアウト時の破棄より後に完了したダウンロードを書き戻すと、別のユーザーで
     // 同じ巻を開いたときに前のユーザー向けに取得した画像が出てしまう（#8 / #15）。
-    test('取得中にログアウト（全削除）が入ったら書き戻さない', () async {
+    //
+    // 結果も返さない。全削除と一緒にメモリの `ImageCache` も捨てているので、
+    // 返すと前のユーザー向けの画像がデコードされ、捨てたばかりの `ImageCache` に
+    // 入り直す（次のユーザーの一覧に前の表紙が出る）。
+    test('取得中にログアウト（全削除）が入ったら書き戻さず、結果も返さない', () async {
       final gate = Completer<void>();
       final fixture = build(
         handler: (options) async {
@@ -429,9 +471,94 @@ void main() {
       await fixture.harness.store.clear();
       gate.complete();
 
-      expect(await pending, imageBytes(8), reason: '表示中の画像まで失敗にはしない');
+      await expectLater(pending, throwsA(isA<RequestCancelledException>()));
       expect(await fixture.harness.store.usage(), CacheUsage.empty);
       expect(fixture.harness.fileCount, 0);
+    });
+
+    test('書き戻しの最中に全削除が入っても結果を返さない', () async {
+      final fixture = build(
+        store: (harness) => harness.storeLike<_InterruptedCacheStore>(
+          _InterruptedCacheStore.new,
+        )..clearBeforeWrite = true,
+      );
+
+      await expectLater(
+        fixture.loader.load(
+          ComicImageRequest.page(
+            fixture.urls,
+            volumeId: 340,
+            page: 1,
+            filesVersion: 1,
+          ),
+        ),
+        throwsA(isA<RequestCancelledException>()),
+      );
+    });
+
+    // ネットワーク以外の経路も同じ。読み出した直後に全削除が入ったら、
+    // 読んだ前の世代のバイト列を返さない。
+    test('一時キャッシュの読み出し中に全削除が入っても結果を返さない', () async {
+      late _InterruptedCacheStore store;
+      final fixture = build(
+        store: (harness) =>
+            store = harness.storeLike(_InterruptedCacheStore.new),
+      );
+      final request = ComicImageRequest.page(
+        fixture.urls,
+        volumeId: 340,
+        page: 1,
+        filesVersion: 1,
+      );
+      await store.write(
+        key: request.cacheKey,
+        kind: request.kind,
+        bytes: imageBytes(8),
+      );
+      store.clearAfterRead = true;
+
+      await expectLater(
+        fixture.loader.load(request),
+        throwsA(isA<RequestCancelledException>()),
+      );
+      expect(fixture.adapter.requests, isEmpty);
+    });
+
+    // 前の世代の取得は失敗で終わるので、全削除の後（次のユーザー）の要求を
+    // そこへ相乗りさせると、取り直せば表示できる画像まで失敗になる。
+    test('全削除の後に来た同じ画像の要求は、前の世代の取得に相乗りせず取り直す', () async {
+      final gates = [Completer<void>(), Completer<void>()];
+      var calls = 0;
+      final fixture = build(
+        handler: (options) async {
+          final index = calls++;
+          await gates[index].future;
+          return _imageResponse(imageBytes(8, fill: index + 1));
+        },
+      );
+      final request = ComicImageRequest.page(
+        fixture.urls,
+        volumeId: 340,
+        page: 1,
+        filesVersion: 1,
+      );
+
+      final stale = fixture.loader.load(request);
+      await pumpEventQueue();
+      await fixture.harness.store.clear();
+      final fresh = fixture.loader.load(request);
+      await pumpEventQueue();
+      gates[0].complete();
+      await expectLater(stale, throwsA(isA<RequestCancelledException>()));
+      gates[1].complete();
+
+      expect(await fresh, imageBytes(8, fill: 2));
+      expect(fixture.adapter.requests, hasLength(2));
+      expect(
+        (await fixture.harness.store.read(request.cacheKey))?.bytes,
+        imageBytes(8, fill: 2),
+        reason: '新しい世代の取得は書き戻す',
+      );
     });
   });
 

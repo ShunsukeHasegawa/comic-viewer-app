@@ -12,6 +12,7 @@ import 'package:flutter/painting.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../support/cache_fakes.dart';
+import '../../support/fake_http_adapter.dart';
 
 /// 1x1 の PNG（デコードできる最小の画像）。
 final _png = base64Decode(
@@ -124,6 +125,34 @@ void main() {
     await resolveWidth(ComicImageProvider(loader: loader, request: request()));
 
     expect(attempts, 1, reason: '自宅サーバー（HDD）に同じ画像を取りに行かない');
+  });
+
+  // ログアウト（`ImageCachePurger`）はディスクとメモリの `ImageCache` を両方
+  // 捨てる。その前に始まった取得の結果をデコードすると、捨てたばかりの
+  // `ImageCache` に前のユーザー向けの画像が入り直し、次のユーザーに見える。
+  test('取得中にログアウト（全削除）が入ったら、前の世代の画像を ImageCache に入れ直さない', () async {
+    final gate = Completer<void>();
+    final harness = CacheHarness.create();
+    final loader = ComicImageLoader(
+      dio: Dio()
+        ..httpClientAdapter = FakeHttpAdapter((options) async {
+          await gate.future;
+          return ResponseBody.fromBytes(_png, 200);
+        }),
+      store: harness.store,
+    );
+    final provider = ComicImageProvider(loader: loader, request: request());
+
+    final pending = resolveWidth(provider);
+    await pumpEventQueue();
+    await harness.store.clear();
+    PaintingBinding.instance.imageCache
+      ..clear()
+      ..clearLiveImages();
+    gate.complete();
+
+    await expectLater(pending, throwsA(isA<RequestCancelledException>()));
+    expect(PaintingBinding.instance.imageCache.containsKey(provider), isFalse);
   });
 
   group('表示する大きさでのデコード（#28）', () {

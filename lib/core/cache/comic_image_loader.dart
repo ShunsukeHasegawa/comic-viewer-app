@@ -147,20 +147,47 @@ class ComicImageLoader {
   final DownloadedPageSource localPages;
 
   /// 進行中の取得（表示と先読みが同じページに重なることがある）。
-  final _inFlight = <String, Future<Uint8List>>{};
+  ///
+  /// 始めた時点のキャッシュの世代も持つ。全削除の後に来た要求を、前の世代の
+  /// 取得（結果を返さずに失敗する）に相乗りさせないため。
+  final _inFlight = <String, ({int generation, Future<Uint8List> task})>{};
 
   /// 画像のバイト列を返す。取得できなければ [ApiException] を投げる。
+  ///
+  /// 取得の途中で一時キャッシュの全削除（ログアウトなど）が入ったら、結果を
+  /// 返さずに [RequestCancelledException] を投げる。全削除と一緒にメモリの
+  /// `ImageCache` も捨てているので、返すと前の世代の画像がデコードされて
+  /// 捨てたばかりの `ImageCache` に入り直す（次のユーザーに前の表紙が見える）。
   Future<Uint8List> load(ComicImageRequest request) {
+    final generation = store.generation;
     final running = _inFlight[request.cacheKey];
     // 同じ画像を二重にダウンロードしない（自宅サーバーの負荷を上げない）。
-    if (running != null) return running;
+    if (running != null && running.generation == generation) {
+      return running.task;
+    }
 
-    final task = _load(request);
-    _inFlight[request.cacheKey] = task;
-    return task.whenComplete(() => _inFlight.remove(request.cacheKey));
+    final task = _load(request, generation);
+    final entry = (generation: generation, task: task);
+    _inFlight[request.cacheKey] = entry;
+    return task.whenComplete(() {
+      // 後の世代の取得が同じキーで走っていれば、そちらの記録は残す。
+      if (identical(_inFlight[request.cacheKey], entry)) {
+        _inFlight.remove(request.cacheKey);
+      }
+    });
   }
 
-  Future<Uint8List> _load(ComicImageRequest request) async {
+  Future<Uint8List> _load(ComicImageRequest request, int generation) async {
+    final bytes = await _resolve(request, generation);
+    // 返す直前にも確かめる（ローカル / キャッシュの読み出し・書き戻しの最中に
+    // 全削除が入ることもある）。
+    if (store.generation != generation) {
+      throw const RequestCancelledException();
+    }
+    return bytes;
+  }
+
+  Future<Uint8List> _resolve(ComicImageRequest request, int generation) async {
     // 1. 明示的にダウンロードした巻（ZIP）。圏外でもここで解決する。
     final local = await _readLocal(request);
     if (local != null) return local;
@@ -176,9 +203,9 @@ class ComicImageLoader {
     }
 
     // 3. ネットワーク。
-    // ダウンロードの最中にログアウト（全削除）が入ったら書き戻さないための世代。
-    // 前のユーザーの画像がディスクに残ると、別のユーザーがそれを見てしまう。
-    final generation = store.generation;
+    // ダウンロードの最中にログアウト（全削除）が入ったら書き戻さない
+    // （[generation] で弾く）。前のユーザーの画像がディスクに残ると、
+    // 別のユーザーがそれを見てしまう。
     final downloaded = await _download(request.url);
     try {
       await store.write(
