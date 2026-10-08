@@ -2,7 +2,9 @@ import 'package:comic_laz/core/network/api_exception.dart';
 import 'package:comic_laz/domain/models/book.dart';
 import 'package:comic_laz/domain/models/read_volume.dart';
 import 'package:comic_laz/features/history/application/history_controller.dart';
+import 'package:comic_laz/features/viewer/application/resume_reading_prompt.dart';
 import 'package:comic_laz/features/viewer/application/viewer_controller.dart';
+import 'package:comic_laz/features/viewer/data/open_volume_store.dart';
 import 'package:comic_laz/features/viewer/data/progress_recorder.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -46,6 +48,9 @@ ReadVolume volumeFixture({
 
   /// 端末に控えてあるオフライン用メタ情報。
   FakeOfflineMetadataGateway? offline,
+
+  /// 開いている巻の控え（続きを読むか尋ねる合図）。
+  OpenVolumeStore? openVolumeStore,
 }) {
   final recorder = RecordingProgressRecorder(succeeds: !recordFails)
     ..unsyncedPages.addAll(unsyncedPages)
@@ -59,6 +64,7 @@ ReadVolume volumeFixture({
           readVolumeError: readVolumeError,
         ),
         offlineMetadata: offline,
+        openVolumeStore: openVolumeStore,
       ),
       progressRecorderProvider.overrideWithValue(recorder),
     ],
@@ -597,6 +603,73 @@ void main() {
       await fixture.container.read(viewerControllerProvider(340).future);
 
       expect(offline.savedVolumes, [340]);
+    });
+  });
+
+  group('開いている巻の控え', () {
+    test('開いたら控え、閉じたら消す（残るのは OS に終了させられたときだけ）', () async {
+      final store = InMemoryOpenVolumeStore();
+      final fixture = build(openVolumeStore: store);
+
+      await fixture.container.read(viewerControllerProvider(340).future);
+      await pumpEventQueue();
+      expect(store.stored?.volumeId, 340);
+      expect(store.stored?.bookId, 12);
+      expect(store.stored?.title, '進撃の巨人');
+      expect(store.stored?.volume, 3);
+
+      fixture.container.dispose();
+      await pumpEventQueue();
+      expect(store.stored, isNull);
+    });
+
+    test('次の巻の控えは前の巻の後始末で消さない', () async {
+      final store = InMemoryOpenVolumeStore();
+      final fixture = build(openVolumeStore: store);
+      await fixture.container.read(viewerControllerProvider(340).future);
+      await pumpEventQueue();
+
+      // 次の巻の書き込みが先に届いた。
+      await store.save(
+        const OpenVolume(bookId: 12, volumeId: 341, title: '進撃の巨人', volume: 4),
+      );
+      fixture.container.dispose();
+      await pumpEventQueue();
+
+      expect(store.stored?.volumeId, 341);
+    });
+
+    test('読めない巻は控えない（再開しても読めない）', () async {
+      final store = InMemoryOpenVolumeStore();
+      final fixture = build(
+        volume: volumeFixture(filesVersion: null),
+        openVolumeStore: store,
+      );
+
+      await fixture.container.read(viewerControllerProvider(340).future);
+      await pumpEventQueue();
+
+      expect(store.stored, isNull);
+    });
+
+    test('自分で巻を開いたら、前回の続きはもう尋ねない', () async {
+      const previous = OpenVolume(
+        bookId: 1,
+        volumeId: 10,
+        title: 'ONE PIECE',
+        volume: 1,
+      );
+      final fixture = build(openVolumeStore: InMemoryOpenVolumeStore(previous));
+      final sub = fixture.container.listen(
+        resumeReadingPromptProvider,
+        (_, _) {},
+      );
+      addTearDown(sub.close);
+
+      await fixture.container.read(viewerControllerProvider(340).future);
+      await pumpEventQueue();
+
+      expect(fixture.container.read(resumeReadingPromptProvider).value, isNull);
     });
   });
 }

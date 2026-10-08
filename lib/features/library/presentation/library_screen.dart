@@ -9,6 +9,7 @@ import '../domain/library_filter.dart';
 import 'widgets/book_tiles.dart';
 import 'widgets/continue_reading_carousel.dart';
 import 'widgets/library_filter_bar.dart';
+import 'widgets/resume_reading_prompt_listener.dart';
 
 /// ライブラリ（書籍一覧）画面。
 class LibraryScreen extends ConsumerWidget {
@@ -19,23 +20,26 @@ class LibraryScreen extends ConsumerWidget {
     final async = ref.watch(libraryControllerProvider);
     final data = async.value;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const _SearchField(),
-        titleSpacing: 8,
-        actions: const [_SortMenuButton(), _ViewModeButton()],
-      ),
-      body: RefreshIndicator(
-        onRefresh: () => _refresh(context, ref),
-        child: switch ((data, async.error)) {
-          // 手元に何も無い状態での失敗だけエラー表示にする。
-          (null, final error?) => ErrorView(
-            error: error,
-            onRetry: ref.read(libraryControllerProvider.notifier).refresh,
-          ),
-          (null, null) => const Center(child: CircularProgressIndicator()),
-          (final data?, _) => _LibraryBody(data: data),
-        },
+    // 起動直後のホームで、前回読んでいた途中の巻の続きを読むか尋ねる。
+    return ResumeReadingPromptListener(
+      child: Scaffold(
+        appBar: AppBar(
+          title: const _SearchField(),
+          titleSpacing: 8,
+          actions: const [_SortMenuButton(), _ViewModeButton()],
+        ),
+        body: RefreshIndicator(
+          onRefresh: () => _refresh(context, ref),
+          child: switch ((data, async.error)) {
+            // 手元に何も無い状態での失敗だけエラー表示にする。
+            (null, final error?) => ErrorView(
+              error: error,
+              onRetry: ref.read(libraryControllerProvider.notifier).refresh,
+            ),
+            (null, null) => const Center(child: CircularProgressIndicator()),
+            (final data?, _) => _LibraryBody(data: data),
+          },
+        ),
       ),
     );
   }

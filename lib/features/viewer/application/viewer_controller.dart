@@ -14,7 +14,9 @@ import '../../mypage/application/stats_controller.dart';
 import '../../offline/application/offline_metadata_gateway.dart';
 import '../../progress/domain/reading_progress.dart';
 import '../../title/application/book_detail_controller.dart';
+import '../data/open_volume_store.dart';
 import '../data/progress_recorder.dart';
+import 'resume_reading_prompt.dart';
 
 part 'viewer_controller.freezed.dart';
 part 'viewer_controller.g.dart';
@@ -73,12 +75,31 @@ class ViewerController extends _$ViewerController {
   /// 進行中の送信。
   Future<void>? _recording;
 
+  /// 進行中の控えの書き込み（消すのはこれが終わってから）。
+  Future<void> _savingOpenVolume = Future.value();
+
   @override
   Future<ViewerState> build(int volumeId) async {
     _recorder = ref.read(progressRecorderProvider);
+    // dispose 後に消すので実体を持っておく。
+    final openVolumeStore = ref.read(openVolumeStoreProvider);
     // 画面を離れるときに取りこぼさない（dispose 後は state を読めないので
     // `_pending` に持たせた値で送る）。
     ref.onDispose(flushProgress);
+    // 閉じたら控えを消す。OS にアプリごと終了させられたときだけ残り、次の
+    // 起動で続きを読むか尋ねる合図になる。
+    // 書き込みより先に消すと、すぐ閉じたときに控えが残ってしまう。
+    ref.onDispose(
+      () => unawaited(
+        _savingOpenVolume
+            .then((_) => openVolumeStore.clearIfVolume(volumeId))
+            .catchError((Object _) {}),
+      ),
+    );
+    // 自分で巻を開いたなら、前回の続きはもう尋ねない（build 中は他の
+    // provider を変えられないので次に回す）。
+    final prompt = ref.read(resumeReadingPromptProvider.notifier);
+    unawaited(Future.microtask(prompt.dismiss));
     return _open();
   }
 
@@ -98,7 +119,29 @@ class ViewerController extends _$ViewerController {
       isStale: loaded.isStale,
     );
     _updatePending(next);
+    _rememberOpenVolume(loaded.volume);
     return next;
+  }
+
+  /// 開いている巻を控える（読めない巻は再開しても仕方ないので控えない）。
+  ///
+  /// 表示を待たせない。書けなくても読書は止めない（尋ねられないだけ）。
+  void _rememberOpenVolume(ReadVolume volume) {
+    // 読み込み中に閉じられていたら書かない（消した後に残ってしまう）。
+    if (volume.isEmpty || !ref.mounted) return;
+    final store = ref.read(openVolumeStoreProvider);
+    _savingOpenVolume = _savingOpenVolume.then(
+      (_) => store
+          .save(
+            OpenVolume(
+              bookId: volume.book.id,
+              volumeId: volume.id,
+              title: volume.book.title,
+              volume: volume.volume,
+            ),
+          )
+          .catchError((Object _) {}),
+    );
   }
 
   /// 巻情報を手に入れる。

@@ -38,6 +38,7 @@ import 'package:comic_laz/features/push/data/push_messaging.dart';
 import 'package:comic_laz/features/push/data/push_settings_store.dart';
 import 'package:comic_laz/features/settings/application/keep_screen_on_setting.dart';
 import 'package:comic_laz/features/settings/application/theme_mode_setting.dart';
+import 'package:comic_laz/features/viewer/data/open_volume_store.dart';
 import 'package:comic_laz/features/viewer/presentation/widgets/viewer_page_image.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -52,6 +53,7 @@ import 'progress_fakes.dart';
 import 'push_fakes.dart';
 import 'settings_fakes.dart';
 import 'storage_fakes.dart';
+import 'viewer_fakes.dart';
 
 /// プラットフォームチャネルとネットワークを触らないようにした標準の override 群。
 List<Override> testOverrides({
@@ -92,6 +94,7 @@ List<Override> testOverrides({
   NotificationPermissionLog? notificationPermissionLog,
   List<SignOutHook>? signOutHooks,
   InAppBrowser? inAppBrowser,
+  OpenVolumeStore? openVolumeStore,
   String apiBaseUrl = 'http://localhost:8000',
 }) {
   return [
@@ -227,6 +230,10 @@ List<Override> testOverrides({
     ),
     // 管理画面を開く Custom Tabs（#20）は url_launcher（チャネル）。
     inAppBrowserProvider.overrideWithValue(inAppBrowser ?? FakeInAppBrowser()),
+    // 読んでいる途中の巻の控えは drift。既定は「控えなし」（起動のたびに尋ねない）。
+    openVolumeStoreProvider.overrideWithValue(
+      openVolumeStore ?? InMemoryOpenVolumeStore(),
+    ),
     // ログアウト前のフックは既定で本物（プッシュ通知の解除。上のフェイクで動く）。
     if (signOutHooks != null)
       signOutHooksProvider.overrideWithValue(signOutHooks),
@@ -285,6 +292,7 @@ ProviderContainer createContainer({
   NotificationPermissionLog? notificationPermissionLog,
   List<SignOutHook>? signOutHooks,
   InAppBrowser? inAppBrowser,
+  OpenVolumeStore? openVolumeStore,
   List<Override> overrides = const [],
 }) {
   return ProviderContainer(
@@ -321,6 +329,7 @@ ProviderContainer createContainer({
         notificationPermissionLog: notificationPermissionLog,
         signOutHooks: signOutHooks,
         inAppBrowser: inAppBrowser,
+        openVolumeStore: openVolumeStore,
       ),
       // Riverpod 3 は同じプロバイダの二重 override を拒むので、testOverrides が
       // 既に差し替えているもの（appResumeMonitor など）は上の引数で渡す。

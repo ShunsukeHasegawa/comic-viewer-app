@@ -6,6 +6,7 @@ import '../../features/downloads/data/safe_mode_revalidation_store.dart';
 import '../../features/offline/data/offline_metadata_purger.dart';
 import '../../features/progress/data/progress_purger.dart';
 import '../../features/push/application/push_token_eraser.dart';
+import '../../features/viewer/data/open_volume_store.dart';
 import '../cache/image_cache_purger.dart';
 
 part 'session_data_purger.g.dart';
@@ -71,4 +72,6 @@ List<SessionDataPurger> sessionDataPurgers(Ref ref) => [
   // この端末の FCM トークン（#14）。失効でサーバーの登録を消せなくても、
   // 前のユーザーの通知がこの端末に届き続けないように捨てる。
   ref.watch(pushRegistrationPurgerProvider),
+  // 読んでいる途中の巻の控え（次のユーザーに続きを尋ねない）。
+  ref.watch(openVolumePurgerProvider),
 ];

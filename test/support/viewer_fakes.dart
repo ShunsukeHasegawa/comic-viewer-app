@@ -1,5 +1,6 @@
 import 'package:comic_laz/core/device/screen_wake_lock.dart';
 import 'package:comic_laz/features/progress/domain/reading_progress.dart';
+import 'package:comic_laz/features/viewer/data/open_volume_store.dart';
 import 'package:comic_laz/features/viewer/data/progress_recorder.dart';
 
 /// 送信内容を記録する [ProgressRecorder]。
@@ -100,5 +101,38 @@ class FakeScreenWakeLock implements ScreenWakeLock {
   Future<void> disable() async {
     enabled = false;
     disableCount++;
+  }
+}
+
+/// メモリ上に持つ [OpenVolumeStore]（drift を触らない）。
+class InMemoryOpenVolumeStore implements OpenVolumeStore {
+  InMemoryOpenVolumeStore([this.stored]);
+
+  OpenVolume? stored;
+
+  /// 読み込みを失敗させる（尋ねずに起動を続けることの確認用）。
+  Object? readError;
+
+  int clearCount = 0;
+
+  @override
+  Future<OpenVolume?> read() async {
+    if (readError case final error?) throw error;
+    return stored;
+  }
+
+  @override
+  Future<void> save(OpenVolume volume) async => stored = volume;
+
+  @override
+  Future<void> clearIfVolume(int volumeId) async {
+    if (stored?.volumeId != volumeId) return;
+    await clear();
+  }
+
+  @override
+  Future<void> clear() async {
+    clearCount++;
+    stored = null;
   }
 }
