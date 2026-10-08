@@ -24,11 +24,24 @@ class FakeAuthStore implements AuthStore {
   /// [readUser] で投げる例外（セキュアストレージの障害）。
   Object? readUserError;
 
+  /// 次の [writeUser] で 1 回だけ投げる例外（ログイン前の状態へ戻す書き込みは通す）。
+  Object? writeUserError;
+
   @override
   Future<String?> readToken() async => token;
 
+  /// 次の [writeToken] で 1 回だけ投げる例外。書いた後に投げる（セキュア
+  /// ストレージが途中まで書いて失敗した状況。ログイン前の状態へ戻す書き込みは通す）。
+  Object? writeTokenError;
+
   @override
-  Future<void> writeToken(String token) async => this.token = token;
+  Future<void> writeToken(String token) async {
+    this.token = token;
+    if (writeTokenError case final error?) {
+      writeTokenError = null;
+      throw error;
+    }
+  }
 
   @override
   Future<User?> readUser() async {
@@ -37,7 +50,13 @@ class FakeAuthStore implements AuthStore {
   }
 
   @override
-  Future<void> writeUser(User user) async => this.user = user;
+  Future<void> writeUser(User user) async {
+    if (writeUserError case final error?) {
+      writeUserError = null;
+      throw error;
+    }
+    this.user = user;
+  }
 
   @override
   Future<void> clear() async {

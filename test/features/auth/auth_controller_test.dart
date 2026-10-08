@@ -315,6 +315,243 @@ void main() {
       );
       expect(store.token, isNull);
     });
+
+    // 新しいトークンを保存した後の失敗で、そのトークンを残さない。残すと
+    // 次の起動がユーザーの分からない（またはログイン前のユーザーの）まま
+    // 新しいトークンで再開してしまう。
+    test('ユーザーの取得に失敗したら新しいトークンを残さない（初回ログイン）', () async {
+      final api = _loginApi(const AuthTokenResult(token: 'new'));
+      when(api.fetchCurrentUser).thenThrow(const NetworkException());
+      final store = FakeAuthStore();
+      final container = createContainer(authStore: store, authApi: api);
+      addTearDown(container.dispose);
+      await settleAuth(container);
+
+      await expectLater(
+        container
+            .read(authControllerProvider.notifier)
+            .login(email: 'a@example.com', password: 'secret'),
+        throwsA(isA<NetworkException>()),
+      );
+
+      expect(store.token, isNull);
+      expect(store.user, isNull);
+      expect(
+        container.read(authControllerProvider),
+        isA<AuthUnauthenticated>(),
+      );
+    });
+
+    test('ユーザーの取得に失敗したらログイン前のトークンに戻す（圏外起動で残っていたもの）', () async {
+      final api = _loginApi(const AuthTokenResult(token: 'new'));
+      when(api.fetchCurrentUser).thenThrow(const NetworkException());
+      final store = FakeAuthStore(token: 'old');
+      final container = createContainer(authStore: store, authApi: api);
+      addTearDown(container.dispose);
+      await settleAuth(container);
+
+      await expectLater(
+        container
+            .read(authControllerProvider.notifier)
+            .login(email: 'a@example.com', password: 'secret'),
+        throwsA(isA<NetworkException>()),
+      );
+
+      expect(store.token, 'old', reason: '通信エラーで手元のセッションを捨てない');
+      expect(store.user, isNull);
+    });
+
+    test('ユーザーを保存できなければ、前のユーザーと新しいトークンの組を残さない', () async {
+      final store = FakeAuthStore(user: testUser);
+      final container = createContainer(
+        authStore: store,
+        authApi: _loginApi(
+          const AuthTokenResult(
+            token: 'new',
+            user: User(id: 2, name: '別の人'),
+          ),
+        ),
+      );
+      addTearDown(container.dispose);
+      await settleAuth(container);
+      store.writeUserError = StateError('secure storage');
+
+      await expectLater(
+        container
+            .read(authControllerProvider.notifier)
+            .login(email: 'b@example.com', password: 'secret'),
+        throwsA(isA<StateError>()),
+      );
+
+      expect(store.token, isNull, reason: '前のユーザーとして新しいトークンで再開させない');
+      expect(store.user, testUser, reason: 'ログイン前の状態に戻す');
+      expect(
+        container.read(authControllerProvider),
+        isA<AuthUnauthenticated>(),
+      );
+    });
+
+    // セキュアストレージは途中まで書いて失敗することがある。書けなかったと
+    // みなして放っておくと、書けていた新しいトークンが残る。
+    test('トークンの書き込みに失敗しても、途中まで書かれた新しいトークンを残さない', () async {
+      final api = _loginApi(
+        const AuthTokenResult(token: 'new', user: testUser),
+      );
+      when(api.fetchCurrentUser).thenThrow(const NetworkException());
+      final store = FakeAuthStore(token: 'old');
+      final container = createContainer(authStore: store, authApi: api);
+      addTearDown(container.dispose);
+      await settleAuth(container);
+      store.writeTokenError = const FakePlatformException('write failed');
+
+      await expectLater(
+        container
+            .read(authControllerProvider.notifier)
+            .login(email: 'a@example.com', password: 'secret'),
+        throwsA(isA<FakePlatformException>()),
+      );
+
+      expect(store.token, 'old');
+      expect(store.user, isNull);
+    });
+  });
+
+  // 確定する前に抜けたログイン（dispose / 後続の操作）の後始末。例外で
+  // 抜けたときだけ戻すと、早期 return で抜けた分の新しいトークンが残る。
+  // 一方、後続の操作が書いた認証情報を古い控えで上書きしてもいけない。
+  group('確定していないログインとの競合', () {
+    const other = User(id: 2, name: '別の人');
+
+    /// 起動時は [testUser] で復元し、以降の `fetchCurrentUser` は [pending] を待つ。
+    Future<
+      ({ProviderContainer container, FakeAuthStore store, MockAuthApi api})
+    >
+    signedInWithPendingFetch(
+      Completer<User> pending, {
+      List<String> tokens = const ['new'],
+    }) async {
+      final api = MockAuthApi();
+      final results = [...tokens];
+      when(
+        () => api.createToken(
+          email: any(named: 'email'),
+          password: any(named: 'password'),
+          deviceName: any(named: 'deviceName'),
+        ),
+      ).thenAnswer((_) async {
+        final token = results.removeAt(0);
+        if (token.isEmpty) throw const NetworkException();
+        return AuthTokenResult(
+          token: token,
+          user: token == 'second' ? other : null,
+        );
+      });
+      var fetches = 0;
+      when(api.fetchCurrentUser).thenAnswer(
+        (_) => fetches++ == 0 ? Future.value(testUser) : pending.future,
+      );
+      when(api.deleteToken).thenAnswer((_) async {});
+      final store = FakeAuthStore(token: 'old', user: testUser);
+      final container = createContainer(authStore: store, authApi: api);
+      await settleAuth(container);
+      return (container: container, store: store, api: api);
+    }
+
+    test('ログインの途中で dispose されたら、ログイン前の認証情報に戻す', () async {
+      final pending = Completer<User>();
+      final (:container, :store, api: _) = await signedInWithPendingFetch(
+        pending,
+      );
+
+      final login = container
+          .read(authControllerProvider.notifier)
+          .login(email: 'b@example.com', password: 'secret');
+      await pumpEventQueue();
+      expect(store.token, 'new', reason: '前提: ユーザーの取得を待っている');
+
+      container.dispose();
+      pending.complete(other);
+      await login;
+
+      expect(store.token, 'old', reason: '確定していないトークンで次の起動を再開させない');
+      expect(store.user, testUser);
+    });
+
+    test('ログインの途中でログアウトしたら、ログイン前の認証情報で上書きしない', () async {
+      final pending = Completer<User>();
+      final (:container, :store, api: _) = await signedInWithPendingFetch(
+        pending,
+      );
+      addTearDown(container.dispose);
+      final controller = container.read(authControllerProvider.notifier);
+
+      final login = controller.login(
+        email: 'b@example.com',
+        password: 'secret',
+      );
+      await pumpEventQueue();
+      await controller.logout();
+      pending.complete(other);
+      await login;
+      await pumpEventQueue();
+
+      expect(store.token, isNull, reason: 'ログアウトで消したものを戻さない');
+      expect(store.user, isNull);
+      expect(
+        container.read(authControllerProvider),
+        const AuthState.unauthenticated(reason: SessionEndReason.signedOut),
+      );
+    });
+
+    test('後のログインが確定したら、前のログインは保存先を触らない', () async {
+      final pending = Completer<User>();
+      final (:container, :store, api: _) = await signedInWithPendingFetch(
+        pending,
+        tokens: ['first', 'second'],
+      );
+      addTearDown(container.dispose);
+      final controller = container.read(authControllerProvider.notifier);
+
+      final first = controller.login(email: 'b@example.com', password: 'x');
+      await pumpEventQueue();
+      expect(store.token, 'first', reason: '前提: ユーザーの取得を待っている');
+      await controller.login(email: 'c@example.com', password: 'y');
+      pending.complete(other);
+      await first;
+      await pumpEventQueue();
+
+      expect(store.token, 'second');
+      expect(store.user, other);
+      expect(
+        container.read(authControllerProvider),
+        AuthState.authenticated(other),
+      );
+    });
+
+    // 後のログインが保存先に届く前に失敗したら、前のログインを戻す役は
+    // 前のログインに残る（誰も戻さないと前のログインのトークンが残る）。
+    test('後のログインが保存先を触る前に失敗したら、前のログインが自分で戻す', () async {
+      final pending = Completer<User>();
+      final (:container, :store, api: _) = await signedInWithPendingFetch(
+        pending,
+        tokens: ['first', ''],
+      );
+      addTearDown(container.dispose);
+      final controller = container.read(authControllerProvider.notifier);
+
+      final first = controller.login(email: 'b@example.com', password: 'x');
+      await pumpEventQueue();
+      await expectLater(
+        controller.login(email: 'c@example.com', password: 'y'),
+        throwsA(isA<NetworkException>()),
+      );
+      pending.complete(other);
+      await first;
+      await pumpEventQueue();
+
+      expect(store.token, 'old');
+      expect(store.user, testUser);
+    });
   });
 
   group('logout', () {

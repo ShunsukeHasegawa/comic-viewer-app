@@ -52,6 +52,18 @@ class AuthController extends _$AuthController {
   /// 入れ直し直後の片付けを済ませた（または不要だった）か。
   bool _installChecked = false;
 
+  /// 保存先に書いたまま確定していないログイン（その世代と、書く前の認証情報）。
+  ///
+  /// 失敗 / dispose で確定しなかったログインは、これが自分のものなら書く前に
+  /// 戻す。後続のログインは引き継いで戻してから始め、ログアウトは戻さずに
+  /// 手放す（全部消すので）。引き継がれた後の古いログインは保存先を触らない
+  /// （後続の操作が書いたものを古い認証情報で上書きしない）。
+  _UncommittedLogin? _uncommittedLogin;
+
+  /// 確定しなかったログインを戻している処理（[_settleUncommittedLogin]）。
+  /// 保存先を書き換える前に待つ（戻す書き込みと混ざらないため）。
+  Future<void> _rollback = Future.value();
+
   /// 進行中 / 直近の破棄の理由。明示ログアウトが失効より優先される。
   SessionEndReason _endReason = SessionEndReason.signedOut;
 
@@ -197,24 +209,49 @@ class AuthController extends _$AuthController {
       await _abandonPendingPurge();
       if (_isStale(generation)) return;
     }
-    // 上書きする前に、前のトークンが残っていたかを見ておく（下の
-    // `_purgeIfUserChanged` で「持ち主の分からないセッション」を見分ける）。
-    final hadPreviousToken = await _hasStoredToken();
+    // 前のログインが書いたまま確定していなければ、先に戻す（下で控える
+    // 「前の認証情報」をそのログインの途中の書き込みにしない）。
+    await _settleUncommittedLogin();
+    if (_isStale(generation)) return;
+    // 上書きする前に、前の認証情報を控えておく。確定しなかったら戻すためと、
+    // 前のトークンが残っていたか（下の `_purgeIfUserChanged` で「持ち主の
+    // 分からないセッション」を見分ける）を知るため。
+    final previous = await _readStoredCredentials();
     if (_isStale(generation)) return;
 
-    await store.writeToken(result.token);
-    // トークンと一緒にユーザーが返らないサーバー実装でも動くようにする。
-    final user =
-        result.user ?? await ref.read(authApiProvider).fetchCurrentUser();
-    if (_isStale(generation)) return;
-    final (:saveUser, :cleaned) = await _purgeIfUserChanged(
-      user,
-      atLogin: true,
-      hadPreviousToken: hadPreviousToken,
+    _uncommittedLogin = (
+      generation: generation,
+      store: store,
+      previous: previous,
     );
-    if (_isStale(generation)) return;
-    if (saveUser) await store.writeUser(user);
-    if (_isStale(generation)) return;
+    final User user;
+    final bool cleaned;
+    try {
+      // 書き込みの失敗も戻す（途中まで書かれているかもしれない）。
+      await store.writeToken(result.token);
+      // トークンと一緒にユーザーが返らないサーバー実装でも動くようにする。
+      user = result.user ?? await ref.read(authApiProvider).fetchCurrentUser();
+      if (_isStale(generation)) return;
+      final purge = await _purgeIfUserChanged(
+        user,
+        atLogin: true,
+        hadPreviousToken: previous.hadToken,
+      );
+      cleaned = purge.cleaned;
+      if (_isStale(generation)) return;
+      if (purge.saveUser) await store.writeUser(user);
+      if (_isStale(generation)) return;
+      // ここで確定する（以降は戻さない）。
+      _uncommittedLogin = null;
+    } finally {
+      // 失敗 / dispose / 後続の操作で確定しなかった。新しいトークンだけ /
+      // 前のユーザーと新しいトークンの組を残すと、次の起動で前のユーザーのまま
+      // （またはユーザーの分からないまま）新しいトークンで再開してしまう。
+      // 後続の操作が引き継いでいれば、そちらに任せて触らない。
+      if (_uncommittedLogin?.generation == generation) {
+        await _settleUncommittedLogin();
+      }
+    }
     _sessionCleared = false;
     state = AuthState.authenticated(user);
     // 消し残しがあっても黙って通さない（`ComicLazApp` が SnackBar で 1 回知らせる）。
@@ -282,11 +319,17 @@ class AuthController extends _$AuthController {
   }
 
   Future<void> _endSession() async {
-    // 進行中の復元 / ログインの結果を無効にする。
+    // 進行中の復元 / ログインの結果を無効にする。確定していないログインは
+    // 戻さずに手放す（下で全部消す）。戻している最中なら、その書き込みが
+    // 消した後に入らないよう待つ。
     _generation++;
+    _uncommittedLogin = null;
+    final rollback = _rollback;
     // 印はトークンより先に書く（#15）。トークンを消した直後に落ちると、次の
     // 起動ではトークンも前のユーザーも無く、データだけが残ってしまう。
     await _markPurgePending(SessionPurgeScope.session);
+    if (!ref.mounted) return;
+    await rollback;
     if (!ref.mounted) return;
     try {
       await ref.read(authStoreProvider).clear();
@@ -426,14 +469,60 @@ class AuthController extends _$AuthController {
     }
   }
 
-  /// ログインの前に保存済みのトークンがあったか（読めなければ「あった」とみなす）。
-  Future<bool> _hasStoredToken() async {
+  /// ログイン前に保存されていた認証情報（読めないものは `null`）。
+  ///
+  /// `hadToken` はトークンがあったか（読めなければ「あった」とみなす）。
+  Future<_StoredCredentials> _readStoredCredentials() async {
+    final store = ref.read(authStoreProvider);
+    String? token;
+    var hadToken = true;
     try {
-      final token = await ref.read(authStoreProvider).readToken();
-      return token != null && token.isNotEmpty;
+      token = await store.readToken();
+      hadToken = token != null && token.isNotEmpty;
     } on Object catch (error) {
       debugPrint('[session] read previous token failed: $error');
-      return true;
+    }
+    User? user;
+    try {
+      user = await store.readUser();
+    } on Object catch (error) {
+      // 読めないユーザーは戻せない。戻したトークンで起動すれば
+      // 検証のときに保存し直される。
+      debugPrint('[session] read previous user failed: $error');
+    }
+    return (token: hadToken ? token : null, hadToken: hadToken, user: user);
+  }
+
+  /// 確定していないログインがあれば保存先を書く前の認証情報に戻し、戻し
+  /// 終わるまで待つ。
+  ///
+  /// dispose の後にも呼ばれるので `ref` を使わない（保存先はログインが控えた
+  /// ものを使う）。
+  Future<void> _settleUncommittedLogin() {
+    if (_uncommittedLogin case final pending?) {
+      _uncommittedLogin = null;
+      _rollback = _rollback.then(
+        (_) => _restoreCredentials(pending.store, pending.previous),
+      );
+    }
+    return _rollback;
+  }
+
+  /// 保存先をログイン前の認証情報に戻す。
+  ///
+  /// 先に全部消してから書き直す。戻す途中で失敗しても、新しいトークンが
+  /// 残る（前のユーザーと組になる）より、ログインし直してもらう方に倒す。
+  /// 失敗は握る（呼び出し側はログインの失敗そのものを投げる）。
+  static Future<void> _restoreCredentials(
+    AuthStore store,
+    _StoredCredentials previous,
+  ) async {
+    try {
+      await store.clear();
+      if (previous.token case final token?) await store.writeToken(token);
+      if (previous.user case final user?) await store.writeUser(user);
+    } on Object catch (error) {
+      debugPrint('[session] restore previous credentials failed: $error');
     }
   }
 
@@ -546,3 +635,13 @@ class AuthController extends _$AuthController {
   /// この処理の結果を捨てるべきか（dispose 済み / 後続のログイン・ログアウトが発生）。
   bool _isStale(int generation) => !ref.mounted || generation != _generation;
 }
+
+/// ログイン前に保存されていた認証情報の控え（[AuthController.login] で戻す）。
+typedef _StoredCredentials = ({String? token, bool hadToken, User? user});
+
+/// 保存先に書いたまま確定していないログイン（[AuthController.login]）。
+typedef _UncommittedLogin = ({
+  int generation,
+  AuthStore store,
+  _StoredCredentials previous,
+});
