@@ -157,10 +157,10 @@ class DownloadStore {
   /// 巻のディレクトリごと消す。
   Future<void> deleteFiles(int volumeId) async {
     final directory = volumeDirectory(volumeId);
-    if (!directory.existsSync()) return;
     try {
       await directory.delete(recursive: true);
     } on FileSystemException {
+      // 無い（PathNotFoundException）なら消すものが無いだけ。
       // 実体を消せなくても台帳は消す（次の取得で上書きされる）。
       // ここで投げると「削除できません」になり、ユーザーは何もできなくなる。
     }
@@ -172,10 +172,8 @@ class DownloadStore {
   /// すると、破棄の印（`SessionPurgeJournal`）が消えて前のユーザーの ZIP が
   /// 端末に残り続ける（#15）。
   Future<void> deleteAllFiles() async {
-    final directory = directories.downloads;
-    if (!directory.existsSync()) return;
     FileSystemException? firstError;
-    for (final entity in directory.listSync()) {
+    for (final entity in await _listOrEmpty(directories.downloads)) {
       try {
         await entity.delete(recursive: true);
       } on FileSystemException catch (error) {
@@ -187,8 +185,8 @@ class DownloadStore {
 
   /// 保存先を用意する。
   Future<void> ensureVolumeDirectory(int volumeId) async {
-    final directory = volumeDirectory(volumeId);
-    if (!directory.existsSync()) await directory.create(recursive: true);
+    // recursive: true はあっても成功する（先に有無を確かめる同期 I/O が要らない）。
+    await volumeDirectory(volumeId).create(recursive: true);
   }
 
   /// 同じ巻の**別世代**のファイルを消す（更新を落とし直したあとの掃除）。
@@ -196,14 +194,12 @@ class DownloadStore {
     required int volumeId,
     required int keepFilesVersion,
   }) async {
-    final directory = volumeDirectory(volumeId);
-    if (!directory.existsSync()) return;
     final keep = {
       '$keepFilesVersion.zip',
       stagingFilename(keepFilesVersion),
       '$keepFilesVersion.json',
     };
-    for (final entity in directory.listSync()) {
+    for (final entity in await _listOrEmpty(volumeDirectory(volumeId))) {
       if (entity is! File) continue;
       if (keep.contains(p.basename(entity.path))) continue;
       try {
@@ -292,11 +288,9 @@ class DownloadStore {
     required Map<int, VolumeDownload> ledger,
     required Set<String> liveStagingPaths,
   }) async {
-    final root = directories.downloads;
     try {
-      if (!root.existsSync()) return;
       final live = {for (final path in liveStagingPaths) p.normalize(path)};
-      for (final entity in root.listSync()) {
+      for (final entity in await _listOrEmpty(directories.downloads)) {
         if (entity is! Directory) continue;
         final volumeId = int.tryParse(p.basename(entity.path));
         // 数字でない名前は巻のディレクトリではないので触らない。
@@ -332,7 +326,7 @@ class DownloadStore {
         return;
       }
 
-      for (final entity in directory.listSync()) {
+      for (final entity in await _listOrEmpty(directory)) {
         if (entity is! File) continue;
         final name = p.basename(entity.path);
         if (!_isSweepable(name, row, liveHere, liveVersions)) continue;
@@ -362,6 +356,26 @@ class DownloadStore {
     return version != row?.filesVersion && !liveVersions.contains(version);
   }
 
+  /// [directory] の直下の一覧。ディレクトリが無ければ空（消すものが無い）。
+  ///
+  /// `listSync` は UI isolate を一覧が終わるまで止める（巻や孤児ファイルが
+  /// 多い端末のログアウト・起動時の照合でフレームが落ちる。#31）ので、非同期の
+  /// [Directory.list] を使う。先に全部を集めてから返すのは、`listSync` と同じく
+  /// 「一覧を取った時点の中身」に対して消す / 残すを決めるため（列挙しながら
+  /// 消すと、OS によっては一覧の続きが乱れる）。
+  ///
+  /// 無い以外の失敗（権限など）はそのまま投げる。ログアウトの破棄では握ると
+  /// 破棄の印が消えて二度とやり直されない（#15）。
+  static Future<List<FileSystemEntity>> _listOrEmpty(
+    Directory directory,
+  ) async {
+    try {
+      return await directory.list().toList();
+    } on PathNotFoundException {
+      return const [];
+    }
+  }
+
   /// `{filesVersion}{suffix}` の形なら filesVersion、違えば `null`。
   static int? _versionOf(String name, String suffix) {
     if (!name.endsWith(suffix)) return null;
@@ -383,8 +397,8 @@ class DownloadStore {
     required int filesVersion,
   }) async {
     final file = manifestFile(volumeId: volumeId, filesVersion: filesVersion);
-    if (!file.existsSync()) return null;
     try {
+      // 無ければ PathNotFoundException になり、下で null にする。
       final json = jsonDecode(await file.readAsString());
       if (json is! Map<String, dynamic>) return null;
       return VolumeManifest.fromJson(json);

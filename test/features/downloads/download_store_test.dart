@@ -211,6 +211,73 @@ void main() {
       await store.deleteAllFiles();
       expect(second.existsSync(), isFalse);
     });
+
+    DownloadStore storeWithoutDownloads() => DownloadStore(
+      database: cache.database,
+      directories: AppDirectories(
+        support: Directory(p.join(cache.directories.support.path, 'nope')),
+        cache: cache.directories.cache,
+      ),
+    );
+
+    test('ダウンロード領域がまだ無ければ、全削除・別世代の掃除・巻の削除は何もせず終わる', () async {
+      // 一度もダウンロードしていない端末でもログアウトの破棄は走る。「無い」を
+      // 失敗にすると破棄の印が残り、起動のたびにやり直しになる（#15）。
+      final missing = storeWithoutDownloads();
+
+      await expectLater(missing.deleteAllFiles(), completes);
+      await expectLater(
+        missing.deleteOtherVersions(volumeId: 1, keepFilesVersion: 1),
+        completes,
+      );
+      await expectLater(missing.deleteFiles(1), completes);
+      expect(await missing.readManifest(volumeId: 1, filesVersion: 1), isNull);
+    });
+
+    test('ダウンロード領域が一覧できないときの全削除は投げる（黙って成功にしない）', () async {
+      // 一覧を非同期にしても、「無い」以外の失敗を握ると破棄の印が消え、
+      // 前のユーザーの ZIP が端末に残り続ける（#15）。ディレクトリの代わりに
+      // ファイルを置いて、一覧そのものを失敗させる。
+      final broken = storeWithoutDownloads();
+      final support = broken.directories.support..createSync(recursive: true);
+      File(p.join(support.path, 'downloads')).writeAsStringSync('x');
+
+      await expectLater(
+        broken.deleteAllFiles(),
+        throwsA(isA<FileSystemException>()),
+      );
+    });
+
+    test('ディレクトリが無くても巻の保存先を作れる（同じ巻をもう一度作っても失敗しない）', () async {
+      await store.ensureVolumeDirectory(4);
+      await store.ensureVolumeDirectory(4);
+
+      expect(store.volumeDirectory(4).existsSync(), isTrue);
+    });
+
+    test('取り直しの後は残す世代のファイルだけ残し、他の巻には触らない', () async {
+      // 更新を落とし直したあとの掃除。残す世代の ZIP / 書きかけ / マニフェストを
+      // 消すとオフラインで読めなくなる（判断は一覧を非同期にしても変えない）。
+      final keepZip = touch(store.archiveFile(volumeId: 1, filesVersion: 7));
+      final keepStaging = touch(
+        store.stagingFile(volumeId: 1, filesVersion: 7),
+      );
+      final keepJson = touch(fileIn(1, '7.json'));
+      final oldZip = touch(store.archiveFile(volumeId: 1, filesVersion: 6));
+      final oldJson = touch(fileIn(1, '6.json'));
+      final otherVolume = touch(
+        store.archiveFile(volumeId: 2, filesVersion: 6),
+      );
+
+      await store.deleteOtherVersions(volumeId: 1, keepFilesVersion: 7);
+
+      expect(keepZip.existsSync(), isTrue);
+      expect(keepStaging.existsSync(), isTrue);
+      expect(keepJson.existsSync(), isTrue);
+      expect(oldZip.existsSync(), isFalse);
+      expect(oldJson.existsSync(), isFalse);
+      expect(otherVolume.existsSync(), isTrue);
+    });
   });
 
   test('確定時刻は書き直しても進めない（自動削除の時計が完了行の保存のたびに振り出しへ戻らない）', () async {

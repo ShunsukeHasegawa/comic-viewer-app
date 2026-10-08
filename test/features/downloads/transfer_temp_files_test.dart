@@ -142,4 +142,14 @@ void main() {
 
     expect(await deleteTransferTempFiles([missing]), 0);
   });
+
+  test('無いディレクトリがあっても、続くディレクトリの書きかけは消す', () async {
+    // Android の support / cache をまとめて渡す。片方が無いだけで掃除を
+    // やめると、もう片方の書きかけ（巻 1 冊ぶん）が溜まり続ける。
+    final missing = Directory(p.join(support.path, 'missing'));
+    final orphan = write('${transferTempFilePrefix}444');
+
+    expect(await deleteTransferTempFiles([missing, support]), 1);
+    expect(orphan.existsSync(), isFalse);
+  });
 }

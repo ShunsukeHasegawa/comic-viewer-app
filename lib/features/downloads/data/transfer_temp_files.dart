@@ -45,11 +45,14 @@ Future<int> deleteTransferTempFiles(
       ? null
       : (now ?? DateTime.now()).subtract(olderThan);
   var deleted = 0;
+  // 同期の一覧 / 更新時刻は support 直下（孤児が多いと数百件）を読み終わるまで
+  // UI isolate を止めるので、非同期で行う（#31）。
   for (final directory in directories) {
-    if (!directory.existsSync()) continue;
     final List<FileSystemEntity> entries;
     try {
-      entries = directory.listSync(followLinks: false);
+      entries = await directory.list(followLinks: false).toList();
+    } on PathNotFoundException {
+      continue;
     } on FileSystemException catch (error) {
       debugPrint('[transfer] temp dir list failed: $error');
       continue;
@@ -59,8 +62,13 @@ Future<int> deleteTransferTempFiles(
       if (!p.basename(entity.path).startsWith(transferTempFilePrefix)) continue;
       if (keep.contains(p.normalize(entity.path))) continue;
       try {
-        if (cutoff != null && entity.lastModifiedSync().isAfter(cutoff)) {
-          continue;
+        if (cutoff != null) {
+          // File.lastModified() は avoid_slow_async_io に掛かるので FileStat で
+          // 読む。一覧の後で消えていれば（転送の完了で移動した等）残す側に倒す
+          // （lastModifiedSync が投げて飛ばしていたのと同じ）。
+          final stat = await FileStat.stat(entity.path);
+          if (stat.type == FileSystemEntityType.notFound) continue;
+          if (stat.modified.isAfter(cutoff)) continue;
         }
         await entity.delete();
         deleted++;
