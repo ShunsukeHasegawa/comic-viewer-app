@@ -98,7 +98,7 @@ class ResumeReadingDialog extends ConsumerWidget {
 
   final OpenVolume volume;
 
-  static const _thumbnailWidth = 72.0;
+  static const _thumbnailWidth = 64.0;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -117,53 +117,103 @@ class ResumeReadingDialog extends ConsumerWidget {
         if (v.id == volume.volumeId) v.thumbnail,
     ].firstOrNull;
 
-    return AlertDialog(
-      title: const Text('続きを読みますか？'),
-      content: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: _thumbnailWidth,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(6),
-              child: ThumbnailImage(apiUrl: thumbnail, aspectRatio: 2 / 3),
-            ),
-          ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
+    // AlertDialog は使わない。本文の Column が高さいっぱいに伸び、テーマで
+    // 横幅いっぱいになる FilledButton がボタンを縦に積んでしまう。
+    return Dialog(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('続きを読みますか？', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 16),
+            Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  volume.title,
-                  style: theme.textTheme.titleMedium,
-                  maxLines: 3,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  '${volume.volume} 巻',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
+                SizedBox(
+                  width: _thumbnailWidth,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: ThumbnailImage(
+                      apiUrl: thumbnail,
+                      aspectRatio: 2 / 3,
+                    ),
                   ),
                 ),
-                const SizedBox(height: 12),
-                Text('前回はこの巻を読んでいる途中でした。', style: theme.textTheme.bodySmall),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        volume.title,
+                        style: theme.textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ),
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${volume.volume} 巻',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.history,
+                            size: 14,
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                          const SizedBox(width: 4),
+                          Expanded(
+                            child: Text(
+                              '前回読んでいた途中です',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
               ],
             ),
-          ),
-        ],
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size.fromHeight(44),
+                    ),
+                    onPressed: () => Navigator.of(context).pop(false),
+                    child: const Text('閉じる'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size.fromHeight(44),
+                    ),
+                    onPressed: () => Navigator.of(context).pop(true),
+                    icon: const Icon(Icons.play_arrow_rounded),
+                    label: const Text('続きを読む'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(false),
-          child: const Text('閉じる'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.of(context).pop(true),
-          child: const Text('続きを読む'),
-        ),
-      ],
     );
   }
 }

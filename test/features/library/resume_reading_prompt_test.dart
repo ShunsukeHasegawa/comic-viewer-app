@@ -96,6 +96,23 @@ void main() {
     );
   });
 
+  testWidgets('ダイアログは中身の高さに収め、ボタンは横に並べる（画面いっぱいに伸ばさない）', (tester) async {
+    await _pumpApp(tester, InMemoryOpenVolumeStore(_openVolume));
+
+    final screen = tester.getSize(find.byType(MaterialApp));
+    // Dialog 自体は画面全体を占める。見えている板（Material）の大きさを測る。
+    final dialog = tester.getSize(
+      find
+          .descendant(of: find.byType(Dialog), matching: find.byType(Material))
+          .first,
+    );
+    expect(dialog.height, lessThan(screen.height / 2));
+    expect(
+      tester.getCenter(find.text('閉じる')).dy,
+      tester.getCenter(find.text('続きを読む')).dy,
+    );
+  });
+
   testWidgets('控えが無ければ尋ねない（閉じてから終了したときに毎回出さない）', (tester) async {
     await _pumpApp(tester, InMemoryOpenVolumeStore());
 
